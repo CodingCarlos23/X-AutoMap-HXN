@@ -27,13 +27,13 @@ warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message
 
 ## CREATING TILED CLIENT FOR NOW HERE GLOBALLY
 
-class RemoteSegmentation:
+class RemoteSegmentationSender:
     def __init__(self):
     
         from tiled.client import from_uri
 
         self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.writer = self.client['tst/sandbox/synaps']
+        self.writer = self.client['tst/sandbox/synaps/reconstructions']
         self.segapp_elems = []
 
     def clear_cache(self):
@@ -45,10 +45,13 @@ class RemoteSegmentation:
     def get_cache(self):
         return self.segapp_elems
     
+    def cache_size(self):
+        return len(self.segapp_elems)
+    
     def write(self, data, key=None):
         """Write numpy array data to remote handler."""
         try:
-            result = self.writer.write_array(data, key=key)
+            result = self.writer.write_array(data, key=key, access_tags=['tst_sandbox'])
             print(f"[REMOTE] Data written with key: {key}, result: {result}" if key else f"[REMOTE] Data written, result: {result}")
             return result
         except Exception as e:
@@ -73,8 +76,43 @@ class RemoteSegmentation:
             traceback.print_exc()
             return None
 
+class RemoteSegmentationReceiver:
+    def __init__(self, num_elements):
+    
+        from tiled.client import from_uri
+
+        self.client = from_uri('https://tiled.nsls2.bnl.gov')
+        self.reader = self.client['tst/sandbox/synaps/segmentations']
+        self.keys = []
+        self.values = []
+        self.num_elements = num_elements
+        self.count_connect = 0
+
+    def subscribe(self):
+        self.sub = self.reader.subscribe()
+        self.sub.child_created.add_callback(self.get_keys)
+        print("Listening for updates. Use Ctrl+C to stop....")
+        self.sub.start()
+
+    def get_keys(self, data):
+        print(f"Received Key : {data}")
+        #self.keys.append(data)
+        sub = data.child().subscribe()
+        sub.new_data.add_callback(self.get_data)
+        sub.start_in_thread(start=1)
+        #sub1.disconnect()
+
+    def get_data(self, data):
+        print(f"count num : {self.count_connect}")
+        #print(f"Received Data : {data}")
+        #self.values.append(data)
+        self.count_connect += 1 
+        if self.count_connect == self.num_elements:
+            self.sub.disconnect()
+
+
 # Create a global instance of this class
-remote_handler = RemoteSegmentation() 
+remote_sender = RemoteSegmentationSender() 
 
 # # make if else for rea_state
 # try:
@@ -1116,14 +1154,14 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
     print(f"[REMOTE] fetching scalar {norm} values done")
     
     for elem in sorted(elem_list):
-        if elem not in remote_handler.get_cache():
-            remote_handler.append_cache(elem)
+        if elem not in remote_sender.get_cache():
+            remote_sender.append_cache(elem)
             roi_keys = [f'Det{chan}_{elem}' for chan in channels]
             spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
             if norm is not None:
                 spectrum = spectrum / scalar
             xrf_img = spectrum.reshape(scan_dim)
-            remote_handler.write(xrf_img)
+            remote_sender.write(xrf_img)
 
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
@@ -1825,6 +1863,10 @@ def load_and_queue(json_path, real_test, target_id=None, remote_seg=False):
     if remote_seg:
         print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         #placeholder for Seher
+        remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
+        remote_receiver.subscribe()
+
+        print("\n[ANALYSIS] Remote segmentation results received ...")
         results_dict = {} #remote.recieve results
         np_array = np.array([]) #remote.recieve results
         scan_metadata = {} #remote.recieve results
