@@ -1,3 +1,4 @@
+from curses import meta
 import os
 import sys
 import re
@@ -24,6 +25,8 @@ from hxntools.CompositeBroker import db
 from bluesky_queueserver_api import BPlan
 from bluesky_queueserver_api.zmq import REManagerAPI
 RM = REManagerAPI()
+from tiled.client import from_uri
+c = from_uri('https://tiled.nsls2.bnl.gov')
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -1166,6 +1169,51 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
             xrf_img = spectrum.reshape(scan_dim)
             remote_sender.write(xrf_img)
 
+def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
+    """
+    Export XRF data to remote handler for remote segmentation.
+    
+    Args:
+        scan_id: Scan ID to export
+        norm: Normalization channel (default: 'sclr1_ch4')
+        elem_list: List of elements to export
+        real_test: 0 for test mode (skip export), 1 for real export
+    """
+
+    container = c["tst/sandbox/synaps/reconstructions"]
+    if real_test == 0:
+        print("[EXPORT] Skipping remote XRF export in test mode.")
+        return
+
+    hdr = db[int(scan_id)]
+    scan_id = hdr.start["scan_id"]
+
+    meta = export_scan_params(sid=scan_id, real_test=real_test)
+
+    scan_container = container.create_container(f"automap_{scan_id}", 
+                                                metadata=meta, 
+                                                access_tags=["synaps_project"])
+    
+    channels = [1, 2, 3]
+    print(f"[REMOTE] {elem_list = }")
+    print(f"[REMOTE] fetching XRF ROIs")
+    scan_dim = _get_flyscan_dimensions(hdr)
+    print(f"[REMOTE] fetching scalar values")
+
+    scalar = np.array(list(hdr.data(norm))).squeeze()
+    print(f"[REMOTE] fetching scalar {norm} values done")
+
+    
+    for elem in sorted(elem_list):
+        if elem not in remote_sender.get_cache():
+            remote_sender.append_cache(elem)
+            roi_keys = [f'Det{chan}_{elem}' for chan in channels]
+            spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
+            if norm is not None:
+                spectrum = spectrum / scalar
+            xrf_img = spectrum.reshape(scan_dim)
+            scan_container.write_array(xrf_img, key=elem, access_tags=["synaps_project"])
+            #remote_sender.write(xrf_img)
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
     """
