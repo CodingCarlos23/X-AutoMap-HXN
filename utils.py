@@ -1865,16 +1865,18 @@ def load_and_queue(json_path, real_test, target_id=None,
     
     # B. Analyze
     if remote_seg:
-        print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
-        #placeholder for Seher
-        remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
-        remote_receiver.subscribe()
+        print("no reciever implemented yet, skipping remote analysis...")
+        pass 
+        # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
+        # #placeholder for Seher
+        # remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
+        # remote_receiver.subscribe()
 
-        print("\n[ANALYSIS] Remote segmentation results received ...")
-        results_dict = {} #remote.recieve results
-        np_array = np.array([]) #remote.recieve results
-        scan_metadata = {} #remote.recieve results
-        analyze_data_remote(results_dict, np_array, scan_metadata)
+        # print("\n[ANALYSIS] Remote segmentation results received ...")
+        # results_dict = {} #remote.recieve results
+        # np_array = np.array([]) #remote.recieve results
+        # scan_metadata = {} #remote.recieve results
+        # analyze_data_remote(results_dict, np_array, scan_metadata)
     else:
         analyze_data_local(**params)
 
