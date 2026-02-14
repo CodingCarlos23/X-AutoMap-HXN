@@ -21,6 +21,9 @@ import time
 import pandas as pd
 
 from hxntools.CompositeBroker import db
+from bluesky_queueserver_api import BPlan
+from bluesky_queueserver_api.zmq import REManagerAPI
+RM = REManagerAPI()
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -51,7 +54,7 @@ class RemoteSegmentationSender:
     def write(self, data, key=None):
         """Write numpy array data to remote handler."""
         try:
-            result = self.writer.write_array(data, key=key, access_tags=['tst_sandbox'])
+            result = self.writer.write_array(data, key=key, access_tags=['synaps_project'])
             print(f"[REMOTE] Data written with key: {key}, result: {result}" if key else f"[REMOTE] Data written, result: {result}")
             return result
         except Exception as e:
@@ -67,7 +70,7 @@ class RemoteSegmentationSender:
             # Convert dict to JSON string, then to numpy array of bytes for storage
             json_str = json.dumps(metadata_dict, default=str)  # default=str handles non-serializable objects
             json_bytes = np.array(list(json_str.encode('utf-8')), dtype=np.uint8)
-            result = self.writer.write_array(json_bytes, key=key)
+            result = self.writer.write_array(json_bytes, key=key, access_tags=['synaps_project'])
             print(f"[REMOTE] Metadata written with key: {key}, result: {result}" if key else f"[REMOTE] Metadata written, result: {result}")
             return result
         except Exception as e:
