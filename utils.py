@@ -1366,7 +1366,7 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
     print(f"[BATCH] Completed batch export: {len(results)} scans processed")
     return results
 
-def fly2d_qserver_scan_export(label,
+def _fly2d_qserver_scan_export(label,
                            dets,
                            mot1, mot1_s, mot1_e, mot1_n,
                            mot2, mot2_s, mot2_e, mot2_n,
@@ -1489,7 +1489,7 @@ def send_fly2d_to_queue(label,
                           pos_save_to or ""#,
                         #   real_test
                           ))
-    print("Coarse scan done")
+    print("Coarse scan sent to queue")
 
 def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
     """
