@@ -1812,7 +1812,8 @@ def run_fine_scans(is_real):
     else:
         print("[SIM] Would check RM.status() and start queue.")
 
-def load_and_queue(json_path, real_test, target_id=None, remote_seg=False):
+def load_and_queue(json_path, real_test, target_id=None, 
+                   remote_seg=False, proceed_fine_scans=True):
     
     # 0) Clear caches
     if 'remote_handler' in globals():
@@ -1873,6 +1874,10 @@ def load_and_queue(json_path, real_test, target_id=None, remote_seg=False):
         analyze_data_remote(results_dict, np_array, scan_metadata)
     else:
         analyze_data_local(**params)
+
+    if not proceed_fine_scans:
+        print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
+        return
     
     # C. Queue (Will skip if mode != 1)
     submit_fine_scans_to_queue(**params)
