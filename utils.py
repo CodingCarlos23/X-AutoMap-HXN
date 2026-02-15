@@ -1204,7 +1204,9 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
 
     meta = export_scan_params(sid=scan_id, real_test=real_test)
 
-    scan_container = container.create_container(f"automap_{scan_id}", 
+    import time
+    timestamp = int(time.time())
+    scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
                                                 access_tags=["synaps_project"])
     
@@ -1219,14 +1221,16 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
 
     
     for elem in sorted(elem_list):
-        remote_sender.append_cache(elem)
-        roi_keys = [f'Det{chan}_{elem}' for chan in channels]
-        spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
-        if norm is not None:
-            spectrum = spectrum / scalar
-        xrf_img = spectrum.reshape(scan_dim)
-        scan_container.write_array(xrf_img, key=elem, access_tags=["synaps_project"])
-        print(f"[REMOTE] Exported element {elem} for scan {scan_id}")
+        try:
+            roi_keys = [f'Det{chan}_{elem}' for chan in channels]
+            spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
+            if norm is not None:
+                spectrum = spectrum / scalar
+            xrf_img = spectrum.reshape(scan_dim)
+            result = scan_container.write_array(xrf_img, key=elem, access_tags=["synaps_project"])
+            print(f"[REMOTE] Successfully exported element {elem} for scan {scan_id}, result: {result}")
+        except Exception as e:
+            print(f"[REMOTE ERROR] Failed to export element {elem} for scan {scan_id}: {e}")
         #remote_sender.write(xrf_img)
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
