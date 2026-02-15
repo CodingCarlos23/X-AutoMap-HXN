@@ -168,8 +168,10 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
         with open(file_path, "w") as f:
             json.dump(scan_data, f, indent=4)
 
-def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test, 
-                                    remote_seg=False, proceed_with_fine_scan=False):
+def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, 
+                                    real_test, 
+                                    remote_seg=True, target_id=None, 
+                                    proceed_with_fine_scan=False):
     """
     Performs coarse scan using only parameters from beamline_params.
     The output directory path is constructed and can be used later.
@@ -204,7 +206,11 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test
 
     yield from piezos_to_zero()
     
-    load_and_queue(coarse_scan_path, real_test, remote_seg, proceed_with_fine_scan)
+    load_and_queue(coarse_scan_path, 
+                   real_test, 
+                   target_id=target_id, 
+                   remote_seg=remote_seg, 
+                   proceed_fine_scans=proceed_with_fine_scan)
 
 def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test):
     """
