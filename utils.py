@@ -1148,6 +1148,34 @@ def _get_flyscan_dimensions(hdr):
     else:
         raise ValueError("Unknown scan type for _get_flyscan_dimensions")
 
+def _pad_scalar_to_expected_length(scalar, expected_length):
+    """
+    Pad scalar array to expected length using the last collected point.
+    Handles cases where scalar data has dropped points.
+    
+    Args:
+        scalar: numpy array of scalar values
+        expected_length: expected total number of points
+    
+    Returns:
+        padded_scalar: numpy array padded to expected length
+    """
+    if len(scalar) == expected_length:
+        return scalar
+    
+    if len(scalar) > expected_length:
+        print(f"[SCALAR] Warning: scalar length ({len(scalar)}) > expected ({expected_length}), truncating")
+        return scalar[:expected_length]
+    
+    # Pad with last point
+    padding_needed = expected_length - len(scalar)
+    last_point = scalar[-1] if len(scalar) > 0 else 1.0  # fallback to 1.0 if empty
+    padded_values = np.full(padding_needed, last_point)
+    padded_scalar = np.concatenate([scalar, padded_values])
+    
+    print(f"[SCALAR] Padded scalar from {len(scalar)} to {len(padded_scalar)} points using last value {last_point}")
+    return padded_scalar
+
 def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
     """
     Export XRF data to remote handler for remote segmentation.
@@ -1174,13 +1202,20 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
     scalar = np.array(list(hdr.data(norm))).squeeze()
     print(f"[REMOTE] fetching scalar {norm} values done")
     
+    # Calculate expected length from scan dimensions
+    expected_length = np.prod(scan_dim)
+    
     for elem in sorted(elem_list):
         if elem not in remote_sender.get_cache():
             remote_sender.append_cache(elem)
             roi_keys = [f'Det{chan}_{elem}' for chan in channels]
             spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
+            
+            # Pad scalar if needed to match spectrum length
             if norm is not None:
-                spectrum = spectrum / scalar
+                padded_scalar = _pad_scalar_to_expected_length(scalar, len(spectrum))
+                spectrum = spectrum / padded_scalar
+            
             xrf_img = spectrum.reshape(scan_dim)
             remote_sender.write(xrf_img)
 
@@ -1220,13 +1255,19 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
     scalar = np.array(list(hdr.data(norm))).squeeze()
     print(f"[REMOTE] fetching scalar {norm} values done")
 
+    # Calculate expected length from scan dimensions
+    expected_length = np.prod(scan_dim)
     
     for elem in sorted(elem_list):
         try:
             roi_keys = [f'Det{chan}_{elem}' for chan in channels]
             spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
+            
+            # Pad scalar if needed to match spectrum length
             if norm is not None:
-                spectrum = spectrum / scalar
+                padded_scalar = _pad_scalar_to_expected_length(scalar, len(spectrum))
+                spectrum = spectrum / padded_scalar
+            
             xrf_img = spectrum.reshape(scan_dim)
             result = scan_container.write_array(xrf_img, key=elem, access_tags=["synaps_project"])
             print(f"[REMOTE] Successfully exported element {elem} for scan {scan_id}, result: {result}")
@@ -1261,11 +1302,18 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test
     scalar = np.array(list(hdr.data(norm))).squeeze()
     print(f"[LOCAL] fetching scalar {norm} values done")
     
+    # Calculate expected length from scan dimensions
+    expected_length = np.prod(scan_dim)
+    
     for elem in sorted(elem_list):
         roi_keys = [f'Det{chan}_{elem}' for chan in channels]
         spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
+        
+        # Pad scalar if needed to match spectrum length
         if norm is not None:
-            spectrum = spectrum / scalar
+            padded_scalar = _pad_scalar_to_expected_length(scalar, len(spectrum))
+            spectrum = spectrum / padded_scalar
+        
         xrf_img = spectrum.reshape(scan_dim)
         tiff.imwrite(os.path.join(wd, f"scan_{scan_id}_{elem}.tiff"), xrf_img)
 
