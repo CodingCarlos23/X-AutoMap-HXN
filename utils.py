@@ -2165,7 +2165,8 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             
             # Using bps.movr to move relative to the STARTING point of the whole scan
             # We calculate the move needed to get to the next grid point
-            RM.item_add(BPlan("bps.movr", mot_x, x_rel, mot_y, y_rel))
+            RM.item_add(BPlan("move_relative", mot_x, x_rel))
+            RM.item_add(BPlan("move_relative", mot_y, y_rel))
             
 
             # Execute the fly scan
@@ -2178,10 +2179,11 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             )
 
             # Reset internal fine stages to zero before next move
-            RM.item_add(BPlan("bps.mov", fine_x, 0, fine_y, 0))
+            RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
             
             # Return to the local "origin" so the next loop's movr is accurate
-            RM.item_add(BPlan("bps.movr", mot_x, -x_rel, mot_y, -y_rel))
+            RM.item_add(BPlan("move_relative", mot_x, -x_rel))
+            RM.item_add(BPlan("move_relative", mot_y, -y_rel))
             RM.queue_start()
 
     save_page()
