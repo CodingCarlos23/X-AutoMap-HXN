@@ -14,6 +14,7 @@ import traceback as trackback
 import inspect
 from skimage.measure import shannon_entropy
 import warnings
+import tqdm
 
 import cv2
 import numpy as np
@@ -2131,8 +2132,11 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
     # 2. Generate the relative step lists
     # This creates a list of positions starting at 0 up to the length
-    x_steps = np.arange(0, xlen + grid_step, grid_step)
-    y_steps = np.arange(0, ylen + grid_step, grid_step)
+    x_steps_raw = np.arange(0, xlen + grid_step, grid_step)
+    y_steps_raw = np.arange(0, ylen + grid_step, grid_step)
+
+    x_steps = x_steps_raw.tolist()
+    y_steps = y_steps_raw.tolist()
 
     print(f"Grid Setup: {len(x_steps)} x {len(y_steps)} tiles.")
     print(f"Total area: {xlen}um x {ylen}um using {grid_step}um steps.")
