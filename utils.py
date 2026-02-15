@@ -2185,5 +2185,6 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             RM.item_add(BPlan("move_relative", mot_x, -x_rel))
             RM.item_add(BPlan("move_relative", mot_y, -y_rel))
             RM.queue_start()
+            wait_for_queue_done()
 
     save_page()
