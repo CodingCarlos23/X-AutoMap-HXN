@@ -1967,8 +1967,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
     """ Usage <mosaic_overlap_scan_auto(dets=dets_fast, ylen=100, xlen=100, overlap_per=5, dwell=0.01, step_size=250, plot_elem=["Cr"], mll=False, 
     beamline_params=beamline_params, initial_scan_path=initial_scan_path)>"""
 
-    if dets is None:
-        dets = dets_fast
+    # if dets is None:
+    #     dets = dets_fast
 
     i0_init = sclr2_ch2.get()
 
