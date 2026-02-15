@@ -168,7 +168,8 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
         with open(file_path, "w") as f:
             json.dump(scan_data, f, indent=4)
 
-def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test):
+def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test, 
+                                    remote_seg=False, proceed_with_fine_scan=False):
     """
     Performs coarse scan using only parameters from beamline_params.
     The output directory path is constructed and can be used later.
@@ -197,7 +198,7 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test
 
     yield from piezos_to_zero()
     
-    load_and_queue(coarse_scan_path, real_test)
+    load_and_queue(coarse_scan_path, real_test, remote_seg, proceed_with_fine_scan)
 
 def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test):
     """
@@ -1947,7 +1948,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                         step_size = 250, plot_elem = ["Cr"],mll = False, beamline_params=None, initial_scan_path=None):
     
 
-    """ Usage <mosaic_overlap_scan([fs, xspress3, eiger2], dwell=0.01, plot_elem=['Au_L'], mll=True)"""
+    """ Usage <mosaic_overlap_scan_auto(dets=dets_fast, ylen=100, xlen=100, overlap_per=5, dwell=0.01, step_size=250, plot_elem=["Cr"], mll=False, 
+    beamline_params=beamline_params, initial_scan_path=initial_scan_path)>"""
 
     if dets is None:
         dets = dets_fast
