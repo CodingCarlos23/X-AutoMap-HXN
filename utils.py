@@ -2035,16 +2035,16 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
 
         if mll:
 
-            RM.item_add(BPlan("bps.movr", dsy, ylen_updated/-2))
-            RM.item_add(BPlan("bps.movr", dsx, xlen_updated/-2))
+            RM.item_add(BPlan("bps.movr", "dsy", ylen_updated/-2))
+            RM.item_add(BPlan("bps.movr", "dsx", xlen_updated/-2))
             
             X_position_abs = dsx.position+(X_position)
             Y_position_abs = dsy.position+(Y_position)
 
 
         else:
-            RM.item_add(BPlan("bps.movr", smary, ylen_updated/-2))
-            RM.item_add(BPlan("bps.movr", smarx, xlen_updated/-2))
+            RM.item_add(BPlan("bps.movr", "smary", ylen_updated/-2))
+            RM.item_add(BPlan("bps.movr", "smarx", xlen_updated/-2))
             
             X_position_abs = smarx.position+(X_position)
             Y_position_abs = smary.position+(Y_position)
@@ -2066,8 +2066,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
 
                         print(i,j)
 
-                        RM.item_add(BPlan("bps.mov", dsy, i))
-                        RM.item_add(BPlan("bps.mov", dsx, j))
+                        RM.item_add(BPlan("bps.mov", "dsy", i))
+                        RM.item_add(BPlan("bps.mov", "dsx", j))
                         
                         # yield from fly2dpd(dets,dssx,-1*fly_dim,fly_dim,num_steps,dssy,-1*fly_dim,fly_dim,num_steps,dwell)
                         headless_send_queue_coarse_scan(beamline_params, 
@@ -2077,16 +2077,16 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                                                         proceed_with_fine_scan=followup_fine_scan)
 
                         RM.item_add(BPlan("bps.sleep", 3))
-                        RM.item_add(BPlan("bps.mov", dssx, 0, dssy, 0))
+                        RM.item_add(BPlan("bps.mov", "dssx", 0, "dssy", 0))
                         #insert_xrf_map_to_pdf(-1,plot_elem,'dsx')
-                        RM.item_add(BPlan("bps.mov", dsx, dsx_i))
-                        RM.item_add(BPlan("bps.mov", dsy, dsy_i))
+                        RM.item_add(BPlan("bps.mov", "dsx", dsx_i))
+                        RM.item_add(BPlan("bps.mov", "dsy", dsy_i))
                         
 
                     else:
                         print(f"{fly_dim = }")
-                        RM.item_add(BPlan("bps.mov", smary, i))
-                        RM.item_add(BPlan("bps.mov", smarx, j))
+                        RM.item_add(BPlan("bps.mov", "smary", i))
+                        RM.item_add(BPlan("bps.mov", "smarx", j))
                         
                         # yield from fly2dpd(dets, zpssx,-1*fly_dim,fly_dim,num_steps,zpssy, -1*fly_dim,fly_dim,num_steps,dwell)
                         headless_send_queue_coarse_scan(beamline_params, 
@@ -2096,7 +2096,7 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                                                         proceed_with_fine_scan=followup_fine_scan)
 
                         RM.item_add(BPlan("bps.sleep", 1))
-                        RM.item_add(BPlan("bps.mov", zpssx, 0, zpssy, 0))
+                        RM.item_add(BPlan("bps.mov", "zpssx", 0, "zpssy", 0))
                         
 
                         #try:
@@ -2106,8 +2106,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                             #pass
 
 
-                        RM.item_add(BPlan("bps.mov", smarx, smarx_i))
-                        RM.item_add(BPlan("bps.mov", smary, smary_i))
+                        RM.item_add(BPlan("bps.mov", "smarx", smarx_i))
+                        RM.item_add(BPlan("bps.mov", "smary", smary_i))
                     RM.queue_start()
         save_page()
 
@@ -2118,3 +2118,66 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
 
     else:
         return
+    
+
+def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
+                         step_size = 250, plot_elem = ["Cr"], mll = False, 
+                         beamline_params=None, initial_scan_path=None, 
+                         remote_seg=True, followup_fine_scan=False):
+
+    # 1. Define the step size for the mosaic grid
+    # Since you requested 25 um steps for the grid iteration:
+    grid_step = 25 
+
+    # 2. Generate the relative step lists
+    # This creates a list of positions starting at 0 up to the length
+    x_steps = np.arange(0, xlen + grid_step, grid_step)
+    y_steps = np.arange(0, ylen + grid_step, grid_step)
+
+    print(f"Grid Setup: {len(x_steps)} x {len(y_steps)} tiles.")
+    print(f"Total area: {xlen}um x {ylen}um using {grid_step}um steps.")
+
+    # Calculate estimated time (keeping your original logic)
+    num_steps_fly = round(25 * 1000 / step_size) # internal fly scan resolution
+    fly_time = (num_steps_fly**2) * dwell * 2
+    total_time = (fly_time * len(x_steps) * len(y_steps)) / 60
+    
+
+    # Select motors based on MLL flag
+    mot_x = "dsx" if mll else "smarx"
+    mot_y = "dsy" if mll else "smary"
+    fine_x = "dssx" if mll else "zpssx"
+    fine_y = "dssy" if mll else "zpssy"
+
+    # 3. Iterate over the relative steps
+    for y_rel in tqdm.tqdm(y_steps, desc="Y-axis"):
+        for x_rel in tqdm.tqdm(x_steps, desc="X-axis"):
+            
+            # Move motors relatively (movr) from the CURRENT position to the next step
+            # Note: We use absolute moves to specific offsets for better trajectory control
+            # but we define those offsets relative to where the script STARTED.
+            
+            print(f"Moving to relative position: X={x_rel}, Y={y_rel}")
+            
+            # Using bps.movr to move relative to the STARTING point of the whole scan
+            # We calculate the move needed to get to the next grid point
+            RM.item_add(BPlan("bps.movr", mot_x, x_rel, mot_y, y_rel))
+            
+
+            # Execute the fly scan
+            headless_send_queue_coarse_scan(
+                beamline_params, 
+                initial_scan_path, 
+                real_test=1, 
+                remote_seg=remote_seg, 
+                proceed_with_fine_scan=followup_fine_scan
+            )
+
+            # Reset internal fine stages to zero before next move
+            RM.item_add(BPlan("bps.mov", fine_x, 0, fine_y, 0))
+            
+            # Return to the local "origin" so the next loop's movr is accurate
+            RM.item_add(BPlan("bps.movr", mot_x, -x_rel, mot_y, -y_rel))
+            RM.queue_start()
+
+    save_page()
