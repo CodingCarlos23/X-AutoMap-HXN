@@ -204,7 +204,7 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path,
     
     roi = {x_motor: cx, y_motor: cy}
 
-    yield from piezos_to_zero()
+    RM.item_execute(BPlan("piezos_to_zero"))
     
     load_and_queue(coarse_scan_path, 
                    real_test, 
@@ -2026,19 +2026,19 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
         first_sid = db[-1].start["scan_id"]+1
 
         if sclr2_ch2.get() < i0_init*0.9:
-            yield from peak_the_flux()
+            RM.item_execute(BPlan("peak_the_flux"))
 
         if mll:
 
-            yield from bps.movr(dsy, ylen_updated/-2)
-            yield from bps.movr(dsx, xlen_updated/-2)
+            RM.item_execute(BPlan("bps.movr", dsy, ylen_updated/-2))
+            RM.item_execute(BPlan("bps.movr", dsx, xlen_updated/-2))
             X_position_abs = dsx.position+(X_position)
             Y_position_abs = dsy.position+(Y_position)
 
 
         else:
-            yield from bps.movr(smary, ylen_updated/-2)
-            yield from bps.movr(smarx, xlen_updated/-2)
+            RM.item_execute(BPlan("bps.movr", smary, ylen_updated/-2))
+            RM.item_execute(BPlan("bps.movr", smarx, xlen_updated/-2))
             X_position_abs = smarx.position+(X_position)
             Y_position_abs = smary.position+(Y_position)
 
@@ -2050,7 +2050,7 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                 for j in tqdm.tqdm(X_position_abs):
                     print((i,j))
                     #yield from check_for_beam_dump(threshold=5000)
-                    yield from bps.sleep(1) #cbm catchup time
+                    RM.item_execute(BPlan("bps.sleep", 1)) #cbm catchup time
 
                     fly_dim = scan_dim/2
 
@@ -2058,26 +2058,26 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
 
                         print(i,j)
 
-                        yield from bps.mov(dsy, i)
-                        yield from bps.mov(dsx, j)
+                        RM.item_execute(BPlan("bps.mov", dsy, i))
+                        RM.item_execute(BPlan("bps.mov", dsx, j))
                         # yield from fly2dpd(dets,dssx,-1*fly_dim,fly_dim,num_steps,dssy,-1*fly_dim,fly_dim,num_steps,dwell)
-                        yield from headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
+                        headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
 
-                        yield from bps.sleep(3)
-                        yield from bps.mov(dssx,0,dssy,0)
+                        RM.item_execute(BPlan("bps.sleep", 3))
+                        RM.item_execute(BPlan("bps.mov", dssx, 0, dssy, 0))
                         #insert_xrf_map_to_pdf(-1,plot_elem,'dsx')
-                        yield from bps.mov(dsx, dsx_i)
-                        yield from bps.mov(dsy,dsy_i)
+                        RM.item_execute(BPlan("bps.mov", dsx, dsx_i))
+                        RM.item_execute(BPlan("bps.mov", dsy, dsy_i))
 
                     else:
                         print(f"{fly_dim = }")
-                        yield from bps.mov(smary, i)
-                        yield from bps.mov(smarx, j)
+                        RM.item_execute(BPlan("bps.mov", smary, i))
+                        RM.item_execute(BPlan("bps.mov", smarx, j))
                         # yield from fly2dpd(dets, zpssx,-1*fly_dim,fly_dim,num_steps,zpssy, -1*fly_dim,fly_dim,num_steps,dwell)
-                        yield from headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
+                        headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
 
-                        yield from bps.sleep(1)
-                        yield from bps.mov(zpssx,0,zpssy,0)
+                        RM.item_execute(BPlan("bps.sleep", 1))
+                        RM.item_execute(BPlan("bps.mov", zpssx, 0, zpssy, 0))
 
                         #try:
                             #insert_xrf_map_to_pdf(-1,plot_elem[0],'smarx')
@@ -2086,8 +2086,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                             #pass
 
 
-                        yield from bps.mov(smarx, smarx_i)
-                        yield from bps.mov(smary,smary_i)
+                        RM.item_execute(BPlan("bps.mov", smarx, smarx_i))
+                        RM.item_execute(BPlan("bps.mov", smary, smary_i))
 
         save_page()
 
