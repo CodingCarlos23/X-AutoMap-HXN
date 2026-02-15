@@ -174,8 +174,14 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, real_test
     Performs coarse scan using only parameters from beamline_params.
     The output directory path is constructed and can be used later.
     No JSON files are read in this function.
+
+    headless_send_queue_coarse_scan(json_file, json_file, 1, 
+                                    remote_seg=True, proceed_with_fine_scan=False)
     """ 
     
+    with open(beamline_params, 'r') as f:
+        beamline_params = json.load(f)
+
     dets = beamline_params.get("det_name", "dets_fast")
     x_motor = beamline_params.get("mot1", "zpssx")
     y_motor = beamline_params.get("mot2", "zpssy")
