@@ -28,6 +28,7 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 RM = REManagerAPI()
 from tiled.client import from_uri
 c = from_uri('https://tiled.nsls2.bnl.gov')
+container = c["tst/sandbox/synaps/reconstructions"]
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -1194,7 +1195,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
         real_test: 0 for test mode (skip export), 1 for real export
     """
 
-    container = c["tst/sandbox/synaps/reconstructions"]
+    
     if real_test == 0:
         print("[EXPORT] Skipping remote XRF export in test mode.")
         return
