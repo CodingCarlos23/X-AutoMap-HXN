@@ -1644,7 +1644,7 @@ def submit_and_export(**params):
         pass
 
     # --- 3. Get ID and Folder ---
-    data_wd = params.get('data_wd', '.')
+    data_wd = params.get('data_wd', '/data/users/current_user')
     
     if is_real:
         hdr = db[-1]
