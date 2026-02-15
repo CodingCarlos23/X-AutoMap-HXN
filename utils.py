@@ -169,7 +169,7 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
             json.dump(scan_data, f, indent=4)
 
 def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, 
-                                    real_test, 
+                                    real_test = 1, 
                                     remote_seg=True, target_id=None, 
                                     proceed_with_fine_scan=False):
     """
@@ -1959,7 +1959,9 @@ def load_and_queue(json_path, real_test, target_id=None,
 
 
 def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
-                        step_size = 250, plot_elem = ["Cr"],mll = False, beamline_params=None, initial_scan_path=None):
+                        step_size = 250, plot_elem = ["Cr"],mll = False, 
+                        beamline_params=None, initial_scan_path=None, 
+                        remote_seg=True, followup_fine_scan=False):
     
 
     """ Usage <mosaic_overlap_scan_auto(dets=dets_fast, ylen=100, xlen=100, overlap_per=5, dwell=0.01, step_size=250, plot_elem=["Cr"], mll=False, 
@@ -2068,7 +2070,11 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                         RM.item_add(BPlan("bps.mov", dsx, j))
                         
                         # yield from fly2dpd(dets,dssx,-1*fly_dim,fly_dim,num_steps,dssy,-1*fly_dim,fly_dim,num_steps,dwell)
-                        headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
+                        headless_send_queue_coarse_scan(beamline_params, 
+                                                        initial_scan_path, 
+                                                        real_test = 1, 
+                                                        remote_seg=remote_seg, 
+                                                        proceed_with_fine_scan=followup_fine_scan)
 
                         RM.item_add(BPlan("bps.sleep", 3))
                         RM.item_add(BPlan("bps.mov", dssx, 0, dssy, 0))
@@ -2083,7 +2089,11 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                         RM.item_add(BPlan("bps.mov", smarx, j))
                         
                         # yield from fly2dpd(dets, zpssx,-1*fly_dim,fly_dim,num_steps,zpssy, -1*fly_dim,fly_dim,num_steps,dwell)
-                        headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
+                        headless_send_queue_coarse_scan(beamline_params, 
+                                                        initial_scan_path, 
+                                                        real_test = 1, 
+                                                        remote_seg=remote_seg, 
+                                                        proceed_with_fine_scan=followup_fine_scan)
 
                         RM.item_add(BPlan("bps.sleep", 1))
                         RM.item_add(BPlan("bps.mov", zpssx, 0, zpssy, 0))
