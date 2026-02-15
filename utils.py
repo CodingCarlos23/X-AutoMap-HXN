@@ -204,7 +204,8 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path,
     
     roi = {x_motor: cx, y_motor: cy}
 
-    RM.item_execute(BPlan("piezos_to_zero"))
+    RM.item_add(BPlan("piezos_to_zero"))
+    RM.queue_start()
     
     load_and_queue(coarse_scan_path, 
                    real_test, 
