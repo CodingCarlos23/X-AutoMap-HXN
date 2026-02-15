@@ -1534,7 +1534,7 @@ def send_fly2d_to_queue(label,
 
     print("Coarse scan")
     if real_test == 1:
-        RM.item_execute(BPlan("fly2d_qserver_scan_export",
+        RM.item_add(BPlan("fly2d_qserver_scan_export",
                           label,
                           det_names,
                           mot1, mot1_s, mot1_e, mot1_n,
@@ -1551,6 +1551,7 @@ def send_fly2d_to_queue(label,
                           pos_save_to or ""#,
                         #   real_test
                           ))
+        RM.start_queue()
     print("Coarse scan sent to queue")
 
 def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
@@ -2026,19 +2027,22 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
         first_sid = db[-1].start["scan_id"]+1
 
         if sclr2_ch2.get() < i0_init*0.9:
-            RM.item_execute(BPlan("peak_the_flux"))
+            RM.item_add(BPlan("peak_the_flux"))
+            RM.start_queue()
 
         if mll:
 
-            RM.item_execute(BPlan("bps.movr", dsy, ylen_updated/-2))
-            RM.item_execute(BPlan("bps.movr", dsx, xlen_updated/-2))
+            RM.item_add(BPlan("bps.movr", dsy, ylen_updated/-2))
+            RM.item_add(BPlan("bps.movr", dsx, xlen_updated/-2))
+            RM.start_queue()
             X_position_abs = dsx.position+(X_position)
             Y_position_abs = dsy.position+(Y_position)
 
 
         else:
-            RM.item_execute(BPlan("bps.movr", smary, ylen_updated/-2))
-            RM.item_execute(BPlan("bps.movr", smarx, xlen_updated/-2))
+            RM.item_add(BPlan("bps.movr", smary, ylen_updated/-2))
+            RM.item_add(BPlan("bps.movr", smarx, xlen_updated/-2))
+            RM.start_queue()
             X_position_abs = smarx.position+(X_position)
             Y_position_abs = smary.position+(Y_position)
 
@@ -2050,7 +2054,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                 for j in tqdm.tqdm(X_position_abs):
                     print((i,j))
                     #yield from check_for_beam_dump(threshold=5000)
-                    RM.item_execute(BPlan("bps.sleep", 1)) #cbm catchup time
+                    RM.item_add(BPlan("bps.sleep", 1)) #cbm catchup time
+                    RM.start_queue()
 
                     fly_dim = scan_dim/2
 
@@ -2058,26 +2063,30 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
 
                         print(i,j)
 
-                        RM.item_execute(BPlan("bps.mov", dsy, i))
-                        RM.item_execute(BPlan("bps.mov", dsx, j))
+                        RM.item_add(BPlan("bps.mov", dsy, i))
+                        RM.item_add(BPlan("bps.mov", dsx, j))
+                        RM.start_queue()
                         # yield from fly2dpd(dets,dssx,-1*fly_dim,fly_dim,num_steps,dssy,-1*fly_dim,fly_dim,num_steps,dwell)
                         headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
 
-                        RM.item_execute(BPlan("bps.sleep", 3))
-                        RM.item_execute(BPlan("bps.mov", dssx, 0, dssy, 0))
+                        RM.item_add(BPlan("bps.sleep", 3))
+                        RM.item_add(BPlan("bps.mov", dssx, 0, dssy, 0))
                         #insert_xrf_map_to_pdf(-1,plot_elem,'dsx')
-                        RM.item_execute(BPlan("bps.mov", dsx, dsx_i))
-                        RM.item_execute(BPlan("bps.mov", dsy, dsy_i))
+                        RM.item_add(BPlan("bps.mov", dsx, dsx_i))
+                        RM.item_add(BPlan("bps.mov", dsy, dsy_i))
+                        RM.start_queue()
 
                     else:
                         print(f"{fly_dim = }")
-                        RM.item_execute(BPlan("bps.mov", smary, i))
-                        RM.item_execute(BPlan("bps.mov", smarx, j))
+                        RM.item_add(BPlan("bps.mov", smary, i))
+                        RM.item_add(BPlan("bps.mov", smarx, j))
+                        RM.start_queue()
                         # yield from fly2dpd(dets, zpssx,-1*fly_dim,fly_dim,num_steps,zpssy, -1*fly_dim,fly_dim,num_steps,dwell)
                         headless_send_queue_coarse_scan(beamline_params, initial_scan_path, 1)
 
-                        RM.item_execute(BPlan("bps.sleep", 1))
-                        RM.item_execute(BPlan("bps.mov", zpssx, 0, zpssy, 0))
+                        RM.item_add(BPlan("bps.sleep", 1))
+                        RM.item_add(BPlan("bps.mov", zpssx, 0, zpssy, 0))
+                        RM.start_queue()
 
                         #try:
                             #insert_xrf_map_to_pdf(-1,plot_elem[0],'smarx')
@@ -2086,9 +2095,9 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                             #pass
 
 
-                        RM.item_execute(BPlan("bps.mov", smarx, smarx_i))
-                        RM.item_execute(BPlan("bps.mov", smary, smary_i))
-
+                        RM.item_add(BPlan("bps.mov", smarx, smarx_i))
+                        RM.item_add(BPlan("bps.mov", smary, smary_i))
+                        RM.start_queue()
         save_page()
 
         # plot_mosiac_overlap(grid_shape = (y_tile,x_tile),
