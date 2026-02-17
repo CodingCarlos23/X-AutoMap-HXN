@@ -2181,7 +2181,8 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
     # 1. Define the step size for the mosaic grid
     # Since you requested 25 um steps for the grid iteration:
-    grid_step = beamline_params.get("grid_step", 20)
+    beamline_params_dict = json.loads(beamline_params) if isinstance(beamline_params, str) else (beamline_params or {})
+    grid_step = beamline_params_dict.get("grid_step", 20)
 
     # 2. Generate the relative step lists
     # This creates a list of positions starting at 0 up to the length
