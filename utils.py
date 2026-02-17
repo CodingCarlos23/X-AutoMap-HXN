@@ -2191,12 +2191,13 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
         print(f"[ERROR] Failed to load beamline_params from {beamline_params}: {e}")
         beamline_params_dict = {}
     
-    grid_step = beamline_params_dict.get("grid_step", 20)
+    grid_step = (beamline_params_dict.get("mot1_e")) - (beamline_params_dict.get("mot1_s"))
+    grid_step = grid_step*(1-(overlap_per*0.01))
 
     # 2. Generate the relative step lists
     # This creates a list of positions starting at 0 up to the length
-    x_steps_raw = np.arange(0, xlen + grid_step, grid_step)
-    y_steps_raw = np.arange(0, ylen + grid_step, grid_step)
+    x_steps_raw = np.arange(grid_step//2, xlen , grid_step)
+    y_steps_raw = np.arange(grid_step//2, ylen , grid_step)
 
     x_steps = x_steps_raw.tolist()
     y_steps = y_steps_raw.tolist()
