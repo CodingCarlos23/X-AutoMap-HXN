@@ -1258,6 +1258,10 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
     # Calculate expected length from scan dimensions
     expected_length = np.prod(scan_dim)
     
+    # Collect all normalized XRF images for stacking
+    xrf_images = []
+    element_names = []
+    
     for elem in sorted(elem_list):
         try:
             roi_keys = [f'Det{chan}_{elem}' for chan in channels]
@@ -1269,10 +1273,28 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
                 spectrum = spectrum / padded_scalar
             
             xrf_img = spectrum.reshape(scan_dim)
-            result = scan_container.write_array(xrf_img, key=elem, access_tags=["synaps_project"])
-            print(f"[REMOTE] Successfully exported element {elem} for scan {scan_id}, result: {result}")
+            xrf_images.append(xrf_img)
+            element_names.append(elem)
+            print(f"[REMOTE] Processed element {elem} for stacking")
         except Exception as e:
-            print(f"[REMOTE ERROR] Failed to export element {elem} for scan {scan_id}: {e}")
+            print(f"[REMOTE ERROR] Failed to process element {elem} for scan {scan_id}: {e}")
+    
+    # Stack all images and send as single array
+    if xrf_images:
+        try:
+            # Stack along first axis: (n_elements, height, width)
+            stacked_array = np.stack(xrf_images, axis=0)
+            
+            # Create compound key name from all elements
+            compound_key = "".join(element_names)
+            
+            # Send stacked array with compound key
+            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["synaps_project"])
+            print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
+        except Exception as e:
+            print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
+    else:
+        print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
         #remote_sender.write(xrf_img)
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
