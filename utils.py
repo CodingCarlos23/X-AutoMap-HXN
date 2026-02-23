@@ -1604,7 +1604,7 @@ def _pad_scalar_to_expected_length(scalar, expected_length):
     print(f"[SCALAR] Padded scalar from {len(scalar)} to {len(padded_scalar)} points using last value {last_point}")
     return padded_scalar
 
-def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
+def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[]):
     """
     Export XRF data to remote handler for remote segmentation.
     
@@ -1612,10 +1612,9 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
-        real_test: 0 for test mode (skip export), 1 for real export
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping remote XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
@@ -1647,7 +1646,7 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
             xrf_img = spectrum.reshape(scan_dim)
             remote_sender.write(xrf_img)
 
-def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
+def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[]):
     """
     Export XRF data to remote handler for remote segmentation.
     
@@ -1655,18 +1654,17 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
-        real_test: 0 for test mode (skip export), 1 for real export
     """
 
     
-    if real_test == 0:
-        print("[EXPORT] Skipping remote XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
     scan_id = hdr.start["scan_id"]
 
-    meta = export_scan_params(sid=scan_id, real_test=real_test)
+    meta = export_scan_params(sid=scan_id)
 
     import time
     timestamp = int(time.time())
@@ -1725,7 +1723,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
         print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
         #remote_sender.write(xrf_img)
 
-def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
+def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
     """
     Export XRF data as local TIFF files.
     
@@ -1734,10 +1732,9 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
         wd: Working directory for output files
-        real_test: 0 for test mode (skip export), 1 for real export
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping local XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping local XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
@@ -1768,7 +1765,7 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test
         tiff.imwrite(os.path.join(wd, f"scan_{scan_id}_{elem}.tiff"), xrf_img)
 
 
-def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0, remote_seg=False):
+def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', remote_seg=False):
     """
     Export XRF ROI data either remotely or as local TIFF files.
     
@@ -1777,17 +1774,16 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_te
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
         wd: Working directory for local export
-        real_test: 0 for test mode (skip export), 1 for real export
         remote_seg: If True, use remote handler; if False, write local TIFFs
     """
     if remote_seg:
-       # _export_xrf_remote(scan_id, norm, elem_list, real_test)
-       _export_xrf_remote_container(scan_id, norm, elem_list, real_test)
+       # _export_xrf_remote(scan_id, norm, elem_list)
+       _export_xrf_remote_container(scan_id, norm, elem_list)
     else:
-        _export_xrf_local(scan_id, norm, elem_list, wd, real_test)
+        _export_xrf_local(scan_id, norm, elem_list, wd)
 
 
-def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
+def export_scan_params(sid=-1, zp_flag=True, save_to=None):
     """
     Fetch scan parameters, ROI positions, step size, and the full start_doc
     for scan `sid`.  Optionally write them out as JSON.
@@ -1798,8 +1794,8 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
       - roi_positions
       - step_size (computed from scan_input for 2D_FLY_PANDA)
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping scan params export in test mode.")
+    if sid == -1:
+        print("[EXPORT] Skipping scan params export - no valid scan ID provided.")
         return
     # 1) Pull the header
     hdr = db[int(sid)]
@@ -1863,7 +1859,7 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
     return result
 
 
-def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
+def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None):
     """
     Export scan parameters for a batch of scan IDs.
     
@@ -1871,13 +1867,12 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
         scan_ids (list): List of scan IDs to export
         zp_flag (bool): Whether to use ZP motors or DS motors
         save_to (str): Directory or base filename to save to
-        real_test (int): If 0, skip actual export (test mode)
     
     Returns:
         dict: Dictionary mapping scan_id to exported parameters
     """
-    if real_test == 0:
-        print(f"[EXPORT] Skipping batch scan params export in test mode for {len(scan_ids)} scans.")
+    if not scan_ids:
+        print(f"[EXPORT] Skipping batch scan params export - no scan IDs provided.")
         return {}
     
     results = {}
@@ -1898,8 +1893,7 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
             result = export_scan_params(
                 sid=sid,
                 zp_flag=zp_flag,
-                save_to=scan_save_to,
-                real_test=real_test
+                save_to=scan_save_to
             )
             
             if result:
@@ -2185,14 +2179,12 @@ def submit_and_export(**params):
             norm=params.get('export_norm', 'sclr1_ch4'),
             elem_list=all_elem_list,
             wd=out_dir,
-            real_test=1,         # Force '1' here so the export function knows to actually run
             remote_seg=is_remote # Pass the remote flag
         )
         export_scan_params(
             sid=last_id,
             zp_flag=bool(params.get('zp_move_flag', True)),
-            save_to=out_dir,
-            real_test=1
+            save_to=out_dir
         )
     else:
         # Sim Mode: Manual Copy
