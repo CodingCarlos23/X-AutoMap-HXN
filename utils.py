@@ -2215,19 +2215,29 @@ def analyze_data_remote(results_dict, np_array, scan_metadata):
     # Implement remote analysis logic here
     return results_dict, np_array, scan_metadata
 
-def analyze_data_local(scan_id, out_dir, **params):
+def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **params):
     """
     Step 2: Analysis. 
     Iterates through element groups, calculates unions, and saves individual 
     blob JSONs into 'out_dir' for the headless scanner to find.
+    
+    Args:
+        return_results: If True, returns analysis results instead of None
     """
+    # Handle keyword-only arguments
+    if scan_id is None:
+        scan_id = params.get('scan_id')
+    if out_dir is None:
+        out_dir = params.get('out_dir')
     print(f"\n[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True (data sent to remote port, no TIFFs)
     remote_seg = params.get('remote_seg', False)
     if remote_seg:
         print("[ANALYSIS] remote_seg=True, skipping local analysis (handled remotely)...")
-        return
+        if return_results:
+            return {'error': 'Remote segmentation requested - no local results available'}
+        return None
     
     # --- 1. Read Scan Parameters ---
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
@@ -2263,9 +2273,46 @@ def analyze_data_local(scan_id, out_dir, **params):
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
-    min_thresh = params.get("min_threshold_intensity", "")
-    min_area = params.get("min_threshold_area", "")
-    detection_method = params.get("blob_detection_method", "simple")
+    min_thresh = params.get("min_threshold_intensity")
+    min_area = params.get("min_threshold_area")
+    detection_method = params.get("blob_detection_method")
+    
+    # Method-specific parameters from JSON config
+    method_params = {
+        # Simple blob detector parameters
+        'max_threshold': params.get('simple_max_threshold'),
+        'max_area': params.get('simple_max_area'),
+        'threshold_step': params.get('simple_threshold_step'),
+        'filter_by_color': params.get('simple_filter_by_color'),
+        'filter_by_circularity': params.get('simple_filter_by_circularity'),
+        
+        # Hough circle parameters
+        'max_radius': params.get('hough_max_radius'),
+        'dp': params.get('hough_dp'),
+        'min_dist': params.get('hough_min_dist'),
+        'param1': params.get('hough_param1'),
+        'param2': params.get('hough_param2'),
+        
+        # Watershed parameters
+        'min_distance': params.get('watershed_min_distance'),
+        'threshold_abs': params.get('watershed_threshold_abs'),
+        
+        # Cellpose parameters
+        'diameter': params.get('cellpose_diameter'),
+        'model_type': params.get('cellpose_model_type'),
+        'gpu': params.get('cellpose_gpu'),
+        'flow_threshold': params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': params.get('cellpose_cellprob_threshold'),
+        'channels': params.get('cellpose_channels'),
+        'min_diameter': params.get('cellpose_min_diameter'),
+        'max_diameter': params.get('cellpose_max_diameter'),
+        
+        # Connected components parameters
+        'connectivity': params.get('connected_components_connectivity')
+    }
+    
+    # Filter out None values to avoid overriding method defaults
+    method_params = {k: v for k, v in method_params.items() if v is not None}
 
     # --- 3. Blob Detection Loop ---
     for element in all_elements:
@@ -2278,13 +2325,18 @@ def analyze_data_local(scan_id, out_dir, **params):
         print(f"Processing {tiff_path.name} ({color})")
         try:
             tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img)
             
+            # Use configurable normalization and dilation parameters
+            kernel_size = tuple(params.get('normalize_kernel_size', [3, 3]))
+            iterations = params.get('dilate_iterations', 2)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+
             b = detect_blobs(tiff_dilated, 
                              tiff_norm, min_thresh,
                              min_area, color, 
                              tiff_path.name, 
-                             method=detection_method)
+                             method=detection_method,
+                             **method_params)
             
             precomputed_blobs[color][(min_thresh, min_area)] = b
         except Exception as e:
@@ -2292,9 +2344,16 @@ def analyze_data_local(scan_id, out_dir, **params):
             traceback.print_exc()
 
     # --- 4. Union & Export Loop ---
+    all_results = {
+        'scan_id': scan_id,
+        'precomputed_blobs': precomputed_blobs,
+        'groups': {},
+        'tiff_paths': tiff_paths
+    }
+    
     for elem_list in elem_list_of_lists:
         group_name = "".join(elem_list)
-        print(f"\n--- Processing Group: {group_name} ---")
+        print(f"\n--- Processing Group: {group_name} (Elements: {len(elem_list)}) ---")
 
         group_blobs_for_union = {}
         for i, element in enumerate(elem_list):
@@ -2306,12 +2365,50 @@ def analyze_data_local(scan_id, out_dir, **params):
             if original_color in precomputed_blobs:
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
 
-        # Must have at least 2 elements to form a union
-        if len(group_blobs_for_union) >= 2:
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs without union formation
+            print(f"[SINGLE ELEMENT] Processing individual blobs for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            # Get blobs from the (min_thresh, min_area) key
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]  # Get the blob list
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    # Convert blob coordinates to real-world coordinates
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    
+                    # Use blob size or default size
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        # Preserve original blob info
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+                    
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=0.5)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=params.get('overlap_thresh'))
 
-            formatted_unions = {}
             for idx, union in unions.items():
                 box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
                 formatted_unions[box_name] = {
@@ -2326,15 +2423,32 @@ def analyze_data_local(scan_id, out_dir, **params):
                     "real_center_um": union["real_center_um"],
                     "real_size_um": union["real_size_um"],
                 }
+        else:
+            print(f"[SKIP] No valid blobs found for group {group_name}")
+            continue
 
-            # Save the "Master" Union JSON (Headless ignores this via startswith("unions_output"))
+        # Save results if we have any formatted unions/blobs
+        if formatted_unions:
+            # Save the "Master" output JSON (Headless ignores this via startswith("unions_output"))
             out_json = Path(out_dir) / f"unions_output_{group_name}.json"
             with open(out_json, "w") as f:
                 json.dump(formatted_unions, f, indent=2)
             
             # Save the INDIVIDUAL JSONs (Headless finds these)
-            # This function must create files that do NOT start with "unions_output"
+            # This function must create files that do NOT start with "unions_output"  
             save_each_blob_as_individual_scan(formatted_unions, out_dir)
+            
+            # Store results for return if requested
+            if return_results:
+                all_results['groups'][group_name] = {
+                    'formatted_unions': formatted_unions,
+                    'group_blobs_for_union': group_blobs_for_union,
+                    'element_count': len(elem_list),
+                    'processing_mode': 'individual' if len(group_blobs_for_union) == 1 else 'union'
+                }
+                # Add union data for multi-element groups
+                if len(group_blobs_for_union) >= 2:
+                    all_results['groups'][group_name]['unions'] = unions
 
     # --- 5. Visualization ---
     if tiff_paths:
@@ -2348,6 +2462,11 @@ def analyze_data_local(scan_id, out_dir, **params):
         create_all_elements_tiff(tiff_paths, out_dir, elem_list, group_blobs_vis, group_name)
 
     print("[ANALYSIS] Done.")
+    
+    # Return results if requested
+    if return_results:
+        return all_results
+    return None
 
 
 def submit_fine_scans_to_queue(scan_id, out_dir, **params):
@@ -2386,6 +2505,13 @@ def run_fine_scans(is_real):
 
 def load_and_queue(json_path, real_test, target_id=None, 
                    remote_seg=False, proceed_fine_scans=True):
+    """
+    Main workflow function supporting multiple modes:
+    - real_test=0: Simulation mode
+    - real_test=1: Real scanning mode 
+    - real_test=2: Offline mode (use existing scan)
+    - real_test=3: Analysis-only mode (use existing scan, return results)
+    """
     
     # 0) Clear caches
     if 'remote_handler' in globals():
@@ -2415,24 +2541,94 @@ def load_and_queue(json_path, real_test, target_id=None,
     params['real_test'] = real_test
     params['remote_seg'] = remote_seg
     
-    # IMPORTANT: If Offline (real_test=2), target_id is mandatory.
+    # 3.1) Add default segmentation parameters if not present
+    segmentation_defaults = {
+        # Basic detection parameters
+        'min_threshold_intensity': params.get('min_threshold_intensity', 50),
+        'min_threshold_area': params.get('min_threshold_area', 100),
+        'blob_detection_method': params.get('blob_detection_method', 'simple'),
+        'overlap_thresh': params.get('overlap_thresh', 0.5),
+        
+        # Normalization and morphology parameters
+        'normalize_kernel_size': params.get('normalize_kernel_size', [3, 3]),
+        'dilate_iterations': params.get('dilate_iterations', 2),
+        'blur_kernel': params.get('blur_kernel', [3, 3]),
+        
+        # Method-specific parameters for simple detection
+        'simple_max_threshold': params.get('simple_max_threshold', 255),
+        'simple_max_area': params.get('simple_max_area', 1600),
+        'simple_threshold_step': params.get('simple_threshold_step', 2),
+        'simple_filter_by_color': params.get('simple_filter_by_color', False),
+        'simple_filter_by_circularity': params.get('simple_filter_by_circularity', False),
+        
+        # Hough circle detection parameters
+        'hough_max_radius': params.get('hough_max_radius', 40),
+        'hough_dp': params.get('hough_dp', 1),
+        'hough_min_dist': params.get('hough_min_dist', 20),
+        'hough_param1': params.get('hough_param1', 50),
+        'hough_param2': params.get('hough_param2', 30),
+        
+        # Watershed segmentation parameters
+        'watershed_min_distance': params.get('watershed_min_distance', 10),
+        'watershed_threshold_abs': params.get('watershed_threshold_abs', 0.3),
+        
+        # Cellpose parameters
+        'cellpose_diameter': params.get('cellpose_diameter', 60),
+        'cellpose_model_type': params.get('cellpose_model_type', 'cyto3'),
+        'cellpose_gpu': params.get('cellpose_gpu', False),
+        'cellpose_flow_threshold': params.get('cellpose_flow_threshold', 0.4),
+        'cellpose_cellprob_threshold': params.get('cellpose_cellprob_threshold', 0.0),
+        'cellpose_channels': params.get('cellpose_channels', [0, 0]),
+        'cellpose_min_diameter': params.get('cellpose_min_diameter', 0),
+        'cellpose_max_diameter': params.get('cellpose_max_diameter', float('inf')),
+        
+        # Connected components parameters
+        'connected_components_connectivity': params.get('connected_components_connectivity', 8),
+        
+        # Contour detection parameters
+        'contours_mode': params.get('contours_mode', 'external'),
+        'contours_method': params.get('contours_method', 'simple')
+    }
+    
+    # Update params with segmentation defaults
+    for key, default_value in segmentation_defaults.items():
+        if key not in params:
+            params[key] = default_value
+    
+    # IMPORTANT: If Offline (real_test=2) or Analysis-only (real_test=3), target_id is mandatory.
     if target_id is not None:
         params['target_id'] = target_id
-    elif real_test == 2 and 'target_id' not in params:
-        print("[WARNING] Running in Offline mode (2) but no target_id provided.")
+    elif real_test in [2, 3] and 'target_id' not in params:
+        print(f"[WARNING] Running in {'Offline' if real_test == 2 else 'Analysis-only'} mode ({real_test}) but no target_id provided.")
         # You might want to raise an error or rely on it being in the JSON
     
+    # For analysis-only mode, force local analysis and skip fine scans
+    if real_test == 3:
+        remote_seg = False
+        params['remote_seg'] = False
+        proceed_fine_scans = False
+    
     # 4) EXECUTE
-    print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {real_test}) ---")
+    mode_names = {0: 'Simulation', 1: 'Real', 2: 'Offline', 3: 'Analysis-only'}
+    print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {real_test} - {mode_names.get(real_test, 'Unknown')}) ---")
 
-    # A. Submit / Export
-    scan_id, out_dir = submit_and_export(**params) #this handles the remote submission
+    # A. Submit / Export (skip for analysis-only mode)
+    if real_test == 3:
+        # For analysis-only mode, use the target_id directly and create output directory
+        scan_id = target_id
+        data_wd = params.get('data_wd', '/data/users/current_user')
+        out_dir = os.path.join(data_wd, f"automap_{scan_id}")
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"[ANALYSIS-ONLY] Using existing scan {scan_id}, output dir: {out_dir}")
+    else:
+        scan_id, out_dir = submit_and_export(**params) #this handles the remote submission
     
     # Update params with scan_id and out_dir
     params['scan_id'] = scan_id
     params['out_dir'] = out_dir
     
     # B. Analyze
+    analysis_results = None
     if remote_seg:
         print("no reciever implemented yet, skipping remote analysis...")
         pass 
@@ -2447,11 +2643,18 @@ def load_and_queue(json_path, real_test, target_id=None,
         # scan_metadata = {} #remote.recieve results
         # analyze_data_remote(results_dict, np_array, scan_metadata)
     else:
-        analyze_data_local(**params)
+        # For analysis-only mode, return the results
+        return_results = (real_test == 3)
+        analysis_results = analyze_data_local(return_results=return_results, **params)
 
     if not proceed_fine_scans:
         print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
         return
+    
+    # For analysis-only mode, return results immediately
+    if real_test == 3:
+        print("--- Analysis-only mode complete ---")
+        return analysis_results
     
     # C. Queue (Will skip if mode != 1)
     submit_fine_scans_to_queue(**params)
@@ -2460,6 +2663,7 @@ def load_and_queue(json_path, real_test, target_id=None,
     run_fine_scans(real_test == 1)
     
     print("--- Done ---")
+    return None  # Explicit return for other modes
 
 
 
