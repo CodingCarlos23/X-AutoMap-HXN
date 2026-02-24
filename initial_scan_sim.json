@@ -19,6 +19,7 @@
   "pos_save_to":      "/nsls2/data2/hxn/legacy/users/2026Q1/synaps_2026/X-AutoMap-HXN",
   "min_threshold_intensity": 50,
   "min_threshold_area":9,
+  "blob_detection_method": "simple",
   "step_size_fine": 0.05,
   "exp_t_fine": 0.01,
   "fine_scan_pad_ratio":0.3,

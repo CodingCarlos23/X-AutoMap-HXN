@@ -954,7 +954,9 @@ def _detect_blobs_watershed(img_norm, img_orig, min_thresh, min_area, **kwargs):
     
     return detections
 
-def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name, method='simple', include_method_info=False, **kwargs):
+def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, 
+                 file_name, method='simple', 
+                 include_method_info=False, **kwargs):
     """
     General blob detection function that supports multiple detection methods.
     
@@ -2263,6 +2265,7 @@ def analyze_data_local(scan_id, out_dir, **params):
     
     min_thresh = params.get("min_threshold_intensity", "")
     min_area = params.get("min_threshold_area", "")
+    detection_method = params.get("blob_detection_method", "simple")
 
     # --- 3. Blob Detection Loop ---
     for element in all_elements:
@@ -2276,7 +2279,13 @@ def analyze_data_local(scan_id, out_dir, **params):
         try:
             tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
             tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img)
-            b = detect_blobs(tiff_dilated, tiff_norm, min_thresh, min_area, color, tiff_path.name)
+            
+            b = detect_blobs(tiff_dilated, 
+                             tiff_norm, min_thresh,
+                             min_area, color, 
+                             tiff_path.name, 
+                             method=detection_method)
+            
             precomputed_blobs[color][(min_thresh, min_area)] = b
         except Exception as e:
             print(f"❌ Error processing {tiff_path.name}: {e}")
