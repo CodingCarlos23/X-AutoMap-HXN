@@ -1,5 +1,5 @@
 {
-  "label":           "moasic_400yx100x_um",
+  "label":           "cellpose_test",
   "dets":            "dets_fast",
   "mot1":            "zpssx",
   "mot1_s":          -12.5,
@@ -13,7 +13,7 @@
   "scan_id":         null,
   "zp_move_flag":    0,
   "smar_move_flag":  0,
-  "elem_list":        [["Fe","Ca","Si"],["Cr","Fe","Mn"]],
+  "elem_list":        [["Ni"]],
   "export_norm":      "sclr1_ch4",
   "data_wd":          "/nsls2/data2/hxn/legacy/users/2026Q1/synaps_2026/X-AutoMap-HXN",
   "pos_save_to":      "/nsls2/data2/hxn/legacy/users/2026Q1/synaps_2026/X-AutoMap-HXN",
@@ -21,7 +21,7 @@
   "_comment_segmentation": "=== SEGMENTATION PARAMETERS ===",
   "min_threshold_intensity": 50,
   "min_threshold_area": 9,
-  "blob_detection_method": "simple",
+  "blob_detection_method": "cellpose",
   "overlap_thresh": 0.5,
   
   "_comment_morphology": "=== MORPHOLOGY PARAMETERS ===",

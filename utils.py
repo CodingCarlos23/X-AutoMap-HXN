@@ -1321,14 +1321,23 @@ def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3,
     dilated = cv2.dilate(norm, kernel, iterations=iterations)
     return norm, dilated
 
-def normalize_and_dilate(img):
+def normalize_and_dilate(img, kernel_size=None, iterations=None):
     img = np.nan_to_num(img)
 
     if is_featureless(img):
         print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
         return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
+    
     norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    dilated = cv2.dilate(norm, np.ones((3, 3), np.uint8), iterations=2)
+    
+    # Use defaults if parameters not provided (backwards compatibility)
+    if kernel_size is None:
+        kernel_size = (3, 3)
+    if iterations is None:
+        iterations = 2
+    
+    kernel = np.ones(kernel_size, np.uint8) if isinstance(kernel_size, tuple) else np.ones((3, 3), np.uint8)
+    dilated = cv2.dilate(norm, kernel, iterations=iterations)
     return norm, dilated
 
 def boxes_intersect(b1, b2):
