@@ -16,7 +16,9 @@
   "elem_list":        [["Ni"]],
   "export_norm":      "sclr1_ch4",
   "data_wd":          "/data/users/current_user",
-  "pos_save_to":      "/data/users/current_user",
+  "proceed_with_fine_scan": false,
+  "_comment_mode": "Execution mode: 'simulation', 'real', 'offline', or 'analysis-only'",
+  "mode":            "real",
   
   "_comment_segmentation": "=== SEGMENTATION PARAMETERS ===",
   "min_threshold_intensity": 25,
