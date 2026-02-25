@@ -2233,23 +2233,11 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
         print(f"[SIM] Would call: send_fly2d_to_queue(...)")
         time.sleep(1)
 
-    # --- 2. Wait for Completion (Real Only) ---
-    if is_real:
-        print("[WAIT] Waiting for scan to finish...")
-        while True:
-            st = RM.status()
-            if st['items_in_queue'] == 0 and st['manager_state'] == 'idle':
-                break
-            time.sleep(1.0)
-        print("[WAIT] Scan complete.")
-    else:
-        # Offline/Sim: No waiting needed
-        pass
-
-    # --- 3. Get ID and Folder ---
+    # --- 2. Wait for Completion & Get ID ---
     data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     if is_real:
+        wait_for_queue_done(poll_interval=1.0, idle_timeout=60, auto_restart=True)
         hdr = db[-1]
         last_id = hdr.start['scan_id']
     elif is_offline:
@@ -2265,7 +2253,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
     os.makedirs(out_dir, exist_ok=True)
     print(f"[EXPORT] Output directory: {out_dir}")
 
-    # --- 4. Export Data ---
+    # --- 3. Export Data ---
     all_elem_list = export_params.get('elem_list', [])
     
     # Flatten nested list and remove duplicates
