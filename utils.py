@@ -8,6 +8,7 @@ import json
 import pickle
 import threading
 import multiprocessing
+import traceback
 from collections import Counter
 from pathlib import Path
 import traceback as trackback
@@ -46,112 +47,6 @@ container = c["tst/sandbox/synaps/reconstructions"]
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
 
-## CREATING TILED CLIENT FOR NOW HERE GLOBALLY
-
-class RemoteSegmentationSender:
-    def __init__(self):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.writer = self.client['tst/sandbox/synaps/reconstructions']
-        self.segapp_elems = []
-
-    def clear_cache(self):
-        self.segapp_elems.clear()
-    
-    def append_cache(self, elem):
-        self.segapp_elems.append(elem)
-    
-    def get_cache(self):
-        return self.segapp_elems
-    
-    def cache_size(self):
-        return len(self.segapp_elems)
-    
-    def write(self, data, key=None):
-        """Write numpy array data to remote handler."""
-        try:
-            result = self.writer.write_array(data, key=key, access_tags=['synaps_project'])
-            print(f"[REMOTE] Data written with key: {key}, result: {result}" if key else f"[REMOTE] Data written, result: {result}")
-            return result
-        except Exception as e:
-            print(f"[REMOTE ERROR] Failed to write data with key {key}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def write_metadata(self, metadata_dict, key=None):
-        """Write metadata as a JSON-serializable structure."""
-        import json
-        try:
-            # Convert dict to JSON string, then to numpy array of bytes for storage
-            json_str = json.dumps(metadata_dict, default=str)  # default=str handles non-serializable objects
-            json_bytes = np.array(list(json_str.encode('utf-8')), dtype=np.uint8)
-            result = self.writer.write_array(json_bytes, key=key, access_tags=['synaps_project'])
-            print(f"[REMOTE] Metadata written with key: {key}, result: {result}" if key else f"[REMOTE] Metadata written, result: {result}")
-            return result
-        except Exception as e:
-            print(f"[REMOTE ERROR] Failed to write metadata with key {key}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-class RemoteSegmentationReceiver:
-    def __init__(self, num_elements):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.reader = self.client['tst/sandbox/synaps/segmentations']
-        self.keys = []
-        self.values = []
-        self.num_elements = num_elements
-        self.count_connect = 0
-
-    def subscribe(self):
-        self.sub = self.reader.subscribe()
-        self.sub.child_created.add_callback(self.get_keys)
-        print("Listening for updates. Use Ctrl+C to stop....")
-        self.sub.start()
-
-    def get_keys(self, data):
-        print(f"Received Key : {data}")
-        #self.keys.append(data)
-        sub = data.child().subscribe()
-        sub.new_data.add_callback(self.get_data)
-        sub.start_in_thread(start=1)
-        #sub1.disconnect()
-
-    def get_data(self, data):
-        print(f"count num : {self.count_connect}")
-        #print(f"Received Data : {data}")
-        #self.values.append(data)
-        self.count_connect += 1 
-        if self.count_connect == self.num_elements:
-            self.sub.disconnect()
-
-
-# Create a global instance of this class
-remote_sender = RemoteSegmentationSender() 
-
-# # make if else for rea_state
-# try:
-#     from bluesky_queueserver_api import BPlan
-#     from bluesky_queueserver_api.zmq import REManagerAPI
-#     RM = REManagerAPI()
-
-#     sys.path.insert(0,'/nsls2/data2/hxn/legacy/home/xf03id/src/hxntools')
-#     from hxntools.CompositeBroker import db
-#     from hxntools.scan_info import get_scan_positions
-
-# except ImportError:
-#     BPlan = None
-#     REManagerAPI = None
-#     RM = None
-#     print("Warning: bluesky_queueserver_api not found. Bluesky-related functionality will be disabled.")
-
-
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -161,6 +56,11 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QRect, QTimer
+
+from remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
+# Create a global instance of the remote sender
+remote_sender = RemoteSegmentationSender() 
+
 
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
     output_dir = Path(output_dir)
