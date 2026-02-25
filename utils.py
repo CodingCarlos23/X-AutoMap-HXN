@@ -94,14 +94,14 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
 
 def formatted_unions_to_table(formatted_unions, save_to=None):
     """
-    Convert formatted_unions dict to a pandas DataFrame with essential fine scan parameters.
+    Convert formatted_unions dict to a pandas DataFrame with fine scan parameters.
     
     Args:
         formatted_unions: dict with keys like "Box #1", values with cx, cy, num_x, num_y
         save_to: optional path to save as CSV (e.g., "fine_scans.csv")
     
     Returns:
-        pandas DataFrame with columns: label, cx, cy, num_x, num_y, and other metadata
+        pandas DataFrame with columns: label, cx, cy, num_x, num_y (only what's needed for fine scans)
     """
     if not formatted_unions:
         print("[TABLE] Warning: formatted_unions is empty, creating empty DataFrame")
@@ -114,24 +114,14 @@ def formatted_unions_to_table(formatted_unions, save_to=None):
             missing = [key for key in ['cx', 'cy', 'num_x', 'num_y'] if key not in info]
             print(f"[TABLE WARNING] Box '{label}' missing keys: {missing}, skipping or using defaults")
         
+        # Only keep essential fine scan parameters
         row = {
             'label': label,
             'cx': info.get('cx', 0),
             'cy': info.get('cy', 0),
             'num_x': info.get('num_x', 0),
             'num_y': info.get('num_y', 0),
-            'color': info.get('color', 'unknown'),
-            'element': info.get('element', 'unknown'),
         }
-        
-        # Add optional fields if present
-        if 'max_intensity' in info:
-            row['max_intensity'] = info['max_intensity']
-        if 'mean_intensity' in info:
-            row['mean_intensity'] = info['mean_intensity']
-        if 'image_center' in info:
-            row['image_center_x'] = info['image_center'][0]
-            row['image_center_y'] = info['image_center'][1]
         
         rows.append(row)
     
