@@ -2582,7 +2582,7 @@ def load_and_queue(json_path, real_test, target_id=None,
         'watershed_threshold_abs': params.get('watershed_threshold_abs', 0.3),
         
         # Cellpose parameters
-        'cellpose_diameter': params.get('cellpose_diameter', 60),
+        'cellpose_diameter': params.get('cellpose_diameter', 8),
         'cellpose_model_type': params.get('cellpose_model_type', 'cyto3'),
         'cellpose_gpu': params.get('cellpose_gpu', False),
         'cellpose_flow_threshold': params.get('cellpose_flow_threshold', 0.4),
