@@ -3219,8 +3219,11 @@ def load_and_queue(json_path, target_id=None,
     analysis_results = None
     fine_scans_tables = None
     if remote_seg:
-        print("no reciever implemented yet, skipping remote analysis...")
-        pass 
+        
+        export_xrf_roi_data(scan_id, out_dir, remote_seg=remote_seg)  # Ensure ROI data is exported for remote analysis
+        print("[DATA], Exported ROI data for remote analysis.")
+        #print("no reciever implemented yet, skipping remote analysis...")
+        #pass 
         # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         # #placeholder for Seher
         # remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
@@ -3230,7 +3233,8 @@ def load_and_queue(json_path, target_id=None,
         # results_dict = {} #remote.recieve results
         # np_array = np.array([]) #remote.recieve results
         # scan_metadata = {} #remote.recieve results
-        # analyze_data_remote(results_dict, np_array, scan_metadata)
+        #table = analyze_data_remote(np_array, metadata)
+
     else:
         # For analysis-only mode, return the results
         analysis_results = analyze_data_local(scan_id=scan_id, params=params)
