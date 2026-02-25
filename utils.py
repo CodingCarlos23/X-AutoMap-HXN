@@ -191,7 +191,105 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
         with open(file_path, "w") as f:
             json.dump(make_json_serializable(scan_data), f, indent=4)
 
-def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, 
+
+def formatted_unions_to_table(formatted_unions, save_to=None):
+    """
+    Convert formatted_unions dict to a pandas DataFrame with essential fine scan parameters.
+    
+    Args:
+        formatted_unions: dict with keys like "Box #1", values with cx, cy, num_x, num_y
+        save_to: optional path to save as CSV (e.g., "fine_scans.csv")
+    
+    Returns:
+        pandas DataFrame with columns: label, cx, cy, num_x, num_y, and other metadata
+    """
+    import pandas as pd
+    
+    rows = []
+    for label, info in formatted_unions.items():
+        row = {
+            'label': label,
+            'cx': info.get('cx'),
+            'cy': info.get('cy'),
+            'num_x': info.get('num_x'),
+            'num_y': info.get('num_y'),
+            'color': info.get('color'),
+            'element': info.get('element'),
+        }
+        
+        # Add optional fields if present
+        if 'max_intensity' in info:
+            row['max_intensity'] = info['max_intensity']
+        if 'mean_intensity' in info:
+            row['mean_intensity'] = info['mean_intensity']
+        if 'image_center' in info:
+            row['image_center_x'] = info['image_center'][0]
+            row['image_center_y'] = info['image_center'][1]
+        
+        rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    
+    if save_to:
+        df.to_csv(save_to, index=False)
+        print(f"✅ Fine scan table saved to: {save_to}")
+    
+    return df
+
+
+def table_to_individual_scans(df, output_dir="scans"):
+    """
+    Convert fine scan table (DataFrame) to individual scan JSON files.
+    This allows fine scans to be created from a table instead of directly from formatted_unions.
+    
+    Args:
+        df: pandas DataFrame with columns: label, cx, cy, num_x, num_y (minimum required)
+        output_dir: directory to save individual JSON files
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    required_cols = ['label', 'cx', 'cy', 'num_x', 'num_y']
+    if not all(col in df.columns for col in required_cols):
+        raise ValueError(f"DataFrame must contain columns: {required_cols}")
+    
+    for _, row in df.iterrows():
+        label = row['label']
+        scan_data = {
+            label: {
+                "cx": float(row['cx']),
+                "cy": float(row['cy']),
+                "num_x": float(row['num_x']),
+                "num_y": float(row['num_y'])
+            }
+        }
+        
+        file_path = output_dir / f"{label}.json"
+        with open(file_path, "w") as f:
+            json.dump(make_json_serializable(scan_data), f, indent=4)
+    
+    print(f"✅ Created {len(df)} individual scan JSON files in {output_dir}")
+
+
+def load_fine_scans_table(csv_path):
+    """
+    Load a fine scans table from CSV file (for use with remote servers).
+    
+    Args:
+        csv_path: path to CSV file with fine scan parameters
+    
+    Returns:
+        pandas DataFrame with fine scan parameters
+    """
+    import pandas as pd
+    
+    df = pd.read_csv(csv_path)
+    print(f"✅ Loaded fine scans table: {len(df)} scans")
+    print(f"   Columns: {list(df.columns)}")
+    
+    return df
+
+ 
                                     real_test = 1, 
                                     remote_seg=True, target_id=None, 
                                     proceed_with_fine_scan=False):
@@ -235,48 +333,49 @@ def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path,
                    remote_seg=remote_seg, 
                    proceed_fine_scans=proceed_with_fine_scan)
 
-def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test):
+def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test, fine_scans_table=None):
     """
-    Performs fine scan for each blob in the JSON file
-    Reads all JSON files in a directory. Each file should contain a single key 
-    with scan parameters like cx, cy, num_x, num_y
+    Performs fine scan for each blob in the JSON file or from a table.
     
-    For each JSON:
-    - Move stage to (cx, cy)
-    - Perform fly2d scan with the specified image size and resolution
+    Args:
+        directory_path: Directory containing JSON scan configuration files
+        beamline_params: Dictionary of beamline parameters
+        scan_ID: Base scan ID
+        real_test: Whether this is a real test (1) or simulation (0)
+        fine_scans_table: Optional pandas DataFrame with fine scan parameters (cx, cy, num_x, num_y, label)
+                         If provided, uses this table instead of scanning JSON files
+    
+    If fine_scans_table is provided:
+    - Reads scan parameters from the table directly
+    - Useful for remote server workflows where table results are more convenient
+    
+    Otherwise:
+    - Reads all JSON files in directory_path with scan parameters
     """
+    import pandas as pd
+    
     dets = beamline_params.get("det_name", "dets_fast")
-    #dets = [fs,eiger2,xspress3]
     x_motor = beamline_params.get("mot1", "zpssx")
     y_motor = beamline_params.get("mot2", "zpssy")
-    # mot1_n = beamline_params.get("mot1_n", 100)
-    # mot2_n = beamline_params.get("mot2_n", 100)
-
     exp_t = beamline_params.get("exp_t", 0.01)
     step_size = beamline_params.get("step_size_fine", 100)
-
-    pattern = re.compile(r"scan_\d+_params\.json$")  # matches scan_123_params.json
-
-    for filename in os.listdir(directory_path):
-        if not filename.endswith(".json"):
-            continue
-        if filename.startswith("unions_output") or filename.startswith("union_blobs"):
-            continue
-        if pattern.match(filename):
-            continue
-
-        json_path = os.path.join(directory_path, filename)
-        print(filename)
-        with open(json_path, "r") as f:
-            data = json.load(f)
-
-        for label, info in data.items():
-            time.sleep(1)
-            cx = info["cx"]
-            cy = info["cy"] 
-            sx = info["num_x"]
-            sy = info["num_y"]
-
+    
+    # Process from table if provided
+    if fine_scans_table is not None:
+        if isinstance(fine_scans_table, str):
+            # Load from CSV path
+            fine_scans_table = load_fine_scans_table(fine_scans_table)
+        
+        print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table")
+        
+        for idx, row in fine_scans_table.iterrows():
+            time.sleep(0.5)
+            label = row['label']
+            cx = row['cx']
+            cy = row['cy']
+            sx = row['num_x']
+            sy = row['num_y']
+            
             # Expand scan size by 25% for padding
             pad_ratio = beamline_params.get("fine_scan_pad_ratio", 0.25)
             sx_padded = sx * (1 + pad_ratio)
@@ -284,65 +383,104 @@ def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real
 
             # Define relative scan range around center
             x_start = -sx_padded / 2
-            x_end   =  sx_padded / 2
+            x_end = sx_padded / 2
             y_start = -sy_padded / 2
-            y_end   =  sy_padded / 2
+            y_end = sy_padded / 2
 
             # Step counts based on padded size
             num_steps_x = int(sx_padded / step_size)
             num_steps_y = int(sy_padded / step_size)
 
-            # ROI still centered on original center
+            # ROI centered on original center
             roi = {x_motor: cx, y_motor: cy}
 
-            # Detector names
-            # det_names = [d.name for d in eval(dets)]
-            # Create ROI dictionary to move motors first
-
             if real_test == 1:
+                from ..scanning.queue import send_fly2d_to_queue
+                
+                print(f"[FINE_SCANS] Queuing: {label}")
                 RM.item_add(BPlan(
-                    "recover_pos_and_scan", #written
-                    label, #from folder of jsons
-                    roi, #calculated here
-                    dets, #from beamline_params
-                    x_motor, #from beamline_params
-                    x_start, #calculated here
-                    x_end, #calculated here
-                    num_steps_x, #calculated here
-                    y_motor, #from beamline_params
-                    y_start, #calculated here
-                    y_end, #calculate d here
-                    num_steps_y, #calculated here
-                    exp_t, #from beamline_params
-                    step_size #from json
+                    "fly2d_qserver_scan_export",
+                    label,
+                    dets,
+                    x_motor,
+                    x_start,
+                    x_end,
+                    num_steps_x,
+                    y_motor,
+                    y_start,
+                    y_end,
+                    num_steps_y,
+                    exp_t,
+                    step_size
                 ))
-
-            # print(f"prev ROI: {roi}")
-            # print()
-
-            # print(f"Fine Scan to Queue server {filename}")
-            # print("BPlan: recover_pos_and_scan")
-            # print(f"label: {label}")
-            # print(f"roi: {roi}")
-            # print(f"dets: {dets}")
-            # print(f"x_motor: {x_motor}")
-            # print(f"x_start: {x_start}")
-            # print(f"x_end: {x_end}")
-            # print(f"num_steps_x: {num_steps_x}")
-            # print(f"y_motor: {y_motor}")
-            # print(f"y_start: {y_start}")
-            # print(f"y_end: {y_end}")
-            # print(f"num_steps_y: {num_steps_y}")
-            # print(f"exp_t: {exp_t}")
-            # print(f"step_size: {step_size}")
-            # print("------------------------\n")
-
-        print(f"Scan from {filename} completed") 
-        print()
-    print("Fine scan sent")
-
-
+            else:
+                print(f"[{'OFFLINE' if real_test==2 else 'SIM'}] Would queue: {label}")
     
+    else:
+        # Original JSON file processing
+        print(f"\n[FINE_SCANS] Processing JSON files from {directory_path}")
+        pattern = re.compile(r"scan_\d+_params\.json$")
+
+        for filename in os.listdir(directory_path):
+            if not filename.endswith(".json"):
+                continue
+            if filename.startswith("unions_output") or filename.startswith("union_blobs"):
+                continue
+            if pattern.match(filename):
+                continue
+
+            json_path = os.path.join(directory_path, filename)
+            print(f"Processing: {filename}")
+            with open(json_path, "r") as f:
+                data = json.load(f)
+
+            for label, info in data.items():
+                time.sleep(1)
+                cx = info["cx"]
+                cy = info["cy"] 
+                sx = info["num_x"]
+                sy = info["num_y"]
+
+                # Expand scan size by 25% for padding
+                pad_ratio = beamline_params.get("fine_scan_pad_ratio", 0.25)
+                sx_padded = sx * (1 + pad_ratio)
+                sy_padded = sy * (1 + pad_ratio)
+
+                # Define relative scan range around center
+                x_start = -sx_padded / 2
+                x_end = sx_padded / 2
+                y_start = -sy_padded / 2
+                y_end = sy_padded / 2
+
+                # Step counts based on padded size
+                num_steps_x = int(sx_padded / step_size)
+                num_steps_y = int(sy_padded / step_size)
+
+                # ROI still centered on original center
+                roi = {x_motor: cx, y_motor: cy}
+
+                if real_test == 1:
+                    RM.item_add(BPlan(
+                        "recover_pos_and_scan",
+                        label,
+                        roi,
+                        dets,
+                        x_motor,
+                        x_start,
+                        x_end,
+                        num_steps_x,
+                        y_motor,
+                        y_start,
+                        y_end,
+                        num_steps_y,
+                        exp_t,
+                        step_size
+                    ))
+                else:
+                    print(f"[{'OFFLINE' if real_test==2 else 'SIM'}] Would queue: {label}")
+
+        print("Fine scan sent")
+
 
 def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
     """
@@ -2467,6 +2605,15 @@ def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **param
             # Save the INDIVIDUAL JSONs (Headless finds these)
             # This function must create files that do NOT start with "unions_output"  
             save_each_blob_as_individual_scan(formatted_unions, out_dir)
+            
+            # Create and save fine scans table (for remote server compatibility)
+            try:
+                fine_scans_table_path = Path(out_dir) / f"fine_scans_table_{group_name}.csv"
+                table = formatted_unions_to_table(formatted_unions, save_to=str(fine_scans_table_path))
+                if return_results:
+                    all_results['groups'][group_name]['fine_scans_table'] = table.to_dict()
+            except Exception as e:
+                print(f"⚠️ Warning: Could not create fine scans table: {e}")
             
             # Store results for return if requested
             if return_results:
