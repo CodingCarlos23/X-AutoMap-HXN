@@ -2504,6 +2504,14 @@ def analyze_data_local(scan_id=None,
             # This function must create files that do NOT start with "unions_output"  
             save_each_blob_as_individual_scan(formatted_unions, out_dir)
             
+            # Initialize results dictionary for this group
+            all_results['groups'][group_name] = {
+                'formatted_unions': formatted_unions,
+                'group_blobs_for_union': group_blobs_for_union,
+                'element_count': len(elem_list),
+                'processing_mode': 'individual' if len(group_blobs_for_union) == 1 else 'union'
+            }
+            
             # Create and save fine scans table (for remote server compatibility)
             try:
                 fine_scans_table_path = Path(out_dir) / f"fine_scans_table_{group_name}.csv"
@@ -2523,14 +2531,6 @@ def analyze_data_local(scan_id=None,
                 print(f"⚠️ Error creating fine scans table for {group_name}: {type(e).__name__}: {e}")
                 traceback.print_exc()
                 all_results['groups'][group_name]['fine_scans_table'] = {}
-            
-            # Store results for return
-            all_results['groups'][group_name] = {
-                'formatted_unions': formatted_unions,
-                'group_blobs_for_union': group_blobs_for_union,
-                'element_count': len(elem_list),
-                'processing_mode': 'individual' if len(group_blobs_for_union) == 1 else 'union'
-            }
             # Add union data for multi-element groups
             if len(group_blobs_for_union) >= 2:
                 all_results['groups'][group_name]['unions'] = unions
