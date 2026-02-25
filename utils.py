@@ -2166,35 +2166,63 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
         print(".", end="", flush=True)
         time.sleep(poll_interval)
 
-def submit_and_export(**params):
+def submit_and_export(execution_params, scan_params, export_params, segmentation_params=None):
     """
     Step 1: Enqueue scan (if real), wait (if real), export data (real/offline).
-    Returns: (last_id, out_dir)
-    """
-    mode = params.get('execution_params', {}).get('mode') or params.get('real_test', 0)
-    if isinstance(mode, str):
-        mode_map = {'simulation': 0, 'real': 1, 'testing': 1, 'offline': 2}
-        mode = mode_map.get(mode.lower(), 0)
-    is_real = (mode == 1)
-    is_sim  = (mode == 0)
-    is_offline = (mode == 2)
     
-    # Pass remote_seg to the export function
-    is_remote = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
+    Args:
+        execution_params (dict): Execution mode and flags
+        scan_params (dict): Scan parameters (motors, dets, positions, etc)
+        export_params (dict): Export settings (elem_list, data_wd, etc)
+        segmentation_params (dict): Segmentation settings (optional)
+    
+    Returns:
+        tuple: (last_id, out_dir)
+    """
+    if segmentation_params is None:
+        segmentation_params = {}
+    
+    # Get mode from execution_params
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_sim  = (mode == 'simulation')
+    is_offline = (mode == 'offline')
+    
+    # Get remote_seg flag
+    is_remote = segmentation_params.get('remote_seg', False)
 
     # --- 1. Enqueue (Real Only) ---
-    label = params.get('label') or params.get('scan_params', {}).get('label', '')
+    label = scan_params.get('label', '')
     
     if is_real:
         print(f"[REAL] [SUBMIT] Queueing scan '{label}'...")
-        # Filter params for send_fly2d_to_queue...
-        try:
-            valid_keys = inspect.signature(send_fly2d_to_queue).parameters.keys()
-            clean_params = {k: v for k, v in params.items() if k in valid_keys}
-        except NameError:
-            clean_params = params
         
-        send_fly2d_to_queue(**clean_params)
+        # Build flat parameter dict for send_fly2d_to_queue
+        flat_params = {
+            'label': label,
+            'dets': scan_params.get('dets', 'dets_fast'),
+            'mot1': scan_params.get('mot1', 'zpssx'),
+            'mot1_s': scan_params.get('mot1_s', 0),
+            'mot1_e': scan_params.get('mot1_e', 0),
+            'mot2': scan_params.get('mot2', 'zpssy'),
+            'mot2_s': scan_params.get('mot2_s', 0),
+            'mot2_e': scan_params.get('mot2_e', 0),
+            'exp_t': scan_params.get('exp_t', 0.01),
+            'roi_positions': scan_params.get('roi_positions_file'),
+            'scan_id': scan_params.get('scan_id'),
+            'zp_move_flag': scan_params.get('zp_move_flag', 1),
+            'smar_move_flag': scan_params.get('smar_move_flag', 1),
+            'elem_list': export_params.get('elem_list', []),
+            'export_norm': export_params.get('export_norm', 'sclr1_ch4'),
+            'data_wd': export_params.get('data_wd', '.'),
+        }
+        
+        # Calculate mot1_n and mot2_n from step_size
+        step_size = scan_params.get('step_size', 1.0)
+        flat_params['mot1_n'] = int(abs(flat_params['mot1_e'] - flat_params['mot1_s']) / step_size) if step_size > 0 else 1
+        flat_params['mot2_n'] = int(abs(flat_params['mot2_e'] - flat_params['mot2_s']) / step_size) if step_size > 0 else 1
+        
+        send_fly2d_to_queue(**flat_params)
         RM.queue_start()
         time.sleep(1)
         
@@ -2219,15 +2247,15 @@ def submit_and_export(**params):
         pass
 
     # --- 3. Get ID and Folder ---
-    data_wd = params.get('data_wd') or params.get('export_params', {}).get('data_wd', '/data/users/current_user')
+    data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     if is_real:
         hdr = db[-1]
         last_id = hdr.start['scan_id']
     elif is_offline:
-        last_id = params.get('target_id') or params.get('export_params', {}).get('target_id')
+        last_id = export_params.get('target_id')
         if last_id is None:
-            raise ValueError("Mode is Offline (2) but no 'target_id' provided!")
+            raise ValueError("Mode is Offline but no 'target_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
     else:
         last_id = 111111 
@@ -2238,7 +2266,7 @@ def submit_and_export(**params):
     print(f"[EXPORT] Output directory: {out_dir}")
 
     # --- 4. Export Data ---
-    all_elem_list = params.get('elem_list') or params.get('export_params', {}).get('elem_list', [])
+    all_elem_list = export_params.get('elem_list', [])
     
     # Flatten nested list and remove duplicates
     if all_elem_list and isinstance(all_elem_list[0], list):
@@ -2251,14 +2279,14 @@ def submit_and_export(**params):
         print(f"[{'REAL' if is_real else 'OFFLINE'}] Exporting data (remote_seg={is_remote})...")
         export_xrf_roi_data(
             last_id,
-            norm=params.get('export_norm') or params.get('export_params', {}).get('export_norm', 'sclr1_ch4'),
+            norm=export_params.get('export_norm', 'sclr1_ch4'),
             elem_list=all_elem_list,
             wd=out_dir,
             remote_seg=is_remote # Pass the remote flag
         )
         export_scan_params(
             sid=last_id,
-            zp_flag=bool(params.get('zp_move_flag') or params.get('scan_params', {}).get('zp_move_flag', True)),
+            zp_flag=bool(scan_params.get('zp_move_flag', True)),
             save_to=out_dir
         )
     else:
@@ -2932,25 +2960,31 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             traceback.print_exc()
 
 
-def submit_fine_scans_to_queue(scan_id, out_dir, **params):
+def submit_fine_scans_to_queue(scan_id, out_dir, execution_params, params_dict=None):
     """
     Step 3: Queue Submission.
-    Only actually queues if real_test == 1. 
-    Offline (2) and Sim (0) will just print.
+    Only actually queues if mode == 'real'. 
+    Offline and Sim will just print.
+    
+    Args:
+        scan_id (int): Scan ID for fine scans
+        out_dir (str): Output directory
+        execution_params (dict): Execution mode and flags
+        params_dict (dict): Full params dict for headless_send_queue_fine_scan (optional)
     """
-    mode = params.get('execution_params', {}).get('mode') or params.get('real_test', 0)
-    if isinstance(mode, str):
-        mode_map = {'simulation': 0, 'real': 1, 'testing': 1, 'offline': 2}
-        mode = mode_map.get(mode.lower(), 0)
-    is_real = (mode == 1)
+    # Get mode from execution_params
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
     
     print(f"\n[QUEUE] Processing fine scans in: {out_dir}")
     
     if is_real:
-        headless_send_queue_fine_scan(out_dir, params, scan_id, 1)
+        # Use params_dict if provided, otherwise use execution_params
+        params_to_use = params_dict if params_dict else {'execution_params': execution_params}
+        headless_send_queue_fine_scan(out_dir, params_to_use, scan_id, 1)
     else:
-        # Covers both Sim (0) and Offline (2)
-        print(f"[{'OFFLINE' if mode==2 else 'SIM'}] Skipping actual queue submission.")
+        # Covers both Sim and Offline
+        print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Skipping actual queue submission.")
         print(f"Would call: headless_send_queue_fine_scan('{out_dir}', ...)")
 
 def run_fine_scans(is_real): 
@@ -3007,8 +3041,8 @@ def load_and_queue(json_path, target_id=None,
         params['mot1_n'] = int(abs(params['mot1_e'] - params['mot1_s']) / step)
         params['mot2_n'] = int(abs(params['mot2_e'] - params['mot2_s']) / step)
 
-    # 3) Get mode from JSON config (default to simulation)
-    mode = (params.get('execution_params', {}).get('mode') or params.get('mode', 'simulation')).lower()
+    # 3) Get mode from JSON config
+    mode = str(params.get('execution_params', {}).get('mode', 'simulation')).lower()
     is_real = (mode == 'real')
     is_sim  = (mode == 'simulation')
     is_offline = (mode == 'offline')
@@ -3108,7 +3142,12 @@ def load_and_queue(json_path, target_id=None,
         os.makedirs(out_dir, exist_ok=True)
         print(f"[ANALYSIS-ONLY] Using existing scan {scan_id}, output dir: {out_dir}")
     else:
-        scan_id, out_dir = submit_and_export(**params) #this handles the remote submission
+        scan_id, out_dir = submit_and_export(
+            params['execution_params'],
+            params['scan_params'],
+            params['export_params'],
+            params.get('segmentation_params')
+        )
     
     # Update params with scan_id and out_dir
     params['scan_id'] = scan_id
@@ -3143,7 +3182,12 @@ def load_and_queue(json_path, target_id=None,
         return analysis_results
     
     # C. Queue (Will skip if mode != real)
-    submit_fine_scans_to_queue(**params)
+    submit_fine_scans_to_queue(
+        scan_id,
+        out_dir,
+        params['execution_params'],
+        params
+    )
     
     # D. Run (Will skip if mode != real)
     run_fine_scans(is_real)
