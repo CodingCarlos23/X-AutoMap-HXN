@@ -1301,6 +1301,7 @@ def is_featureless(img):
     edge_map = cv2.Canny(img.astype(np.uint8), 50, 150)
     edge_ratio = np.count_nonzero(edge_map) / img.size
 
+
     return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
 
@@ -1310,6 +1311,7 @@ def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3,
 
     if is_featureless(img):
         print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
+        print(f"[DEBUG] is_featureless triggered! Max: {img.max()}, Mean: {img.mean()}, Entropy: {shannon_entropy(img)}, PNR: {(img.max() - img.mean()) / (img.std() + 1e-5)}, Edge Ratio: {np.count_nonzero(cv2.Canny(img.astype(np.uint8), 50, 150)) / img.size}")
         return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
 
     if blur_kernel:
@@ -2588,7 +2590,7 @@ def load_and_queue(json_path, real_test, target_id=None,
         'cellpose_flow_threshold': params.get('cellpose_flow_threshold', 0.4),
         'cellpose_cellprob_threshold': params.get('cellpose_cellprob_threshold', 0.0),
         'cellpose_channels': params.get('cellpose_channels', [0, 0]),
-        'cellpose_min_diameter': params.get('cellpose_min_diameter', 0),
+        'cellpose_min_diameter': params.get('cellpose_min_diameter', 2),
         'cellpose_max_diameter': params.get('cellpose_max_diameter', float('100')),
         
         # Connected components parameters
