@@ -300,11 +300,28 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     
     # Extract beamline parameters from scan_params
     dets = scan_params.get('dets', 'dets_fast')
+    # Convert detector string to detector names list (match send_fly2d_to_queue behavior)
+    det_names = ['fs', 'eiger2', 'xspress3']
+    
     x_motor = scan_params.get('mot1', 'zpssx')
     y_motor = scan_params.get('mot2', 'zpssy')
     exp_t = fine_scan_params.get('exp_t_fine', scan_params.get('exp_t', 0.01))
     step_size = fine_scan_params.get('step_size_fine', 0.1)
     fine_scan_pad_ratio = fine_scan_params.get('fine_scan_pad_ratio', 0.25)
+    
+    # Additional parameters for fly2d_qserver_scan_export
+    zp_move_flag = scan_params.get('zp_move_flag', 0)
+    smar_move_flag = scan_params.get('smar_move_flag', 0)
+    ic1_count = scan_params.get('ic1_count', 55000)
+    
+    # Export parameters
+    export_params = params.get('export_params', {})
+    elem_list = export_params.get('elem_list', [])
+    # Flatten nested list if needed
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list(set(elem for sublist in elem_list for elem in sublist))
+    export_norm = export_params.get('export_norm', 'sclr1_ch4')
+    data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     # Determine which table to use
     if fine_scans_table is None:
@@ -355,6 +372,7 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
 
         # ROI centered on original center
         roi = {x_motor: cx, y_motor: cy}
+        roi_json = json.dumps(roi)
 
         if is_real:
             print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
@@ -363,7 +381,7 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
             RM.item_add(BPlan(
                 "fly2d_qserver_scan_export",
                 label,
-                dets,
+                det_names,  # Use detector names list, not string
                 x_motor,
                 x_start,
                 x_end,
@@ -372,7 +390,15 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
                 y_start,
                 y_end,
                 num_steps_y,
-                exp_t
+                exp_t,
+                roi_json,
+                "",  # scan_id (empty for fine scans)
+                zp_move_flag,
+                smar_move_flag,
+                ic1_count,
+                json.dumps(elem_list),
+                export_norm,
+                data_wd
             ))
         else:
             print(f"[{mode.upper()}] Would queue: {label} (cx={cx:.2f}, cy={cy:.2f})")
