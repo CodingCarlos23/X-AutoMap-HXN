@@ -2518,7 +2518,7 @@ def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **param
     return None
 
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=True):
     """
     Plot image with bounding boxes overlay.
     
@@ -2527,7 +2527,7 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
         formatted_unions: dict with union/blob data containing 'image_center' and 'image_length' (or 'box_x', 'box_y', 'box_size')
         title: plot title
         save_path: optional path to save the figure
-        show_plot: whether to display the plot (may fail in headless mode)
+        show_plot: whether to display the plot (default: True for interactive sessions)
     """
     import matplotlib
     # Use non-interactive backend if not displaying
