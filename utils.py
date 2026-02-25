@@ -1314,7 +1314,7 @@ def is_featureless(img):
     return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
 
-jso
+
 def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3, 3),):
     img = np.nan_to_num(img)
 
