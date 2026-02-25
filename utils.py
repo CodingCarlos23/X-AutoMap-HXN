@@ -1876,7 +1876,7 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None):
             filename = save_to if save_to.lower().endswith(".json") else save_to + ".json"
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, "w") as f:
-            json.dump(result, f, indent=2)
+            json.dump(make_json_serializable(result), f, indent=2)
 
     return result
 
