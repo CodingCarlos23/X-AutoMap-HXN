@@ -1762,7 +1762,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     
     # Append additional metadata if provided
     if append_meta_with:
-        meta.update(append_meta_with)
+        meta['additional'] = append_meta_with
 
     import time
     timestamp = int(time.time())
