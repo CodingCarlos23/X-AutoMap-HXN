@@ -1785,6 +1785,11 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     # Collect all normalized XRF images for stacking
     xrf_images = []
     element_names = []
+
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list(set(elem for sublist in elem_list for elem in sublist))
+    else:
+        elem_list = list(set(elem_list)) if elem_list else []
     
     for elem in sorted(elem_list):
         try:
