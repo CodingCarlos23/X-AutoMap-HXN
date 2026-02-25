@@ -172,16 +172,16 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
 
         scan_data = {
             idx: {  # Use the union box title as the key
-                "cx": cx,
-                "cy": cy,
-                "num_x": sx,
-                "num_y": sy
+                "cx": float(cx),  # Ensure float conversion for JSON serialization
+                "cy": float(cy),
+                "num_x": float(sx),
+                "num_y": float(sy)
             }
         }
 
         file_path = output_dir / f"{idx}.json"
         with open(file_path, "w") as f:
-            json.dump(scan_data, f, indent=4)
+            json.dump(make_json_serializable(scan_data), f, indent=4)
 
 def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, 
                                     real_test = 1, 
@@ -519,20 +519,29 @@ def create_all_elements_tiff(tiff_paths, output_dir, element_list, precomputed_b
         traceback.print_exc()
 
 def make_json_serializable(obj):
+    """
+    Recursively convert numpy types and other non-JSON-serializable objects to JSON-safe types.
+    Handles numpy integers (uint8, int32, int64, etc.), floats, arrays, and nested structures.
+    """
     if isinstance(obj, dict):
         return {k: make_json_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         return [make_json_serializable(i) for i in obj]
-    elif isinstance(obj, tuple):
-        return tuple(make_json_serializable(i) for i in obj)
-    elif isinstance(obj, (np.integer, np.int_)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float_)):
-        return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    else:
+    # Catch all numpy scalar types (uint8, int32, int64, float32, float64, etc.)
+    elif isinstance(obj, (np.integer, np.uint8, np.int8, np.int16, np.int32, np.int64, 
+                         np.uint16, np.uint32, np.uint64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (bool, np.bool_)):
+        return bool(obj)
+    elif isinstance(obj, (int, float, str, bool, type(None))):
         return obj
+    else:
+        # Fallback: try to convert to string for unknown types
+        return str(obj)
 
 #merge boxes option 
 
@@ -698,7 +707,7 @@ def process_and_save_json(input_path, overlap_thresh=0.5):
     output_path = f"{base}_merged.json"
 
     with open(output_path, "w") as f:
-        json.dump(merged, f, indent=2)
+        json.dump(make_json_serializable(merged), f, indent=2)
 
     print(f"✅ Merged JSON saved to: {output_path}")
     return output_path
@@ -1305,7 +1314,7 @@ def is_featureless(img):
     return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
 
-
+jso
 def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3, 3),):
     img = np.nan_to_num(img)
 
@@ -2442,8 +2451,10 @@ def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **param
         if formatted_unions:
             # Save the "Master" output JSON (Headless ignores this via startswith("unions_output"))
             out_json = Path(out_dir) / f"unions_output_{group_name}.json"
+            # Convert to JSON-serializable format
+            serializable_unions = make_json_serializable(formatted_unions)
             with open(out_json, "w") as f:
-                json.dump(formatted_unions, f, indent=2)
+                json.dump(serializable_unions, f, indent=2)
             
             # Save the INDIVIDUAL JSONs (Headless finds these)
             # This function must create files that do NOT start with "unions_output"  
