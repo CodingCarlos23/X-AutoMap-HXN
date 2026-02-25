@@ -2589,7 +2589,7 @@ def load_and_queue(json_path, real_test, target_id=None,
         'cellpose_cellprob_threshold': params.get('cellpose_cellprob_threshold', 0.0),
         'cellpose_channels': params.get('cellpose_channels', [0, 0]),
         'cellpose_min_diameter': params.get('cellpose_min_diameter', 0),
-        'cellpose_max_diameter': params.get('cellpose_max_diameter', float('inf')),
+        'cellpose_max_diameter': params.get('cellpose_max_diameter', float('100')),
         
         # Connected components parameters
         'connected_components_connectivity': params.get('connected_components_connectivity', 8),
