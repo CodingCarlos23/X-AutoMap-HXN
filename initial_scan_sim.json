@@ -25,7 +25,7 @@
   "fine_scan_params": {
     "step_size_fine": 0.05,
     "exp_t_fine": 0.01,
-    "fine_scan_pad_ratio": 0.3
+    "fine_scan_pad_ratio": 0.0
   },
 
   "export_params": {
