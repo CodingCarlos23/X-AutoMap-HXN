@@ -167,8 +167,16 @@ def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
     output_dir.mkdir(exist_ok=True)
 
     for idx, info in json_safe_data.items():
-        cx, cy = info["real_center_um"]
-        sx, sy = info["real_size_um"]
+        # Handle both old format (real_center_um, real_size_um) and new format (cx, cy, num_x, num_y)
+        if "real_center_um" in info and "real_size_um" in info:
+            cx, cy = info["real_center_um"]
+            sx, sy = info["real_size_um"]
+        elif "cx" in info and "cy" in info and "num_x" in info and "num_y" in info:
+            cx, cy = info["cx"], info["cy"]
+            sx, sy = info["num_x"], info["num_y"]
+        else:
+            print(f"⚠️ Skipping {idx}: missing required keys (cx/cy or real_center_um)")
+            continue
 
         scan_data = {
             idx: {  # Use the union box title as the key
