@@ -2638,6 +2638,7 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             traceback.print_exc()
 
 
+def submit_fine_scans_to_queue(scan_id, out_dir, **params):
     """
     Step 3: Queue Submission.
     Only actually queues if real_test == 1. 
