@@ -103,18 +103,25 @@ def formatted_unions_to_table(formatted_unions, save_to=None):
     Returns:
         pandas DataFrame with columns: label, cx, cy, num_x, num_y, and other metadata
     """
-   
+    if not formatted_unions:
+        print("[TABLE] Warning: formatted_unions is empty, creating empty DataFrame")
+        return pd.DataFrame(columns=['label', 'cx', 'cy', 'num_x', 'num_y'])
     
     rows = []
     for label, info in formatted_unions.items():
+        # Validate required keys
+        if not all(key in info for key in ['cx', 'cy', 'num_x', 'num_y']):
+            missing = [key for key in ['cx', 'cy', 'num_x', 'num_y'] if key not in info]
+            print(f"[TABLE WARNING] Box '{label}' missing keys: {missing}, skipping or using defaults")
+        
         row = {
             'label': label,
-            'cx': info.get('cx'),
-            'cy': info.get('cy'),
-            'num_x': info.get('num_x'),
-            'num_y': info.get('num_y'),
-            'color': info.get('color'),
-            'element': info.get('element'),
+            'cx': info.get('cx', 0),
+            'cy': info.get('cy', 0),
+            'num_x': info.get('num_x', 0),
+            'num_y': info.get('num_y', 0),
+            'color': info.get('color', 'unknown'),
+            'element': info.get('element', 'unknown'),
         }
         
         # Add optional fields if present
@@ -130,10 +137,17 @@ def formatted_unions_to_table(formatted_unions, save_to=None):
     
     df = pd.DataFrame(rows)
     
+    # Ensure numeric columns
+    for col in ['cx', 'cy', 'num_x', 'num_y']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
     if save_to:
+        os.makedirs(os.path.dirname(save_to) if os.path.dirname(save_to) else '.', exist_ok=True)
         df.to_csv(save_to, index=False)
         print(f"✅ Fine scan table saved to: {save_to}")
     
+    print(f"[TABLE] Created table with {len(df)} rows: {list(df.columns)}")
     return df
 
 
@@ -241,152 +255,110 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True):
                    remote_seg=remote_seg, 
                    proceed_fine_scans=proceed_with_fine_scan)
 
-def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test, fine_scans_table=None):
+def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     """
-    Performs fine scan for each blob in the JSON file or from a table.
+    Performs fine scans from a fine_scans_table (DataFrame or CSV path).
+    Reads all configuration from a single JSON config file with nested structure.
     
     Args:
-        directory_path: Directory containing JSON scan configuration files
-        beamline_params: Dictionary of beamline parameters
-        scan_ID: Base scan ID
-        real_test: Whether this is a real test (1) or simulation (0)
-        fine_scans_table: Optional pandas DataFrame with fine scan parameters (cx, cy, num_x, num_y, label)
-                         If provided, uses this table instead of scanning JSON files
+        json_path: Path to JSON config file containing:
+                   - execution_params (mode, etc.)
+                   - scan_params (mot1, mot2, exp_t, step_size_fine, etc.)
+                   - fine_scans_table_path (optional, path to CSV with fine scan parameters)
+        fine_scans_table: Optional pandas DataFrame or CSV path with fine scan parameters
+                         Columns required: label, cx, cy, num_x, num_y
+                         If not provided, tries to load from JSON config
     
-    If fine_scans_table is provided:
-    - Reads scan parameters from the table directly
-    - Useful for remote server workflows where table results are more convenient
-    
-    Otherwise:
-    - Reads all JSON files in directory_path with scan parameters
+    Example:
+        headless_send_queue_fine_scan('initial_scan_sim.json', fine_scans_table='fine_scans_table_RGB.csv')
     """
     
-    dets = beamline_params.get("det_name", "dets_fast")
-    x_motor = beamline_params.get("mot1", "zpssx")
-    y_motor = beamline_params.get("mot2", "zpssy")
-    exp_t = beamline_params.get("exp_t", 0.01)
-    step_size = beamline_params.get("step_size_fine", 100)
+    # Load JSON config
+    with open(json_path, 'r') as f:
+        params = json.load(f)
     
-    # Process from table if provided
-    if fine_scans_table is not None:
-        if isinstance(fine_scans_table, str):
-            # Load from CSV path
-            fine_scans_table = load_fine_scans_table(fine_scans_table)
-        
-        print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table")
-        
-        for idx, row in fine_scans_table.iterrows():
-            time.sleep(0.5)
-            label = row['label']
-            cx = row['cx']
-            cy = row['cy']
-            sx = row['num_x']
-            sy = row['num_y']
-            
-            # Expand scan size by 25% for padding
-            pad_ratio = beamline_params.get("fine_scan_pad_ratio", 0.25)
-            sx_padded = sx * (1 + pad_ratio)
-            sy_padded = sy * (1 + pad_ratio)
-
-            # Define relative scan range around center
-            x_start = -sx_padded / 2
-            x_end = sx_padded / 2
-            y_start = -sy_padded / 2
-            y_end = sy_padded / 2
-
-            # Step counts based on padded size
-            num_steps_x = int(sx_padded / step_size)
-            num_steps_y = int(sy_padded / step_size)
-
-            # ROI centered on original center
-            roi = {x_motor: cx, y_motor: cy}
-
-            if real_test == 1:
-                from ..scanning.queue import send_fly2d_to_queue
-                
-                print(f"[FINE_SCANS] Queuing: {label}")
-                RM.item_add(BPlan(
-                    "fly2d_qserver_scan_export",
-                    label,
-                    dets,
-                    x_motor,
-                    x_start,
-                    x_end,
-                    num_steps_x,
-                    y_motor,
-                    y_start,
-                    y_end,
-                    num_steps_y,
-                    exp_t,
-                    step_size
-                ))
-            else:
-                print(f"[{'OFFLINE' if real_test==2 else 'SIM'}] Would queue: {label}")
+    # Extract parameters from nested structure
+    execution_params = params.get('execution_params', {})
+    scan_params = params.get('scan_params', {})
     
-    else:
-        # Original JSON file processing
-        print(f"\n[FINE_SCANS] Processing JSON files from {directory_path}")
-        pattern = re.compile(r"scan_\d+_params\.json$")
+    # Get mode
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_offline = (mode == 'offline')
+    is_sim = (mode == 'simulation')
+    
+    # Extract beamline parameters from scan_params
+    dets = scan_params.get('dets', 'dets_fast')
+    x_motor = scan_params.get('mot1', 'zpssx')
+    y_motor = scan_params.get('mot2', 'zpssy')
+    exp_t = scan_params.get('exp_t', 0.01)
+    step_size = scan_params.get('step_size_fine', 100)
+    fine_scan_pad_ratio = params.get('fine_scan_pad_ratio', 0.25)
+    
+    # Determine which table to use
+    if fine_scans_table is None:
+        # Try to load from JSON config
+        table_path = params.get('fine_scans_table_path')
+        if table_path:
+            print(f"[FINE_SCANS] Loading table from JSON config: {table_path}")
+            fine_scans_table = load_fine_scans_table(table_path)
+        else:
+            print(f"[FINE_SCANS] No fine_scans_table provided and no fine_scans_table_path in JSON")
+            return
+    elif isinstance(fine_scans_table, str):
+        # Load from CSV path
+        print(f"[FINE_SCANS] Loading table from CSV: {fine_scans_table}")
+        fine_scans_table = load_fine_scans_table(fine_scans_table)
+    
+    # Process each fine scan from the table
+    print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table (Mode: {mode.upper()})")
+    
+    for idx, row in fine_scans_table.iterrows():
+        time.sleep(0.5)
+        label = row['label']
+        cx = row['cx']
+        cy = row['cy']
+        sx = row['num_x']
+        sy = row['num_y']
+        
+        # Expand scan size by padding ratio
+        sx_padded = sx * (1 + fine_scan_pad_ratio)
+        sy_padded = sy * (1 + fine_scan_pad_ratio)
 
-        for filename in os.listdir(directory_path):
-            if not filename.endswith(".json"):
-                continue
-            if filename.startswith("unions_output") or filename.startswith("union_blobs"):
-                continue
-            if pattern.match(filename):
-                continue
+        # Define relative scan range around center
+        x_start = -sx_padded / 2
+        x_end = sx_padded / 2
+        y_start = -sy_padded / 2
+        y_end = sy_padded / 2
 
-            json_path = os.path.join(directory_path, filename)
-            print(f"Processing: {filename}")
-            with open(json_path, "r") as f:
-                data = json.load(f)
+        # Step counts based on padded size
+        num_steps_x = int(sx_padded / step_size)
+        num_steps_y = int(sy_padded / step_size)
 
-            for label, info in data.items():
-                time.sleep(1)
-                cx = info["cx"]
-                cy = info["cy"] 
-                sx = info["num_x"]
-                sy = info["num_y"]
+        # ROI centered on original center
+        roi = {x_motor: cx, y_motor: cy}
 
-                # Expand scan size by 25% for padding
-                pad_ratio = beamline_params.get("fine_scan_pad_ratio", 0.25)
-                sx_padded = sx * (1 + pad_ratio)
-                sy_padded = sy * (1 + pad_ratio)
+        if is_real:
+            print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
+            RM.item_add(BPlan(
+                "fly2d_qserver_scan_export",
+                label,
+                dets,
+                x_motor,
+                x_start,
+                x_end,
+                num_steps_x,
+                y_motor,
+                y_start,
+                y_end,
+                num_steps_y,
+                exp_t
+            ))
+        else:
+            print(f"[{mode.upper()}] Would queue: {label} (cx={cx:.2f}, cy={cy:.2f})")
+    
+    print(f"[FINE_SCANS] ✅ All {len(fine_scans_table)} fine scans {'queued' if is_real else 'prepared'}")
 
-                # Define relative scan range around center
-                x_start = -sx_padded / 2
-                x_end = sx_padded / 2
-                y_start = -sy_padded / 2
-                y_end = sy_padded / 2
-
-                # Step counts based on padded size
-                num_steps_x = int(sx_padded / step_size)
-                num_steps_y = int(sy_padded / step_size)
-
-                # ROI still centered on original center
-                roi = {x_motor: cx, y_motor: cy}
-
-                if real_test == 1:
-                    RM.item_add(BPlan(
-                        "recover_pos_and_scan",
-                        label,
-                        roi,
-                        dets,
-                        x_motor,
-                        x_start,
-                        x_end,
-                        num_steps_x,
-                        y_motor,
-                        y_start,
-                        y_end,
-                        num_steps_y,
-                        exp_t,
-                        step_size
-                    ))
-                else:
-                    print(f"[{'OFFLINE' if real_test==2 else 'SIM'}] Would queue: {label}")
-
-        print("Fine scan sent")
 
 
 def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
@@ -2120,7 +2092,7 @@ def send_fly2d_to_queue(label,
                       data_wd))
     print("Coarse scan sent to queue.")
 
-def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
+def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True):
     """
     Wait until QServer queue is empty and manager is idle.
     Optionally restart the queue if stuck in idle with items remaining.
@@ -2545,10 +2517,22 @@ def analyze_data_local(scan_id=None,
             # Create and save fine scans table (for remote server compatibility)
             try:
                 fine_scans_table_path = Path(out_dir) / f"fine_scans_table_{group_name}.csv"
+                print(f"[TABLE] Creating fine scans table from {len(formatted_unions)} formatted unions...")
                 table = formatted_unions_to_table(formatted_unions, save_to=str(fine_scans_table_path))
-                all_results['groups'][group_name]['fine_scans_table'] = table.to_dict()
+                if not table.empty:
+                    # Store table for passing to fine scans submission
+                    if 'fine_scans_tables' not in all_results:
+                        all_results['fine_scans_tables'] = {}
+                    all_results['fine_scans_tables'][group_name] = table
+                    all_results['groups'][group_name]['fine_scans_table'] = table.to_dict()
+                    print(f"[TABLE] ✅ Table saved and stored in results")
+                else:
+                    print(f"[TABLE] ⚠️ Table is empty, skipping storage in results")
+                    all_results['groups'][group_name]['fine_scans_table'] = {}
             except Exception as e:
-                print(f"⚠️ Warning: Could not create fine scans table: {e}")
+                print(f"⚠️ Error creating fine scans table for {group_name}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                all_results['groups'][group_name]['fine_scans_table'] = {}
             
             # Store results for return
             all_results['groups'][group_name] = {
@@ -2814,9 +2798,15 @@ def analyze_data_get_fine_scans_table(scan_id=None,
 
         # Convert to table if we have formatted unions
         if formatted_unions:
-            table = formatted_unions_to_table(formatted_unions)
-            fine_scans_tables[group_name] = table
-            print(f"✅ Created fine scans table for {group_name}: {len(table)} rows")
+            try:
+                table = formatted_unions_to_table(formatted_unions)
+                fine_scans_tables[group_name] = table
+                print(f"✅ Created fine scans table for {group_name}: {len(table)} rows")
+            except Exception as e:
+                print(f"❌ Error creating table for {group_name}: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                fine_scans_tables[group_name] = pd.DataFrame()  # Empty dataframe as fallback
 
     print("[ANALYSIS-TABLE] Done.")
     
@@ -2944,17 +2934,18 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             traceback.print_exc()
 
 
-def submit_fine_scans_to_queue(scan_id, out_dir, execution_params, params_dict=None):
+def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
     """
     Step 3: Queue Submission.
     Only actually queues if mode == 'real'. 
     Offline and Sim will just print.
     
     Args:
+        json_path (str): Path to JSON config file
         scan_id (int): Scan ID for fine scans
         out_dir (str): Output directory
         execution_params (dict): Execution mode and flags
-        params_dict (dict): Full params dict for headless_send_queue_fine_scan (optional)
+        fine_scans_tables (dict): Pre-computed fine scans tables by group_name (optional)
     """
     # Get mode from execution_params
     mode = str(execution_params.get('mode', 'simulation')).lower()
@@ -2963,13 +2954,20 @@ def submit_fine_scans_to_queue(scan_id, out_dir, execution_params, params_dict=N
     print(f"\n[QUEUE] Processing fine scans in: {out_dir}")
     
     if is_real:
-        # Use params_dict if provided, otherwise use execution_params
-        params_to_use = params_dict if params_dict else {'execution_params': execution_params}
-        headless_send_queue_fine_scan(out_dir, params_to_use, scan_id, 1)
+        # Process each table if provided
+        if fine_scans_tables:
+            for group_name, table in fine_scans_tables.items():
+                print(f"[QUEUE] Submitting {len(table)} fine scans for group '{group_name}'")
+                headless_send_queue_fine_scan(json_path, fine_scans_table=table)
+        else:
+            # Fallback: load from JSON config or CSV files
+            headless_send_queue_fine_scan(json_path)
     else:
         # Covers both Sim and Offline
         print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Skipping actual queue submission.")
-        print(f"Would call: headless_send_queue_fine_scan('{out_dir}', ...)")
+        if fine_scans_tables:
+            print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Would queue {sum(len(t) for t in fine_scans_tables.values())} fine scans from {len(fine_scans_tables)} groups")
+        print(f"Would call: headless_send_queue_fine_scan('{json_path}')")
 
 def run_fine_scans(is_real): 
     """
@@ -3139,6 +3137,7 @@ def load_and_queue(json_path, target_id=None,
     
     # B. Analyze
     analysis_results = None
+    fine_scans_tables = None
     if remote_seg:
         print("no reciever implemented yet, skipping remote analysis...")
         pass 
@@ -3155,6 +3154,10 @@ def load_and_queue(json_path, target_id=None,
     else:
         # For analysis-only mode, return the results
         analysis_results = analyze_data_local(scan_id=scan_id, params=params)
+        # Extract fine scans tables if available (created during analysis)
+        if analysis_results and 'fine_scans_tables' in analysis_results:
+            fine_scans_tables = analysis_results['fine_scans_tables']
+            print(f"[WORKFLOW] Captured {len(fine_scans_tables)} fine scans table groups from analysis")
 
     if not proceed_fine_scans:
         print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
@@ -3167,10 +3170,11 @@ def load_and_queue(json_path, target_id=None,
     
     # C. Queue (Will skip if mode != real)
     submit_fine_scans_to_queue(
+        json_path,
         scan_id,
         out_dir,
         params['execution_params'],
-        params
+        fine_scans_tables=fine_scans_tables
     )
     
     # D. Run (Will skip if mode != real)
