@@ -1883,7 +1883,10 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[],
     """
     if remote_seg:
        # _export_xrf_remote(scan_id, norm, elem_list)
-       _export_xrf_remote_container(scan_id, norm, elem_list, append_meta_with)
+       _export_xrf_remote_container(scan_id, 
+                                    norm=norm, 
+                                    elem_list=elem_list, 
+                                    append_meta_with=append_meta_with)
     else:
         _export_xrf_local(scan_id, norm, elem_list, wd)
 
@@ -3226,7 +3229,7 @@ def load_and_queue(json_path, target_id=None,
     if remote_seg:
         elem_list=params['export_params']['elem_list']
         export_xrf_roi_data(scan_id, 
-                            out_dir, 
+                            norm=params['export_params']['export_norm'],
                             elem_list=elem_list, 
                             remote_seg=remote_seg)  # Ensure ROI data is exported for remote analysis
         print(f"{elem_list=}")
