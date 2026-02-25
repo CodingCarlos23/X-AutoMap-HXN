@@ -1,6 +1,7 @@
 {
   "label":           "my_scan_001",
   "dets":            "dets_fast",
+  "det_names":       ["fs", "eiger2", "xspress3"],
   "mot1":            "zpssx",
   "mot1_s":          -12.5,
   "mot1_e":          12.5,

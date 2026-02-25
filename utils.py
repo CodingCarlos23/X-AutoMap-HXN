@@ -300,8 +300,8 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     
     # Extract beamline parameters from scan_params
     dets = scan_params.get('dets', 'dets_fast')
-    # Convert detector string to detector names list (match send_fly2d_to_queue behavior)
-    det_names = ['fs', 'eiger2', 'xspress3']
+    # Get detector names list from config, with fallback to default
+    det_names = scan_params.get('det_names', ['fs', 'eiger2', 'xspress3'])
     
     x_motor = scan_params.get('mot1', 'zpssx')
     y_motor = scan_params.get('mot2', 'zpssy')
@@ -2100,6 +2100,7 @@ def _fly2d_qserver_scan_export(label,
 
 def send_fly2d_to_queue(label,
                         dets,
+                        det_names,
                         mot1, mot1_s, mot1_e, mot1_n,
                         mot2, mot2_s, mot2_e, mot2_n,
                         exp_t,
@@ -2112,8 +2113,9 @@ def send_fly2d_to_queue(label,
                         export_norm='sclr1_ch4',
                         data_wd='.',
                         real_test=0):
-    # det_names = [d.name for d in eval(dets)]
-    det_names = ['fs', 'eiger2', 'xspress3']
+    # Use provided det_names or fallback to default
+    if not det_names:
+        det_names = ['fs', 'eiger2', 'xspress3']
 
     roi_json = ""
     if isinstance(roi_positions, dict):
@@ -2218,6 +2220,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
         flat_params = {
             'label': label,
             'dets': scan_params.get('dets', 'dets_fast'),
+            'det_names': scan_params.get('det_names', ['fs', 'eiger2', 'xspress3']),
             'mot1': scan_params.get('mot1', 'zpssx'),
             'mot1_s': scan_params.get('mot1_s', 0),
             'mot1_e': scan_params.get('mot1_e', 0),
