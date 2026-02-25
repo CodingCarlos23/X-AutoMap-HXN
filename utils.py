@@ -2490,6 +2490,25 @@ def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **param
 
         create_rgb_tiff(tiff_paths, out_dir, elem_list, group_name)
         create_all_elements_tiff(tiff_paths, out_dir, elem_list, group_blobs_vis, group_name)
+        
+        # Plot analysis results with bounding boxes
+        # Collect formatted unions for plotting
+        formatted_unions_dict = {}
+        for elem_list in elem_list_of_lists:
+            group_name_plot = "".join(elem_list)
+            # Reconstruct formatted_unions from all_results if available
+            if return_results and 'groups' in all_results:
+                if group_name_plot in all_results['groups']:
+                    formatted_unions_dict[group_name_plot] = all_results['groups'][group_name_plot]['formatted_unions']
+            else:
+                # Try to load from saved files
+                unions_json = Path(out_dir) / f"unions_output_{group_name_plot}.json"
+                if unions_json.exists():
+                    with open(unions_json, 'r') as f:
+                        formatted_unions_dict[group_name_plot] = json.load(f)
+        
+        if formatted_unions_dict:
+            plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir)
 
     print("[ANALYSIS] Done.")
     
@@ -2499,7 +2518,126 @@ def analyze_data_local(scan_id=None, out_dir=None, return_results=False, **param
     return None
 
 
-def submit_fine_scans_to_queue(scan_id, out_dir, **params):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+    """
+    Plot image with bounding boxes overlay.
+    
+    Args:
+        image: numpy array of the image
+        formatted_unions: dict with union/blob data containing 'image_center' and 'image_length' (or 'box_x', 'box_y', 'box_size')
+        title: plot title
+        save_path: optional path to save the figure
+        show_plot: whether to display the plot (may fail in headless mode)
+    """
+    import matplotlib
+    # Use non-interactive backend if not displaying
+    if not show_plot:
+        matplotlib.use('Agg')
+    
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    
+    # Display image
+    if len(image.shape) == 2:
+        ax.imshow(image, cmap='gray')
+    else:
+        ax.imshow(image)
+    
+    # Draw bounding boxes
+    color_cycle = plt.cm.tab20(range(len(formatted_unions)))
+    for idx, (name, info) in enumerate(formatted_unions.items()):
+        color = color_cycle[idx % len(color_cycle)]
+        
+        # Try different key formats
+        if 'image_center' in info and 'image_length' in info:
+            cx, cy = info['image_center']
+            size = info['image_length']
+            x = cx - size / 2
+            y = cy - size / 2
+        elif 'box_x' in info and 'box_y' in info and 'box_size' in info:
+            x = info['box_x']
+            y = info['box_y']
+            size = info['box_size']
+        else:
+            continue
+        
+        # Draw rectangle
+        rect = patches.Rectangle((x, y), size, size, linewidth=2, edgecolor=color, facecolor='none')
+        ax.add_patch(rect)
+        
+        # Add label
+        ax.text(x, y - 5, name, fontsize=8, color=color, weight='bold', 
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+    
+    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_xlabel('X (pixels)')
+    ax.set_ylabel('Y (pixels)')
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
+    
+    if show_plot:
+        plt.tight_layout()
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir, group_name=None):
+    """
+    Plot analysis results with bounding boxes for each element.
+    
+    Args:
+        tiff_paths: dict of element -> TIFF path
+        elem_list: list of elements
+        formatted_unions_dict: dict of group_name -> formatted_unions
+        out_dir: output directory for saving plots
+        group_name: specific group to plot (if None, plots all groups)
+    """
+    import matplotlib.pyplot as plt
+    
+    if group_name:
+        groups_to_plot = {group_name: formatted_unions_dict.get(group_name, {})}
+    else:
+        groups_to_plot = formatted_unions_dict
+    
+    for gname, formatted_unions in groups_to_plot.items():
+        if not formatted_unions:
+            print(f"⏭️ Skipping {gname}: no unions/blobs found")
+            continue
+        
+        # Get the first element's image for visualization
+        first_element = None
+        for elem in elem_list:
+            if elem in tiff_paths:
+                first_element = elem
+                break
+        
+        if not first_element:
+            print(f"❌ No TIFF found for visualization in {gname}")
+            continue
+        
+        try:
+            tiff_path = tiff_paths[first_element]
+            image = tiff.imread(str(tiff_path)).astype(np.float32)
+            
+            # Normalize for display
+            image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            
+            # Create plot
+            title = f"Analysis Results - Group {gname} (Element: {first_element})"
+            save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
+            
+            plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
+            
+        except Exception as e:
+            print(f"❌ Error plotting {gname}: {e}")
+            traceback.print_exc()
+
+
     """
     Step 3: Queue Submission.
     Only actually queues if real_test == 1. 
