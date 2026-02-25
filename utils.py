@@ -207,23 +207,25 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True):
     with open(params_path, 'r') as f:
         params = json.load(f)
 
-    # Read optional parameters from JSON
-    scan_id = params.get("scan_id")
-    proceed_with_fine_scan = params.get("proceed_with_fine_scan", False)
+    # Read optional parameters from JSON with nested access
+    scan_id = params.get("scan_params", {}).get("scan_id")
+    proceed_with_fine_scan = params.get("execution_params", {}).get("proceed_with_fine_scan", False)
 
-    dets = params.get("det_name", "dets_fast")
-    x_motor = params.get("mot1", "zpssx")
-    y_motor = params.get("mot2", "zpssy")
+    dets = params.get("scan_params", {}).get("det_name", "dets_fast")
+    x_motor = params.get("scan_params", {}).get("mot1", "zpssx")
+    y_motor = params.get("scan_params", {}).get("mot2", "zpssy")
 
-    x_start = params.get("mot1_s", 0)
-    x_end = params.get("mot1_e", 0)
-    y_start = params.get("mot2_s", 0)
-    y_end = params.get("mot2_e", 0)
+    x_start = params.get("scan_params", {}).get("mot1_s", 0)
+    x_end = params.get("scan_params", {}).get("mot1_e", 0)
+    y_start = params.get("scan_params", {}).get("mot2_s", 0)
+    y_end = params.get("scan_params", {}).get("mot2_e", 0)
 
-    step_size = params.get("step_size_coarse", 250)
+    # step_size_coarse might not exist in new format, try nested access first, then fallback
+    step_size = params.get("scan_params", {}).get("step_size_coarse") or params.get("step_size_coarse", 250)
     mot1_n = int(abs(x_end-x_start)/step_size)
     mot2_n = int(abs(y_end-y_start)/step_size)
-    exp_time = params.get("exp_t_coarse", 0.01)
+    # exp_t_coarse might not exist in new format, try nested access first, then fallback
+    exp_time = params.get("scan_params", {}).get("exp_t_coarse") or params.get("exp_t_coarse", 0.01)
 
     # Calculate center as midpoint
     cx = (x_start + x_end) / 2
@@ -2169,16 +2171,19 @@ def submit_and_export(**params):
     Step 1: Enqueue scan (if real), wait (if real), export data (real/offline).
     Returns: (last_id, out_dir)
     """
-    mode = params.get('real_test', 0)
+    mode = params.get('execution_params', {}).get('mode') or params.get('real_test', 0)
+    if isinstance(mode, str):
+        mode_map = {'simulation': 0, 'real': 1, 'testing': 1, 'offline': 2}
+        mode = mode_map.get(mode.lower(), 0)
     is_real = (mode == 1)
     is_sim  = (mode == 0)
     is_offline = (mode == 2)
     
     # Pass remote_seg to the export function
-    is_remote = params.get('remote_seg', False)
+    is_remote = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
 
     # --- 1. Enqueue (Real Only) ---
-    label = params.get('label', '')
+    label = params.get('label') or params.get('scan_params', {}).get('label', '')
     
     if is_real:
         print(f"[REAL] [SUBMIT] Queueing scan '{label}'...")
@@ -2214,13 +2219,13 @@ def submit_and_export(**params):
         pass
 
     # --- 3. Get ID and Folder ---
-    data_wd = params.get('data_wd', '/data/users/current_user')
+    data_wd = params.get('data_wd') or params.get('export_params', {}).get('data_wd', '/data/users/current_user')
     
     if is_real:
         hdr = db[-1]
         last_id = hdr.start['scan_id']
     elif is_offline:
-        last_id = params.get('target_id')
+        last_id = params.get('target_id') or params.get('export_params', {}).get('target_id')
         if last_id is None:
             raise ValueError("Mode is Offline (2) but no 'target_id' provided!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
@@ -2233,7 +2238,7 @@ def submit_and_export(**params):
     print(f"[EXPORT] Output directory: {out_dir}")
 
     # --- 4. Export Data ---
-    all_elem_list = params.get('elem_list', [])
+    all_elem_list = params.get('elem_list') or params.get('export_params', {}).get('elem_list', [])
     
     # Flatten nested list and remove duplicates
     if all_elem_list and isinstance(all_elem_list[0], list):
@@ -2246,14 +2251,14 @@ def submit_and_export(**params):
         print(f"[{'REAL' if is_real else 'OFFLINE'}] Exporting data (remote_seg={is_remote})...")
         export_xrf_roi_data(
             last_id,
-            norm=params.get('export_norm', 'sclr1_ch4'),
+            norm=params.get('export_norm') or params.get('export_params', {}).get('export_norm', 'sclr1_ch4'),
             elem_list=all_elem_list,
             wd=out_dir,
             remote_seg=is_remote # Pass the remote flag
         )
         export_scan_params(
             sid=last_id,
-            zp_flag=bool(params.get('zp_move_flag', True)),
+            zp_flag=bool(params.get('zp_move_flag') or params.get('scan_params', {}).get('zp_move_flag', True)),
             save_to=out_dir
         )
     else:
@@ -2305,12 +2310,12 @@ def analyze_data_local(scan_id=None,
     
     # Handle keyword-only arguments
     if scan_id is None:
-        scan_id = params.get('scan_id')
-    out_dir = params.get('out_dir')
+        scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
     print(f"\n[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True (data sent to remote port, no TIFFs)
-    remote_seg = params.get('remote_seg', False)
+    remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
     if remote_seg:
         print("[ANALYSIS] remote_seg=True, skipping local analysis (handled remotely)...")
         return {'error': 'Remote segmentation requested - no local results available'}
@@ -2331,7 +2336,7 @@ def analyze_data_local(scan_id=None,
                 y_start = scan_input[3]
 
     # --- 2. Prepare Elements ---
-    elem_list_of_lists = params.get("elem_list", [])
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
     if not elem_list_of_lists:
         print("elem_list is empty.")
         return
@@ -2349,42 +2354,50 @@ def analyze_data_local(scan_id=None,
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
-    min_thresh = params.get("min_threshold_intensity")
-    min_area = params.get("min_threshold_area")
-    detection_method = params.get("blob_detection_method")
+    segmentation = params.get("segmentation_params", {})
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
     # Method-specific parameters from JSON config
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
     method_params = {
         # Simple blob detector parameters
-        'max_threshold': params.get('simple_max_threshold'),
-        'max_area': params.get('simple_max_area'),
-        'threshold_step': params.get('simple_threshold_step'),
-        'filter_by_color': params.get('simple_filter_by_color'),
-        'filter_by_circularity': params.get('simple_filter_by_circularity'),
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
         
         # Hough circle parameters
-        'max_radius': params.get('hough_max_radius'),
-        'dp': params.get('hough_dp'),
-        'min_dist': params.get('hough_min_dist'),
-        'param1': params.get('hough_param1'),
-        'param2': params.get('hough_param2'),
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
         
         # Watershed parameters
-        'min_distance': params.get('watershed_min_distance'),
-        'threshold_abs': params.get('watershed_threshold_abs'),
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
         
         # Cellpose parameters
-        'diameter': params.get('cellpose_diameter'),
-        'model_type': params.get('cellpose_model_type'),
-        'gpu': params.get('cellpose_gpu'),
-        'flow_threshold': params.get('cellpose_flow_threshold'),
-        'cellprob_threshold': params.get('cellpose_cellprob_threshold'),
-        'channels': params.get('cellpose_channels'),
-        'min_diameter': params.get('cellpose_min_diameter'),
-        'max_diameter': params.get('cellpose_max_diameter'),
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
         
         # Connected components parameters
-        'connectivity': params.get('connected_components_connectivity')
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
     }
     
     # Filter out None values to avoid overriding method defaults
@@ -2403,8 +2416,9 @@ def analyze_data_local(scan_id=None,
             tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
             
             # Use configurable normalization and dilation parameters
-            kernel_size = tuple(params.get('normalize_kernel_size', [3, 3]))
-            iterations = params.get('dilate_iterations', 2)
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
             tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
 
             b = detect_blobs(tiff_dilated, 
@@ -2483,7 +2497,7 @@ def analyze_data_local(scan_id=None,
             # Multiple elements: create union boxes
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=params.get('overlap_thresh'))
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
 
             for idx, union in unions.items():
                 box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
@@ -2584,12 +2598,12 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     
     # Handle keyword-only arguments
     if scan_id is None:
-        scan_id = params.get('scan_id')
-    out_dir = params.get('out_dir')
+        scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
     print(f"\n[ANALYSIS-TABLE] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True
-    remote_seg = params.get('remote_seg', False)
+    remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
     if remote_seg:
         print("[ANALYSIS-TABLE] remote_seg=True, skipping (no TIFFs available)...")
         return {}
@@ -2610,7 +2624,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
                 y_start = scan_input[3]
 
     # --- 2. Prepare Elements ---
-    elem_list_of_lists = params.get("elem_list", [])
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
     if not elem_list_of_lists:
         print("elem_list is empty.")
         return {}
@@ -2628,42 +2642,50 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
-    min_thresh = params.get("min_threshold_intensity")
-    min_area = params.get("min_threshold_area")
-    detection_method = params.get("blob_detection_method")
+    segmentation = params.get("segmentation_params", {})
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
     # Method-specific parameters from JSON config
     method_params = {
         # Simple blob detector parameters
-        'max_threshold': params.get('simple_max_threshold'),
-        'max_area': params.get('simple_max_area'),
-        'threshold_step': params.get('simple_threshold_step'),
-        'filter_by_color': params.get('simple_filter_by_color'),
-        'filter_by_circularity': params.get('simple_filter_by_circularity'),
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
         
         # Hough circle parameters
-        'max_radius': params.get('hough_max_radius'),
-        'dp': params.get('hough_dp'),
-        'min_dist': params.get('hough_min_dist'),
-        'param1': params.get('hough_param1'),
-        'param2': params.get('hough_param2'),
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
         
         # Watershed parameters
-        'min_distance': params.get('watershed_min_distance'),
-        'threshold_abs': params.get('watershed_threshold_abs'),
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
         
         # Cellpose parameters
-        'diameter': params.get('cellpose_diameter'),
-        'model_type': params.get('cellpose_model_type'),
-        'gpu': params.get('cellpose_gpu'),
-        'flow_threshold': params.get('cellpose_flow_threshold'),
-        'cellprob_threshold': params.get('cellpose_cellprob_threshold'),
-        'channels': params.get('cellpose_channels'),
-        'min_diameter': params.get('cellpose_min_diameter'),
-        'max_diameter': params.get('cellpose_max_diameter'),
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
         
         # Connected components parameters
-        'connectivity': params.get('connected_components_connectivity')
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
     }
     
     # Filter out None values to avoid overriding method defaults
@@ -2682,8 +2704,9 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
             
             # Use configurable normalization and dilation parameters
-            kernel_size = tuple(params.get('normalize_kernel_size', [3, 3]))
-            iterations = params.get('dilate_iterations', 2)
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
             tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
 
             b = detect_blobs(tiff_dilated, 
@@ -2757,7 +2780,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             # Multiple elements: create union boxes
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=params.get('overlap_thresh'))
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
 
             for idx, union in unions.items():
                 box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
@@ -2915,7 +2938,10 @@ def submit_fine_scans_to_queue(scan_id, out_dir, **params):
     Only actually queues if real_test == 1. 
     Offline (2) and Sim (0) will just print.
     """
-    mode = params.get('real_test', 0)
+    mode = params.get('execution_params', {}).get('mode') or params.get('real_test', 0)
+    if isinstance(mode, str):
+        mode_map = {'simulation': 0, 'real': 1, 'testing': 1, 'offline': 2}
+        mode = mode_map.get(mode.lower(), 0)
     is_real = (mode == 1)
     
     print(f"\n[QUEUE] Processing fine scans in: {out_dir}")
@@ -2943,6 +2969,9 @@ def run_fine_scans(is_real):
     else:
         print("[SIM] Would check RM.status() and start queue.")
 
+
+
+
 def load_and_queue(json_path, target_id=None, 
                    remote_seg=False, proceed_fine_scans=True):
     """
@@ -2969,7 +2998,7 @@ def load_and_queue(json_path, target_id=None,
             raise FileNotFoundError(f"ROI file not found: {roi_file}")
         with open(roi_file, 'r') as rf:
             params['roi_positions'] = json.load(rf)
-    elif isinstance(params.get('roi_positions'), str) and os.path.isfile(params['roi_positions']):
+    elif isinstance(params.get('roi_positions') or params.get('scan_params', {}).get('roi_positions'), str) and os.path.isfile(params.get('roi_positions') or params.get('scan_params', {}).get('roi_positions', '')):
         with open(params['roi_positions'], 'r') as rf:
             params['roi_positions'] = json.load(rf)
 
@@ -2979,7 +3008,7 @@ def load_and_queue(json_path, target_id=None,
         params['mot2_n'] = int(abs(params['mot2_e'] - params['mot2_s']) / step)
 
     # 3) Get mode from JSON config (default to simulation)
-    mode = params.get('mode', 'simulation').lower()
+    mode = (params.get('execution_params', {}).get('mode') or params.get('mode', 'simulation')).lower()
     is_real = (mode == 'real')
     is_sim  = (mode == 'simulation')
     is_offline = (mode == 'offline')
@@ -2991,52 +3020,62 @@ def load_and_queue(json_path, target_id=None,
     params['remote_seg'] = remote_seg
     
     # 3.1) Add default segmentation parameters if not present
+    segmentation = params.get('segmentation_params', {})
+    morphology = params.get('morphology_params', {})
+    detection_methods = params.get('detection_methods', {})
+    simple_methods = detection_methods.get('simple', {})
+    hough_methods = detection_methods.get('hough', {})
+    watershed_methods = detection_methods.get('watershed', {})
+    cellpose_methods = detection_methods.get('cellpose', {})
+    connected_components_methods = detection_methods.get('connected_components', {})
+    contours_methods = detection_methods.get('contours', {})
+    
     segmentation_defaults = {
         # Basic detection parameters
-        'min_threshold_intensity': params.get('min_threshold_intensity', 50),
-        'min_threshold_area': params.get('min_threshold_area', 100),
-        'blob_detection_method': params.get('blob_detection_method', 'simple'),
-        'overlap_thresh': params.get('overlap_thresh', 0.5),
+        'min_threshold_intensity': segmentation.get('min_threshold_intensity', params.get('min_threshold_intensity', 50)),
+        'min_threshold_area': segmentation.get('min_threshold_area', params.get('min_threshold_area', 100)),
+        'blob_detection_method': segmentation.get('blob_detection_method', params.get('blob_detection_method', 'simple')),
+        'overlap_thresh': segmentation.get('overlap_thresh', params.get('overlap_thresh', 0.5)),
         
         # Normalization and morphology parameters
-        'normalize_kernel_size': params.get('normalize_kernel_size', [3, 3]),
-        'dilate_iterations': params.get('dilate_iterations', 2),
-        'blur_kernel': params.get('blur_kernel', [3, 3]),
+        'normalize_kernel_size': morphology.get('normalize_kernel_size', params.get('normalize_kernel_size', [3, 3])),
+        'dilate_iterations': morphology.get('dilate_iterations', params.get('dilate_iterations', 2)),
+        'blur_kernel': morphology.get('blur_kernel', params.get('blur_kernel', [3, 3])),
         
         # Method-specific parameters for simple detection
-        'simple_max_threshold': params.get('simple_max_threshold', 255),
-        'simple_max_area': params.get('simple_max_area', 1600),
-        'simple_threshold_step': params.get('simple_threshold_step', 2),
-        'simple_filter_by_color': params.get('simple_filter_by_color', False),
-        'simple_filter_by_circularity': params.get('simple_filter_by_circularity', False),
+        'simple_max_threshold': simple_methods.get('max_threshold', params.get('simple_max_threshold', 255)),
+        'simple_max_area': simple_methods.get('max_area', params.get('simple_max_area', 1600)),
+        'simple_threshold_step': simple_methods.get('threshold_step', params.get('simple_threshold_step', 2)),
+        'simple_filter_by_color': simple_methods.get('filter_by_color', params.get('simple_filter_by_color', False)),
+        'simple_filter_by_circularity': simple_methods.get('filter_by_circularity', params.get('simple_filter_by_circularity', False)),
         
         # Hough circle detection parameters
-        'hough_max_radius': params.get('hough_max_radius', 40),
-        'hough_dp': params.get('hough_dp', 1),
-        'hough_min_dist': params.get('hough_min_dist', 20),
-        'hough_param1': params.get('hough_param1', 50),
-        'hough_param2': params.get('hough_param2', 30),
+        'hough_max_radius': hough_methods.get('max_radius', params.get('hough_max_radius', 40)),
+        'hough_dp': hough_methods.get('dp', params.get('hough_dp', 1)),
+        'hough_min_dist': hough_methods.get('min_dist', params.get('hough_min_dist', 20)),
+        'hough_param1': hough_methods.get('param1', params.get('hough_param1', 50)),
+        'hough_param2': hough_methods.get('param2', params.get('hough_param2', 30)),
         
         # Watershed segmentation parameters
-        'watershed_min_distance': params.get('watershed_min_distance', 10),
-        'watershed_threshold_abs': params.get('watershed_threshold_abs', 0.3),
+        'watershed_min_distance': watershed_methods.get('min_distance', params.get('watershed_min_distance', 10)),
+        'watershed_threshold_abs': watershed_methods.get('threshold_abs', params.get('watershed_threshold_abs', 0.3)),
         
         # Cellpose parameters
-        'cellpose_diameter': params.get('cellpose_diameter', 8),
-        'cellpose_model_type': params.get('cellpose_model_type', 'cyto3'),
-        'cellpose_gpu': params.get('cellpose_gpu', False),
-        'cellpose_flow_threshold': params.get('cellpose_flow_threshold', 0.4),
-        'cellpose_cellprob_threshold': params.get('cellpose_cellprob_threshold', 0.0),
-        'cellpose_channels': params.get('cellpose_channels', [0, 0]),
-        'cellpose_min_diameter': params.get('cellpose_min_diameter', 2),
-        'cellpose_max_diameter': params.get('cellpose_max_diameter', float('100')),
+        'cellpose_diameter': cellpose_methods.get('diameter', params.get('cellpose_diameter', 8)),
+        'cellpose_model_type': cellpose_methods.get('model_type', params.get('cellpose_model_type', 'cyto3')),
+        'cellpose_gpu': cellpose_methods.get('gpu', params.get('cellpose_gpu', False)),
+        'cellpose_flow_threshold': cellpose_methods.get('flow_threshold', params.get('cellpose_flow_threshold', 0.4)),
+        'cellpose_cellprob_threshold': cellpose_methods.get('cellprob_threshold', params.get('cellpose_cellprob_threshold', 0.0)),
+        'cellpose_channels': cellpose_methods.get('channels', params.get('cellpose_channels', [0, 0])),
+        'cellpose_min_diameter': cellpose_methods.get('min_diameter', params.get('cellpose_min_diameter', 2)),
+        'cellpose_max_diameter': cellpose_methods.get('max_diameter', params.get('cellpose_max_diameter', float('100'))),
         
         # Connected components parameters
-        'connected_components_connectivity': params.get('connected_components_connectivity', 8),
+        'connected_components_connectivity': connected_components_methods.get('connectivity', params.get('connected_components_connectivity', 8)),
         
         # Contour detection parameters
-        'contours_mode': params.get('contours_mode', 'external'),
-        'contours_method': params.get('contours_method', 'simple')
+        'contours_mode': contours_methods.get('mode', params.get('contours_mode', 'external')),
+        'contours_method': contours_methods.get('method', params.get('contours_method', 'simple'))
     }
     
     # Update params with segmentation defaults
