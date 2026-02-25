@@ -1739,7 +1739,8 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[]):
             xrf_img = spectrum.reshape(scan_dim)
             remote_sender.write(xrf_img)
 
-def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[]):
+def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
+                                 append_meta_with = {}):
     """
     Export XRF data to remote handler for remote segmentation.
     
@@ -1758,6 +1759,10 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[]):
     scan_id = hdr.start["scan_id"]
 
     meta = export_scan_params(sid=scan_id)
+    
+    # Append additional metadata if provided
+    if append_meta_with:
+        meta.update(append_meta_with)
 
     import time
     timestamp = int(time.time())
@@ -1858,7 +1863,8 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
         tiff.imwrite(os.path.join(wd, f"scan_{scan_id}_{elem}.tiff"), xrf_img)
 
 
-def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', remote_seg=False):
+def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], 
+                        wd='.', remote_seg=False, append_meta_with={}):
     """
     Export XRF ROI data either remotely or as local TIFF files.
     
@@ -1868,10 +1874,11 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', remote_
         elem_list: List of elements to export
         wd: Working directory for local export
         remote_seg: If True, use remote handler; if False, write local TIFFs
+        append_meta_with: Additional metadata to append (default: empty dict)
     """
     if remote_seg:
        # _export_xrf_remote(scan_id, norm, elem_list)
-       _export_xrf_remote_container(scan_id, norm, elem_list)
+       _export_xrf_remote_container(scan_id, norm, elem_list, append_meta_with)
     else:
         _export_xrf_local(scan_id, norm, elem_list, wd)
 
@@ -2310,7 +2317,8 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
             norm=export_params.get('export_norm', 'sclr1_ch4'),
             elem_list=all_elem_list,
             wd=out_dir,
-            remote_seg=is_remote # Pass the remote flag
+            remote_seg=is_remote, # Pass the remote flag,
+            append_meta_with=segmentation_params
         )
         export_scan_params(
             sid=last_id,
