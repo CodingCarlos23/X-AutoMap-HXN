@@ -49,7 +49,7 @@
   
   "_comment_cellpose_method": "=== CELLPOSE DEEP LEARNING PARAMETERS ===",
   "cellpose_diameter": 8,
-  "cellpose_model_type": "cyto3",
+  "cellpose_model_type": "cpsam",
   "cellpose_gpu": false,
   "cellpose_flow_threshold": 0.4,
   "cellpose_cellprob_threshold": 0.0,
