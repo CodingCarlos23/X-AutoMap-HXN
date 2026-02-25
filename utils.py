@@ -2103,26 +2103,22 @@ def send_fly2d_to_queue(label,
     elif isinstance(roi_positions, str):
         roi_json = roi_positions
 
-    print("Coarse scan")
-    if real_test == 1:
-        RM.item_add(BPlan("fly2d_qserver_scan_export",
-                          label,
-                          det_names,
-                          mot1, mot1_s, mot1_e, mot1_n,
-                          mot2, mot2_s, mot2_e, mot2_n,
-                          exp_t,
-                          roi_json,
-                          scan_id or "",
-                          zp_move_flag,
-                          smar_move_flag,
-                          ic1_count,
-                          json.dumps(elem_list or []),
-                          export_norm,
-                          data_wd
-                        #   real_test
-                          ))
-        
-    print("Coarse scan sent to queue")
+    print("Coarse scan - submitting to queue...")
+    RM.item_add(BPlan("fly2d_qserver_scan_export",
+                      label,
+                      det_names,
+                      mot1, mot1_s, mot1_e, mot1_n,
+                      mot2, mot2_s, mot2_e, mot2_n,
+                      exp_t,
+                      roi_json,
+                      scan_id or "",
+                      zp_move_flag,
+                      smar_move_flag,
+                      ic1_count,
+                      json.dumps(elem_list or []),
+                      export_norm,
+                      data_wd))
+    print("Coarse scan sent to queue.")
 
 def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
     """
