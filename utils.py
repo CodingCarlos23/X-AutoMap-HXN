@@ -1822,8 +1822,11 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
             print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
+
+        print(f"[REMOTE] meta for scan {scan_id}: {meta}") 
     else:
         print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
+
         #remote_sender.write(xrf_img)
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
