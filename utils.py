@@ -225,15 +225,35 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True):
     y_end = params.get("scan_params", {}).get("mot2_e", 0)
 
     # step_size_coarse might not exist in new format, try nested access first, then fallback
-    step_size = params.get("scan_params", {}).get("step_size_coarse") or params.get("step_size_coarse", 250)
+    # Also try 'step_size' in scan_params as fallback
+    step_size = (
+        params.get("scan_params", {}).get("step_size_coarse") or 
+        params.get("scan_params", {}).get("step_size") or 
+        params.get("step_size_coarse", 0.25)
+    )
     mot1_n = int(abs(x_end-x_start)/step_size)
     mot2_n = int(abs(y_end-y_start)/step_size)
+    
+    # Validate step counts
+    if mot1_n == 0 or mot2_n == 0:
+        raise ValueError(
+            f"Coarse scan has zero steps! "
+            f"mot1: {x_start} to {x_end} (n={mot1_n}), "
+            f"mot2: {y_start} to {y_end} (n={mot2_n}), "
+            f"step_size={step_size:.3f}. "
+            f"Check scan_params in JSON config."
+        )
+    
     # exp_t_coarse might not exist in new format, try nested access first, then fallback
-    exp_time = params.get("scan_params", {}).get("exp_t_coarse") or params.get("exp_t_coarse", 0.01)
+    exp_time = params.get("scan_params", {}).get("exp_t_coarse") or params.get("scan_params", {}).get("exp_t") or params.get("exp_t_coarse", 0.01)
 
     # Calculate center as midpoint
     cx = (x_start + x_end) / 2
     cy = (y_start + y_end) / 2
+    
+    print(f"[COARSE_SCAN] Range: [{x_start:.2f} to {x_end:.2f}] x [{y_start:.2f} to {y_end:.2f}]")
+    print(f"[COARSE_SCAN] Step size: {step_size:.3f} μm, Points: {mot1_n} x {mot2_n}")
+    print(f"[COARSE_SCAN] Center: ({cx:.2f}, {cy:.2f}), Exp time: {exp_time}s")
     
     roi = {x_motor: cx, y_motor: cy}
 
@@ -270,6 +290,7 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     # Extract parameters from nested structure
     execution_params = params.get('execution_params', {})
     scan_params = params.get('scan_params', {})
+    fine_scan_params = params.get('fine_scan_params', {})
     
     # Get mode
     mode = str(execution_params.get('mode', 'simulation')).lower()
@@ -281,9 +302,9 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     dets = scan_params.get('dets', 'dets_fast')
     x_motor = scan_params.get('mot1', 'zpssx')
     y_motor = scan_params.get('mot2', 'zpssy')
-    exp_t = scan_params.get('exp_t', 0.01)
-    step_size = scan_params.get('step_size_fine', 100)
-    fine_scan_pad_ratio = params.get('fine_scan_pad_ratio', 0.25)
+    exp_t = fine_scan_params.get('exp_t_fine', scan_params.get('exp_t', 0.01))
+    step_size = fine_scan_params.get('step_size_fine', 0.1)
+    fine_scan_pad_ratio = fine_scan_params.get('fine_scan_pad_ratio', 0.25)
     
     # Determine which table to use
     if fine_scans_table is None:
@@ -324,12 +345,21 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
         # Step counts based on padded size
         num_steps_x = int(sx_padded / step_size)
         num_steps_y = int(sy_padded / step_size)
+        
+        # Validate step counts
+        if num_steps_x == 0 or num_steps_y == 0:
+            print(f"⚠️ WARNING: {label} has zero steps! sx_padded={sx_padded:.3f}, sy_padded={sy_padded:.3f}, step_size={step_size:.3f}")
+            print(f"⚠️ This likely indicates a unit mismatch or incorrect step_size_fine value.")
+            print(f"⚠️ Skipping this scan to avoid errors.")
+            continue
 
         # ROI centered on original center
         roi = {x_motor: cx, y_motor: cy}
 
         if is_real:
             print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
+            print(f"[FINE_SCANS]   → Padded size: {sx_padded:.2f} x {sy_padded:.2f} μm, step: {step_size:.3f} μm")
+            print(f"[FINE_SCANS]   → Points: {num_steps_x} x {num_steps_y}, range: [{x_start:.2f} to {x_end:.2f}] x [{y_start:.2f} to {y_end:.2f}]")
             RM.item_add(BPlan(
                 "fly2d_qserver_scan_export",
                 label,
@@ -2091,6 +2121,9 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True)
         poll_interval (float): Seconds between polls.
         idle_timeout (float): How long to wait in idle with items before triggering restart.
         auto_restart (bool): If True, will automatically call RM.queue_start() after timeout.
+        
+    Returns:
+        bool: True if queue completed normally, False if timed out
     """
     import time
 
@@ -2104,7 +2137,7 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True)
 
         if items == 0 and state == "idle":
             print(" done.")
-            return
+            return True
 
         if items > 0 and state == "idle":
             if idle_stuck_start is None:
@@ -2117,7 +2150,7 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True)
                 else:
                     print("\n⚠️ Queue is idle with items still in queue.")
                     print("🔁 Consider running: RM.queue_start() to resume.")
-                return
+                return False
         else:
             idle_stuck_start = None  # reset if queue becomes active again
 
@@ -2195,9 +2228,29 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
     data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     if is_real:
-        wait_for_queue_done(poll_interval=1.0, idle_timeout=60, auto_restart=True)
-        hdr = db[-1]
-        last_id = hdr.start['scan_id']
+        queue_success = wait_for_queue_done(poll_interval=1.0, idle_timeout=60, auto_restart=True)
+        
+        if not queue_success:
+            raise RuntimeError("❌ Coarse scan queue timed out or failed to complete!")
+        
+        # Verify scan completed successfully
+        try:
+            hdr = db[-1]
+            last_id = hdr.start['scan_id']
+            
+            # Check if scan has a stop document (completed)
+            if not hasattr(hdr, 'stop') or hdr.stop is None:
+                raise RuntimeError(f"❌ Scan {last_id} did not complete - no stop document found!")
+            
+            # Check exit_status if available
+            exit_status = hdr.stop.get('exit_status', 'unknown')
+            if exit_status not in ['success', 'unknown']:
+                raise RuntimeError(f"❌ Scan {last_id} exit status: {exit_status}")
+            
+            print(f"✅ Coarse scan {last_id} completed successfully")
+            
+        except IndexError:
+            raise RuntimeError("❌ No scan found in database after queue completion!")
     elif is_offline:
         last_id = export_params.get('target_id')
         if last_id is None:
