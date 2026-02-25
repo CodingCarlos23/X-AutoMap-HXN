@@ -23,8 +23,8 @@
   },
 
   "fine_scan_params": {
-    "step_size_fine": 0.05,
-    "exp_t_fine": 0.01,
+    "step_size_fine": 0.02,
+    "exp_t_fine": 0.005,
     "fine_scan_pad_ratio": 0.0
   },
 

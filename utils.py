@@ -3220,7 +3220,10 @@ def load_and_queue(json_path, target_id=None,
     fine_scans_tables = None
     if remote_seg:
         
-        export_xrf_roi_data(scan_id, out_dir, remote_seg=remote_seg)  # Ensure ROI data is exported for remote analysis
+        export_xrf_roi_data(scan_id, 
+                            out_dir, 
+                            elem_list=params.get('export_params', {}).get('elem_list', []), 
+                            remote_seg=remote_seg)  # Ensure ROI data is exported for remote analysis
         print("[DATA], Exported ROI data for remote analysis.")
         #print("no reciever implemented yet, skipping remote analysis...")
         #pass 
