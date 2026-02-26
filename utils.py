@@ -2302,7 +2302,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
     elif is_offline:
         last_id = export_params.get('scan_id')
         if last_id is None:
-            raise ValueError("Mode is Offline but no 'target_id' provided in export_params!")
+            raise ValueError("Mode is Offline but no 'scan_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
     else:
         last_id = 111111 
