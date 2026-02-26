@@ -2300,7 +2300,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
         except IndexError:
             raise RuntimeError("❌ No scan found in database after queue completion!")
     elif is_offline:
-        last_id = export_params.get('target_id')
+        last_id = export_params.get('scan_id')
         if last_id is None:
             raise ValueError("Mode is Offline but no 'target_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
