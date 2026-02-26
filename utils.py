@@ -906,12 +906,18 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     if not CELLPOSE_AVAILABLE:
         raise ImportError("Cellpose not available. Install with: pip install cellpose")
     
+    # Use img_orig (normalized but NOT dilated) because Cellpose is a deep learning model
+    # trained on raw images. Morphological dilation can destroy fine details.
+    # img_norm = dilated image (used for simple/contour methods)
+    # img_orig = normalized but not dilated (better for deep learning models)
+    cellpose_input = img_orig
+    
     # Convert to format expected by Cellpose
-    if len(img_norm.shape) == 2:
+    if len(cellpose_input.shape) == 2:
         # Convert grayscale to RGB format for Cellpose
-        img_rgb = np.stack([img_norm, img_norm, img_norm], axis=2)
+        img_rgb = np.stack([cellpose_input, cellpose_input, cellpose_input], axis=2)
     else:
-        img_rgb = img_norm.copy()
+        img_rgb = cellpose_input.copy()
     
     # Normalize to [0,1] range
     img_min, img_max = float(img_rgb.min()), float(img_rgb.max())
