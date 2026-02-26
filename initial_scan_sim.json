@@ -31,7 +31,7 @@
   "export_params": {
     "elem_list": [["Ni"]],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/data/users/current_user"
+    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1"
   },
 
   "calibration_params": {
@@ -81,7 +81,7 @@
     "cellpose": {
       "diameter": 8,
       "model_type": "cpsam",
-      "gpu": false,
+      "gpu": true,
       "flow_threshold": 0.4,
       "cellprob_threshold": 0.0,
       "channels": [0, 0],
