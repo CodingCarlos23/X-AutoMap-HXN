@@ -21,6 +21,7 @@ import warnings
 import matplotlib
 # This is the equivalent of %matplotlib qt
 matplotlib.use('Qt5Agg')
+plt.ion()
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -3206,8 +3207,10 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"✅ Plot saved to: {save_path}")
+    plt.tight_layout()
     ax.set_title(title)
     plt.show()
+    plt.pause(0.1)
 
 
 def _plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
