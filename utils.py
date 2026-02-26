@@ -3230,7 +3230,6 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
         out_dir: output directory for saving plots
         group_name: specific group to plot (if None, plots all groups)
     """
-    import matplotlib.pyplot as plt
     
     if group_name:
         groups_to_plot = {group_name: formatted_unions_dict.get(group_name, {})}
