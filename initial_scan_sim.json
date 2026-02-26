@@ -1,6 +1,6 @@
 {
   "execution_params": {
-    "mode": "real",
+    "mode": "offline",
     "proceed_with_fine_scan": false
   },
 
