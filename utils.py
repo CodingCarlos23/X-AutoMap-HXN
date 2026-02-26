@@ -21,9 +21,9 @@ import warnings
 import matplotlib
 # This is the equivalent of %matplotlib qt
 matplotlib.use('Qt5Agg')
-plt.ion()
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+plt.ion()
 
 
 # Cellpose imports (optional - will gracefully handle if not installed)
