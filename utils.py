@@ -3197,7 +3197,12 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results",
             continue
         
         # Draw rectangle
-        rect = patches.Rectangle((x, y), size, size, linewidth=2, edgecolor=color, facecolor='none')
+        rect = patches.Rectangle((x, y), size, 
+                                 size, 
+                                 linewidth=2, 
+                                 edgecolor=color, 
+                                 facecolor='none',
+                                 zorder=10)
         ax.add_patch(rect)
         
         # Add label
