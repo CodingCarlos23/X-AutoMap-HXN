@@ -18,8 +18,12 @@ from scipy import ndimage
 from skimage.segmentation import watershed  
 from skimage.feature import peak_local_max
 import warnings
+import matplotlib
+# This is the equivalent of %matplotlib qt
+matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+
 
 # Cellpose imports (optional - will gracefully handle if not installed)
 try:
