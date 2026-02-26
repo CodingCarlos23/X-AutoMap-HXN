@@ -3163,65 +3163,42 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     return fine_scans_tables
 
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
-                          save_path=None, show_plot=True):
-    """
-    Plot image with bounding boxes overlay.
-    
-    Args:
-        image: numpy array of the image
-        formatted_unions: dict with union/blob data containing 'image_center' and 'image_length' (or 'box_x', 'box_y', 'box_size')
-        title: plot title
-        save_path: optional path to save the figure
-        show_plot: whether to display the plot (default: False for headless mode)
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results"):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.imshow(image)
     
-    # Draw bounding boxes
-    color_cycle = plt.cm.tab20(range(len(formatted_unions)))
-    for idx, (name, info) in enumerate(formatted_unions.items()):
-        color = color_cycle[idx % len(color_cycle)]
-        
-        # Try different key formats
-        if 'image_center' in info and 'image_length' in info:
+    for name, info in formatted_unions.items():
+        # 1. Extract Center
+        if 'image_center' in info:
             cx, cy = info['image_center']
-            size = info['image_length']
-            x = cx - size / 2
-            y = cy - size / 2
-        elif 'box_x' in info and 'box_y' in info and 'box_size' in info:
-            x = info['box_x']
-            y = info['box_y']
-            size = info['box_size']
         else:
             continue
-        
-        # Draw rectangle
-        rect = patches.Rectangle((x, y), size, 
-                                 size, 
-                                 linewidth=2, 
-                                 edgecolor=color, 
-                                 facecolor='none',
-                                 zorder=10)
+            
+        # 2. Extract Size/Radius
+        if 'image_radius' in info:
+            radius = info['image_radius']
+            size = radius * 2
+            # Offset center to find bottom-left corner
+            x = cx - radius
+            y = cy - radius
+        else:
+            # Fallback if size is provided directly
+            size = info.get('image_length', 10) 
+            x = cx - size / 2
+            y = cy - size / 2
+
+        # 3. Draw the Rectangle
+        # We use size for both width and height to make it a square
+        rect = patches.Rectangle((x, y), size, size, linewidth=2, 
+                                 edgecolor='red', facecolor='none')
         ax.add_patch(rect)
         
-        # Add label
-        ax.text(x, y - 5, name, fontsize=8, color=color, weight='bold', 
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
-    
-    ax.set_title(title, fontsize=14, weight='bold')
-    ax.set_xlabel('X (pixels)')
-    ax.set_ylabel('Y (pixels)')
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"✅ Plot saved to: {save_path}")
-    
-    if show_plot:
-        plt.tight_layout()
-        plt.show()
-    else:
-        plt.close(fig)
+        # 4. Add Label
+        ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    ax.set_title(title)
+    plt.show()
 
 
 def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir, group_name=None):
@@ -3257,22 +3234,19 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             print(f"❌ No TIFF found for visualization in {gname}")
             continue
         
-        try:
-            tiff_path = tiff_paths[first_element]
-            image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        tiff_path = tiff_paths[first_element]
+        image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        # Normalize for display
+        image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        # Create plot
+        title = f"Analysis Results - Group {gname} (Element: {first_element})"
+        save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
+        
+        plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
             
-            # Normalize for display
-            image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            
-            # Create plot
-            title = f"Analysis Results - Group {gname} (Element: {first_element})"
-            save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
-            
-            plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
-            
-        except Exception as e:
-            print(f"❌ Error plotting {gname}: {e}")
-            traceback.print_exc()
 
 
 def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
