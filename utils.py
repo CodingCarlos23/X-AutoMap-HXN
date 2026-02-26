@@ -3434,7 +3434,8 @@ def load_and_queue(json_path, target_id=None,
     # IMPORTANT: If offline or analysis-only mode, scan_id is mandatory.
     if target_id is not None:
         params['scan_id'] = target_id
-    elif (is_offline or is_analysis_only) and 'scan_id' not in params:
+
+    elif (is_offline or is_analysis_only) and 'scan_id' not in params['scan_params']:
         print(f"[WARNING] Running in '{mode}' mode but no scan_id provided.")
         # You might want to raise an error or rely on it being in the JSON
     
