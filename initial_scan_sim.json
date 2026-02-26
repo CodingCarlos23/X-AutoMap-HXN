@@ -1,31 +1,99 @@
 {
-  "label":           "moasic_400yx100x_um",
-  "dets":            "dets_fast",
-  "mot1":            "zpssx",
-  "mot1_s":          -12.5,
-  "mot1_e":          12.5,
-  "mot2":            "zpssy",
-  "mot2_s":          -12.5,
-  "mot2_e":          12.5,
-  "exp_t":           0.005,
-  "step_size":       0.5,
-  "roi_positions_file": null,
-  "scan_id":         null,
-  "zp_move_flag":    0,
-  "smar_move_flag":  0,
-  "elem_list":        [["Fe","Ca","Si"],["Cr","Fe","Mn"]],
-  "export_norm":      "sclr1_ch4",
-  "data_wd":          "/nsls2/data2/hxn/legacy/users/2026Q1/synaps_2026/X-AutoMap-HXN",
-  "pos_save_to":      "/nsls2/data2/hxn/legacy/users/2026Q1/synaps_2026/X-AutoMap-HXN",
-  "min_threshold_intensity": 50,
-  "min_threshold_area":9,
-  "step_size_fine": 0.05,
-  "exp_t_fine": 0.01,
-  "fine_scan_pad_ratio":0.3,
-  "analysis": true,
-  "execute": true,
-  "microns_per_pixel_x": 0.250,
-  "microns_per_pixel_y": 0.250,
-  "true_origin_x": 10,
-  "true_origin_y": 20
+  "execution_params": {
+    "mode": "real",
+    "proceed_with_fine_scan": false
+  },
+
+  "scan_params": {
+    "label": "cellpose_test",
+    "scan_id": null,
+    "dets": "dets_fast",
+    "det_names": ["fs", "eiger2", "xspress3"],
+    "mot1": "zpssx",
+    "mot1_s": -12.5,
+    "mot1_e": 12.5,
+    "mot2": "zpssy",
+    "mot2_s": -12.5,
+    "mot2_e": 12.5,
+    "exp_t": 0.005,
+    "step_size": 1,
+    "zp_move_flag": 0,
+    "smar_move_flag": 0,
+    "roi_positions_file": null
+  },
+
+  "fine_scan_params": {
+    "step_size_fine": 0.02,
+    "exp_t_fine": 0.005,
+    "fine_scan_pad_ratio": 0.0
+  },
+
+  "export_params": {
+    "elem_list": [["Ni"]],
+    "export_norm": "sclr1_ch4",
+    "data_wd": "/data/users/current_user"
+  },
+
+  "calibration_params": {
+    "microns_per_pixel_x": 0.250,
+    "microns_per_pixel_y": 0.250,
+    "true_origin_x": 10,
+    "true_origin_y": 20
+  },
+
+  "analysis_params": {
+    "analysis": true,
+    "execute": true
+  },
+
+  "segmentation_params": {
+    "min_threshold_intensity": 25,
+    "min_threshold_area": 9,
+    "blob_detection_method": "cellpose",
+    "overlap_thresh": 0.5
+  },
+
+  "morphology_params": {
+    "normalize_kernel_size": [3, 3],
+    "dilate_iterations": 2,
+    "blur_kernel": [3, 3]
+  },
+
+  "detection_methods": {
+    "simple": {
+      "max_threshold": 255,
+      "max_area": 1600,
+      "threshold_step": 2,
+      "filter_by_color": false,
+      "filter_by_circularity": false
+    },
+    "hough": {
+      "max_radius": 40,
+      "dp": 1,
+      "min_dist": 20,
+      "param1": 50,
+      "param2": 30
+    },
+    "watershed": {
+      "min_distance": 10,
+      "threshold_abs": 0.3
+    },
+    "cellpose": {
+      "diameter": 8,
+      "model_type": "cpsam",
+      "gpu": false,
+      "flow_threshold": 0.4,
+      "cellprob_threshold": 0.0,
+      "channels": [0, 0],
+      "min_diameter": 2,
+      "max_diameter": 999999
+    },
+    "connected_components": {
+      "connectivity": 8
+    },
+    "contours": {
+      "mode": "external",
+      "method": "simple"
+    }
+  }
 }

@@ -8,12 +8,26 @@ import json
 import pickle
 import threading
 import multiprocessing
+import traceback
 from collections import Counter
 from pathlib import Path
 import traceback as trackback
 import inspect
 from skimage.measure import shannon_entropy
+from scipy import ndimage
+from skimage.segmentation import watershed  
+from skimage.feature import peak_local_max
 import warnings
+
+# Cellpose imports (optional - will gracefully handle if not installed)
+try:
+    from cellpose import models
+    from PIL import Image
+    CELLPOSE_AVAILABLE = True
+except ImportError:
+    CELLPOSE_AVAILABLE = False
+    models = None
+    Image = None
 import tqdm
 
 import cv2
@@ -33,112 +47,6 @@ container = c["tst/sandbox/synaps/reconstructions"]
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
 
-## CREATING TILED CLIENT FOR NOW HERE GLOBALLY
-
-class RemoteSegmentationSender:
-    def __init__(self):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.writer = self.client['tst/sandbox/synaps/reconstructions']
-        self.segapp_elems = []
-
-    def clear_cache(self):
-        self.segapp_elems.clear()
-    
-    def append_cache(self, elem):
-        self.segapp_elems.append(elem)
-    
-    def get_cache(self):
-        return self.segapp_elems
-    
-    def cache_size(self):
-        return len(self.segapp_elems)
-    
-    def write(self, data, key=None):
-        """Write numpy array data to remote handler."""
-        try:
-            result = self.writer.write_array(data, key=key, access_tags=['synaps_project'])
-            print(f"[REMOTE] Data written with key: {key}, result: {result}" if key else f"[REMOTE] Data written, result: {result}")
-            return result
-        except Exception as e:
-            print(f"[REMOTE ERROR] Failed to write data with key {key}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def write_metadata(self, metadata_dict, key=None):
-        """Write metadata as a JSON-serializable structure."""
-        import json
-        try:
-            # Convert dict to JSON string, then to numpy array of bytes for storage
-            json_str = json.dumps(metadata_dict, default=str)  # default=str handles non-serializable objects
-            json_bytes = np.array(list(json_str.encode('utf-8')), dtype=np.uint8)
-            result = self.writer.write_array(json_bytes, key=key, access_tags=['synaps_project'])
-            print(f"[REMOTE] Metadata written with key: {key}, result: {result}" if key else f"[REMOTE] Metadata written, result: {result}")
-            return result
-        except Exception as e:
-            print(f"[REMOTE ERROR] Failed to write metadata with key {key}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-class RemoteSegmentationReceiver:
-    def __init__(self, num_elements):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.reader = self.client['tst/sandbox/synaps/segmentations']
-        self.keys = []
-        self.values = []
-        self.num_elements = num_elements
-        self.count_connect = 0
-
-    def subscribe(self):
-        self.sub = self.reader.subscribe()
-        self.sub.child_created.add_callback(self.get_keys)
-        print("Listening for updates. Use Ctrl+C to stop....")
-        self.sub.start()
-
-    def get_keys(self, data):
-        print(f"Received Key : {data}")
-        #self.keys.append(data)
-        sub = data.child().subscribe()
-        sub.new_data.add_callback(self.get_data)
-        sub.start_in_thread(start=1)
-        #sub1.disconnect()
-
-    def get_data(self, data):
-        print(f"count num : {self.count_connect}")
-        #print(f"Received Data : {data}")
-        #self.values.append(data)
-        self.count_connect += 1 
-        if self.count_connect == self.num_elements:
-            self.sub.disconnect()
-
-
-# Create a global instance of this class
-remote_sender = RemoteSegmentationSender() 
-
-# # make if else for rea_state
-# try:
-#     from bluesky_queueserver_api import BPlan
-#     from bluesky_queueserver_api.zmq import REManagerAPI
-#     RM = REManagerAPI()
-
-#     sys.path.insert(0,'/nsls2/data2/hxn/legacy/home/xf03id/src/hxntools')
-#     from hxntools.CompositeBroker import db
-#     from hxntools.scan_info import get_scan_positions
-
-# except ImportError:
-#     BPlan = None
-#     REManagerAPI = None
-#     RM = None
-#     print("Warning: bluesky_queueserver_api not found. Bluesky-related functionality will be disabled.")
-
-
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
@@ -149,179 +57,355 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QRect, QTimer
 
+from remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
+# Create a global instance of the remote sender
+remote_sender = RemoteSegmentationSender() 
+
+
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
     for idx, info in json_safe_data.items():
-        cx, cy = info["real_center_um"]
-        sx, sy = info["real_size_um"]
+        # Handle both old format (real_center_um, real_size_um) and new format (cx, cy, num_x, num_y)
+        if "real_center_um" in info and "real_size_um" in info:
+            cx, cy = info["real_center_um"]
+            sx, sy = info["real_size_um"]
+        elif "cx" in info and "cy" in info and "num_x" in info and "num_y" in info:
+            cx, cy = info["cx"], info["cy"]
+            sx, sy = info["num_x"], info["num_y"]
+        else:
+            print(f"⚠️ Skipping {idx}: missing required keys (cx/cy or real_center_um)")
+            continue
 
         scan_data = {
             idx: {  # Use the union box title as the key
-                "cx": cx,
-                "cy": cy,
-                "num_x": sx,
-                "num_y": sy
+                "cx": float(cx),  # Ensure float conversion for JSON serialization
+                "cy": float(cy),
+                "num_x": float(sx),
+                "num_y": float(sy)
             }
         }
 
         file_path = output_dir / f"{idx}.json"
         with open(file_path, "w") as f:
-            json.dump(scan_data, f, indent=4)
+            json.dump(make_json_serializable(scan_data), f, indent=4)
 
-def headless_send_queue_coarse_scan(beamline_params, coarse_scan_path, 
-                                    real_test = 1, 
-                                    remote_seg=True, target_id=None, 
-                                    proceed_with_fine_scan=False):
+
+def formatted_unions_to_table(formatted_unions, save_to=None):
     """
-    Performs coarse scan using only parameters from beamline_params.
-    The output directory path is constructed and can be used later.
-    No JSON files are read in this function.
+    Convert formatted_unions dict to a pandas DataFrame with fine scan parameters.
+    
+    Args:
+        formatted_unions: dict with keys like "Box #1", values with cx, cy, num_x, num_y
+        save_to: optional path to save as CSV (e.g., "fine_scans.csv")
+    
+    Returns:
+        pandas DataFrame with columns: label, cx, cy, num_x, num_y (only what's needed for fine scans)
+    """
+    if not formatted_unions:
+        print("[TABLE] Warning: formatted_unions is empty, creating empty DataFrame")
+        return pd.DataFrame(columns=['label', 'cx', 'cy', 'num_x', 'num_y'])
+    
+    rows = []
+    for label, info in formatted_unions.items():
+        # Validate required keys
+        if not all(key in info for key in ['cx', 'cy', 'num_x', 'num_y']):
+            missing = [key for key in ['cx', 'cy', 'num_x', 'num_y'] if key not in info]
+            print(f"[TABLE WARNING] Box '{label}' missing keys: {missing}, skipping or using defaults")
+        
+        # Only keep essential fine scan parameters
+        row = {
+            'label': label,
+            'cx': info.get('cx', 0),
+            'cy': info.get('cy', 0),
+            'num_x': info.get('num_x', 0),
+            'num_y': info.get('num_y', 0),
+        }
+        
+        rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    
+    # Ensure numeric columns
+    for col in ['cx', 'cy', 'num_x', 'num_y']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    if save_to:
+        os.makedirs(os.path.dirname(save_to) if os.path.dirname(save_to) else '.', exist_ok=True)
+        df.to_csv(save_to, index=False)
+        print(f"✅ Fine scan table saved to: {save_to}")
+    
+    print(f"[TABLE] Created table with {len(df)} rows: {list(df.columns)}")
+    return df
 
-    headless_send_queue_coarse_scan(json_file, json_file, 1, 
-                                    remote_seg=True, proceed_with_fine_scan=False)
+
+def table_to_individual_scans(df, output_dir="scans"):
+    """
+    Convert fine scan table (DataFrame) to individual scan JSON files.
+    This allows fine scans to be created from a table instead of directly from formatted_unions.
+    
+    Args:
+        df: pandas DataFrame with columns: label, cx, cy, num_x, num_y (minimum required)
+        output_dir: directory to save individual JSON files
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    required_cols = ['label', 'cx', 'cy', 'num_x', 'num_y']
+    if not all(col in df.columns for col in required_cols):
+        raise ValueError(f"DataFrame must contain columns: {required_cols}")
+    
+    for _, row in df.iterrows():
+        label = row['label']
+        scan_data = {
+            label: {
+                "cx": float(row['cx']),
+                "cy": float(row['cy']),
+                "num_x": float(row['num_x']),
+                "num_y": float(row['num_y'])
+            }
+        }
+        
+        file_path = output_dir / f"{label}.json"
+        with open(file_path, "w") as f:
+            json.dump(make_json_serializable(scan_data), f, indent=4)
+    
+    print(f"✅ Created {len(df)} individual scan JSON files in {output_dir}")
+
+
+def load_fine_scans_table(csv_path):
+    """
+    Load a fine scans table from CSV file (for use with remote servers).
+    
+    Args:
+        csv_path: path to CSV file with fine scan parameters
+    
+    Returns:
+        pandas DataFrame with fine scan parameters
+    """
+    import pandas as pd
+    
+    df = pd.read_csv(csv_path)
+    print(f"✅ Loaded fine scans table: {len(df)} scans")
+    print(f"   Columns: {list(df.columns)}")
+    
+    return df
+
+def headless_send_queue_coarse_scan(params_path, remote_seg=True):
+    """
+    Performs coarse scan using parameters from a single JSON config file.
+    
+    Args:
+        params_path: Path to JSON config file containing:
+                     - all beamline parameters (det_name, mot1, mot2, mot1_s, mot1_e, mot2_s, mot2_e, etc.)
+                     - scan_id: Scan ID (optional, default: null)
+                     - proceed_with_fine_scan: Whether to proceed with fine scans after coarse (optional, default: false)
+        remote_seg: Whether to use remote segmentation (default: True)
+    
+    Example:
+        headless_send_queue_coarse_scan('initial_scan_sim.json', remote_seg=True)
     """ 
     
-    with open(beamline_params, 'r') as f:
-        beamline_params = json.load(f)
+    with open(params_path, 'r') as f:
+        params = json.load(f)
 
-    dets = beamline_params.get("det_name", "dets_fast")
-    x_motor = beamline_params.get("mot1", "zpssx")
-    y_motor = beamline_params.get("mot2", "zpssy")
+    # Read optional parameters from JSON with nested access
+    scan_id = params.get("scan_params", {}).get("scan_id")
+    proceed_with_fine_scan = params.get("execution_params", {}).get("proceed_with_fine_scan", False)
 
-    x_start = beamline_params.get("mot1_s", 0)
-    x_end = beamline_params.get("mot1_e", 0)
-    y_start = beamline_params.get("mot2_s", 0)
-    y_end = beamline_params.get("mot2_e", 0)
+    dets = params.get("scan_params", {}).get("det_name", "dets_fast")
+    x_motor = params.get("scan_params", {}).get("mot1", "zpssx")
+    y_motor = params.get("scan_params", {}).get("mot2", "zpssy")
 
-    step_size = beamline_params.get("step_size_coarse", 250)
+    x_start = params.get("scan_params", {}).get("mot1_s", 0)
+    x_end = params.get("scan_params", {}).get("mot1_e", 0)
+    y_start = params.get("scan_params", {}).get("mot2_s", 0)
+    y_end = params.get("scan_params", {}).get("mot2_e", 0)
+
+    # step_size_coarse might not exist in new format, try nested access first, then fallback
+    # Also try 'step_size' in scan_params as fallback
+    step_size = (
+        params.get("scan_params", {}).get("step_size_coarse") or 
+        params.get("scan_params", {}).get("step_size") or 
+        params.get("step_size_coarse", 0.25)
+    )
     mot1_n = int(abs(x_end-x_start)/step_size)
     mot2_n = int(abs(y_end-y_start)/step_size)
-    exp_time = beamline_params.get("exp_t_coarse", 0.01)
+    
+    # Validate step counts
+    if mot1_n == 0 or mot2_n == 0:
+        raise ValueError(
+            f"Coarse scan has zero steps! "
+            f"mot1: {x_start} to {x_end} (n={mot1_n}), "
+            f"mot2: {y_start} to {y_end} (n={mot2_n}), "
+            f"step_size={step_size:.3f}. "
+            f"Check scan_params in JSON config."
+        )
+    
+    # exp_t_coarse might not exist in new format, try nested access first, then fallback
+    exp_time = params.get("scan_params", {}).get("exp_t_coarse") or params.get("scan_params", {}).get("exp_t") or params.get("exp_t_coarse", 0.01)
 
     # Calculate center as midpoint
     cx = (x_start + x_end) / 2
     cy = (y_start + y_end) / 2
     
+    print(f"[COARSE_SCAN] Range: [{x_start:.2f} to {x_end:.2f}] x [{y_start:.2f} to {y_end:.2f}]")
+    print(f"[COARSE_SCAN] Step size: {step_size:.3f} μm, Points: {mot1_n} x {mot2_n}")
+    print(f"[COARSE_SCAN] Center: ({cx:.2f}, {cy:.2f}), Exp time: {exp_time}s")
+    
     roi = {x_motor: cx, y_motor: cy}
 
     RM.item_add(BPlan("piezos_to_zero"))
     
-    load_and_queue(coarse_scan_path, 
-                   real_test, 
-                   target_id=target_id, 
+    # Pass the same config file to load_and_queue
+    load_and_queue(params_path, 
+                   target_id=scan_id, 
                    remote_seg=remote_seg, 
                    proceed_fine_scans=proceed_with_fine_scan)
 
-def headless_send_queue_fine_scan(directory_path, beamline_params, scan_ID, real_test):
+def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     """
-    Performs fine scan for each blob in the JSON file
-    Reads all JSON files in a directory. Each file should contain a single key 
-    with scan parameters like cx, cy, num_x, num_y
+    Performs fine scans from a fine_scans_table (DataFrame or CSV path).
+    Reads all configuration from a single JSON config file with nested structure.
     
-    For each JSON:
-    - Move stage to (cx, cy)
-    - Perform fly2d scan with the specified image size and resolution
+    Args:
+        json_path: Path to JSON config file containing:
+                   - execution_params (mode, etc.)
+                   - scan_params (mot1, mot2, exp_t, step_size_fine, etc.)
+                   - fine_scans_table_path (optional, path to CSV with fine scan parameters)
+        fine_scans_table: Optional pandas DataFrame or CSV path with fine scan parameters
+                         Columns required: label, cx, cy, num_x, num_y
+                         If not provided, tries to load from JSON config
+    
+    Example:
+        headless_send_queue_fine_scan('initial_scan_sim.json', fine_scans_table='fine_scans_table_RGB.csv')
     """
-    dets = beamline_params.get("det_name", "dets_fast")
-    #dets = [fs,eiger2,xspress3]
-    x_motor = beamline_params.get("mot1", "zpssx")
-    y_motor = beamline_params.get("mot2", "zpssy")
-    # mot1_n = beamline_params.get("mot1_n", 100)
-    # mot2_n = beamline_params.get("mot2_n", 100)
-
-    exp_t = beamline_params.get("exp_t", 0.01)
-    step_size = beamline_params.get("step_size_fine", 100)
-
-    pattern = re.compile(r"scan_\d+_params\.json$")  # matches scan_123_params.json
-
-    for filename in os.listdir(directory_path):
-        if not filename.endswith(".json"):
-            continue
-        if filename.startswith("unions_output") or filename.startswith("union_blobs"):
-            continue
-        if pattern.match(filename):
-            continue
-
-        json_path = os.path.join(directory_path, filename)
-        print(filename)
-        with open(json_path, "r") as f:
-            data = json.load(f)
-
-        for label, info in data.items():
-            time.sleep(1)
-            cx = info["cx"]
-            cy = info["cy"] 
-            sx = info["num_x"]
-            sy = info["num_y"]
-
-            # Expand scan size by 25% for padding
-            pad_ratio = beamline_params.get("fine_scan_pad_ratio", 0.25)
-            sx_padded = sx * (1 + pad_ratio)
-            sy_padded = sy * (1 + pad_ratio)
-
-            # Define relative scan range around center
-            x_start = -sx_padded / 2
-            x_end   =  sx_padded / 2
-            y_start = -sy_padded / 2
-            y_end   =  sy_padded / 2
-
-            # Step counts based on padded size
-            num_steps_x = int(sx_padded / step_size)
-            num_steps_y = int(sy_padded / step_size)
-
-            # ROI still centered on original center
-            roi = {x_motor: cx, y_motor: cy}
-
-            # Detector names
-            # det_names = [d.name for d in eval(dets)]
-            # Create ROI dictionary to move motors first
-
-            if real_test == 1:
-                RM.item_add(BPlan(
-                    "recover_pos_and_scan", #written
-                    label, #from folder of jsons
-                    roi, #calculated here
-                    dets, #from beamline_params
-                    x_motor, #from beamline_params
-                    x_start, #calculated here
-                    x_end, #calculated here
-                    num_steps_x, #calculated here
-                    y_motor, #from beamline_params
-                    y_start, #calculated here
-                    y_end, #calculate d here
-                    num_steps_y, #calculated here
-                    exp_t, #from beamline_params
-                    step_size #from json
-                ))
-
-            # print(f"prev ROI: {roi}")
-            # print()
-
-            # print(f"Fine Scan to Queue server {filename}")
-            # print("BPlan: recover_pos_and_scan")
-            # print(f"label: {label}")
-            # print(f"roi: {roi}")
-            # print(f"dets: {dets}")
-            # print(f"x_motor: {x_motor}")
-            # print(f"x_start: {x_start}")
-            # print(f"x_end: {x_end}")
-            # print(f"num_steps_x: {num_steps_x}")
-            # print(f"y_motor: {y_motor}")
-            # print(f"y_start: {y_start}")
-            # print(f"y_end: {y_end}")
-            # print(f"num_steps_y: {num_steps_y}")
-            # print(f"exp_t: {exp_t}")
-            # print(f"step_size: {step_size}")
-            # print("------------------------\n")
-
-        print(f"Scan from {filename} completed") 
-        print()
-    print("Fine scan sent")
-
-
     
+    # Load JSON config
+    with open(json_path, 'r') as f:
+        params = json.load(f)
+    
+    # Extract parameters from nested structure
+    execution_params = params.get('execution_params', {})
+    scan_params = params.get('scan_params', {})
+    fine_scan_params = params.get('fine_scan_params', {})
+    
+    # Get mode
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_offline = (mode == 'offline')
+    is_sim = (mode == 'simulation')
+    
+    # Extract beamline parameters from scan_params
+    dets = scan_params.get('dets', 'dets_fast')
+    # Get detector names list from config, with fallback to default
+    det_names = scan_params.get('det_names', ['fs', 'eiger2', 'xspress3'])
+    
+    x_motor = scan_params.get('mot1', 'zpssx')
+    y_motor = scan_params.get('mot2', 'zpssy')
+    exp_t = fine_scan_params.get('exp_t_fine', scan_params.get('exp_t', 0.01))
+    step_size = fine_scan_params.get('step_size_fine', 0.1)
+    fine_scan_pad_ratio = fine_scan_params.get('fine_scan_pad_ratio', 0.25)
+    
+    # Additional parameters for fly2d_qserver_scan_export
+    zp_move_flag = scan_params.get('zp_move_flag', 0)
+    smar_move_flag = scan_params.get('smar_move_flag', 0)
+    ic1_count = scan_params.get('ic1_count', 55000)
+    
+    # Export parameters
+    export_params = params.get('export_params', {})
+    elem_list = export_params.get('elem_list', [])
+    # Flatten nested list if needed
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list(set(elem for sublist in elem_list for elem in sublist))
+    export_norm = export_params.get('export_norm', 'sclr1_ch4')
+    data_wd = export_params.get('data_wd', '/data/users/current_user')
+    
+    # Determine which table to use
+    if fine_scans_table is None:
+        # Try to load from JSON config
+        table_path = params.get('fine_scans_table_path')
+        if table_path:
+            print(f"[FINE_SCANS] Loading table from JSON config: {table_path}")
+            fine_scans_table = load_fine_scans_table(table_path)
+        else:
+            print(f"[FINE_SCANS] No fine_scans_table provided and no fine_scans_table_path in JSON")
+            return
+    elif isinstance(fine_scans_table, str):
+        # Load from CSV path
+        print(f"[FINE_SCANS] Loading table from CSV: {fine_scans_table}")
+        fine_scans_table = load_fine_scans_table(fine_scans_table)
+    
+    # Process each fine scan from the table
+    print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table (Mode: {mode.upper()})")
+    
+    for idx, row in fine_scans_table.iterrows():
+        time.sleep(0.5)
+        label = row['label']
+        cx = row['cx']
+        cy = row['cy']
+        sx = row['num_x']
+        sy = row['num_y']
+        
+        # Expand scan size by padding ratio
+        sx_padded = sx * (1 + fine_scan_pad_ratio)
+        sy_padded = sy * (1 + fine_scan_pad_ratio)
+
+        # Define relative scan range around center
+        x_start = -sx_padded / 2
+        x_end = sx_padded / 2
+        y_start = -sy_padded / 2
+        y_end = sy_padded / 2
+
+        # Step counts based on padded size
+        num_steps_x = int(sx_padded / step_size)
+        num_steps_y = int(sy_padded / step_size)
+        
+        # Validate step counts
+        if num_steps_x == 0 or num_steps_y == 0:
+            print(f"⚠️ WARNING: {label} has zero steps! sx_padded={sx_padded:.3f}, sy_padded={sy_padded:.3f}, step_size={step_size:.3f}")
+            print(f"⚠️ This likely indicates a unit mismatch or incorrect step_size_fine value.")
+            print(f"⚠️ Skipping this scan to avoid errors.")
+            continue
+
+        # ROI centered on original center
+        roi = {x_motor: cx, y_motor: cy}
+        roi_json = json.dumps(roi)
+
+        if is_real:
+            print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
+            print(f"[FINE_SCANS]   → Padded size: {sx_padded:.2f} x {sy_padded:.2f} μm, step: {step_size:.3f} μm")
+            print(f"[FINE_SCANS]   → Points: {num_steps_x} x {num_steps_y}, range: [{x_start:.2f} to {x_end:.2f}] x [{y_start:.2f} to {y_end:.2f}]")
+            RM.item_add(BPlan(
+                "fly2d_qserver_scan_export",
+                label,
+                det_names,  # Use detector names list, not string
+                x_motor,
+                x_start,
+                x_end,
+                num_steps_x,
+                y_motor,
+                y_start,
+                y_end,
+                num_steps_y,
+                exp_t,
+                roi_json,
+                "",  # scan_id (empty for fine scans)
+                zp_move_flag,
+                smar_move_flag,
+                ic1_count,
+                json.dumps(elem_list),
+                export_norm,
+                data_wd
+            ))
+        else:
+            print(f"[{mode.upper()}] Would queue: {label} (cx={cx:.2f}, cy={cy:.2f})")
+    
+    print(f"[FINE_SCANS] ✅ All {len(fine_scans_table)} fine scans {'queued' if is_real else 'prepared'}")
+
+
 
 def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
     """
@@ -506,20 +590,29 @@ def create_all_elements_tiff(tiff_paths, output_dir, element_list, precomputed_b
         traceback.print_exc()
 
 def make_json_serializable(obj):
+    """
+    Recursively convert numpy types and other non-JSON-serializable objects to JSON-safe types.
+    Handles numpy integers (uint8, int32, int64, etc.), floats, arrays, and nested structures.
+    """
     if isinstance(obj, dict):
         return {k: make_json_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         return [make_json_serializable(i) for i in obj]
-    elif isinstance(obj, tuple):
-        return tuple(make_json_serializable(i) for i in obj)
-    elif isinstance(obj, (np.integer, np.int_)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float_)):
-        return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    else:
+    # Catch all numpy scalar types (uint8, int32, int64, float32, float64, etc.)
+    elif isinstance(obj, (np.integer, np.uint8, np.int8, np.int16, np.int32, np.int64, 
+                         np.uint16, np.uint32, np.uint64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (bool, np.bool_)):
+        return bool(obj)
+    elif isinstance(obj, (int, float, str, bool, type(None))):
         return obj
+    else:
+        # Fallback: try to convert to string for unknown types
+        return str(obj)
 
 #merge boxes option 
 
@@ -685,35 +778,370 @@ def process_and_save_json(input_path, overlap_thresh=0.5):
     output_path = f"{base}_merged.json"
 
     with open(output_path, "w") as f:
-        json.dump(merged, f, indent=2)
+        json.dump(make_json_serializable(merged), f, indent=2)
 
     print(f"✅ Merged JSON saved to: {output_path}")
     return output_path
 
-def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name):
+def _detect_blobs_simple(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Simple blob detector method (OpenCV SimpleBlobDetector)"""
     params = cv2.SimpleBlobDetector_Params()
     params.minThreshold = min_thresh
-    params.maxThreshold = 255
+    params.maxThreshold = kwargs.get('max_threshold', 255)
     params.filterByArea = True
     params.minArea = min_area
-    params.maxArea = 1600
-    params.thresholdStep = 2  #Default was 10
+    params.maxArea = kwargs.get('max_area', 1600)
+    params.thresholdStep = kwargs.get('threshold_step', 2)
 
-    params.filterByColor = False#True
-    # params.blobColor = 255
-    
-    params.filterByCircularity = False
-    params.filterByInertia = False
-    params.filterByConvexity = False
-    params.minRepeatability = 1
+    params.filterByColor = kwargs.get('filter_by_color', False)
+    params.filterByCircularity = kwargs.get('filter_by_circularity', False)
+    params.filterByInertia = kwargs.get('filter_by_inertia', False)
+    params.filterByConvexity = kwargs.get('filter_by_convexity', False)
+    params.minRepeatability = kwargs.get('min_repeatability', 1)
     
     detector = cv2.SimpleBlobDetector_create(params)
     keypoints = detector.detect(img_norm)
-    blobs = []
-
-    for idx, kp in enumerate(keypoints, start=1):  # Start from 1
+    
+    detections = []
+    for kp in keypoints:
         x, y = int(kp.pt[0]), int(kp.pt[1])
         radius = int(kp.size / 2)
+        detections.append({'center': (x, y), 'radius': radius})
+    
+    return detections
+
+def _detect_blobs_contours(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Contour-based blob detection"""
+    # Apply threshold
+    _, binary = cv2.threshold(img_norm, min_thresh, 255, cv2.THRESH_BINARY)
+    
+    # Find contours
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    detections = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area >= min_area:
+            # Get bounding circle
+            (x, y), radius = cv2.minEnclosingCircle(contour)
+            detections.append({'center': (int(x), int(y)), 'radius': int(radius)})
+    
+    return detections
+
+def _detect_blobs_hough_circles(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Hough circle detection for circular blobs"""
+    # Convert min_area to min_radius (assuming circular blobs)
+    min_radius = int(np.sqrt(min_area / np.pi))
+    max_radius = kwargs.get('max_radius', 40)
+    
+    circles = cv2.HoughCircles(
+        img_norm,
+        cv2.HOUGH_GRADIENT,
+        dp=kwargs.get('dp', 1),
+        minDist=kwargs.get('min_dist', min_radius * 2),
+        param1=kwargs.get('param1', 50),
+        param2=kwargs.get('param2', 30),
+        minRadius=min_radius,
+        maxRadius=max_radius
+    )
+    
+    detections = []
+    if circles is not None:
+        circles = np.round(circles[0, :]).astype("int")
+        for (x, y, r) in circles:
+            detections.append({'center': (x, y), 'radius': r})
+    
+    return detections
+
+def _detect_blobs_connected_components(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Connected components labeling for blob detection"""
+    # Apply threshold
+    _, binary = cv2.threshold(img_norm, min_thresh, 255, cv2.THRESH_BINARY)
+    
+    # Find connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    
+    detections = []
+    for i in range(1, num_labels):  # Skip background (label 0)
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area >= min_area:
+            x, y = int(centroids[i][0]), int(centroids[i][1])
+            # Estimate radius from area
+            radius = int(np.sqrt(area / np.pi))
+            detections.append({'center': (x, y), 'radius': radius})
+    
+    return detections
+
+def _masks_to_boxes_and_areas(masks):
+    """
+    Convert Cellpose masks to bounding boxes and areas.
+    
+    Returns:
+        boxes: list of (x1, y1, x2, y2)
+        areas: list of mask pixel areas (same order as boxes)
+    """
+    boxes, areas = [], []
+    ids = np.unique(masks)
+    ids = ids[ids != 0]  # Skip background
+    
+    for i in ids:
+        ys, xs = np.where(masks == i)
+        if xs.size == 0:
+            continue
+        x1, x2 = int(xs.min()), int(xs.max())
+        y1, y2 = int(ys.min()), int(ys.max())
+        boxes.append((x1, y1, x2, y2))
+        areas.append(int(xs.size))
+        
+    return boxes, areas
+
+
+def _area_to_equiv_diameter(area_px):
+    """Convert area to equivalent circle diameter: A = π (d/2)^2  -> d = 2*sqrt(A/π)"""
+    return 2.0 * np.sqrt(area_px / np.pi)
+
+
+def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Cellpose-based blob detection for cell/particle segmentation"""
+    if not CELLPOSE_AVAILABLE:
+        raise ImportError("Cellpose not available. Install with: pip install cellpose")
+    
+    # Use img_orig (normalized but NOT dilated) because Cellpose is a deep learning model
+    # trained on raw images. Morphological dilation can destroy fine details.
+    # img_norm = dilated image (used for simple/contour methods)
+    # img_orig = normalized but not dilated (better for deep learning models)
+    cellpose_input = img_orig
+    
+    # Convert to format expected by Cellpose
+    if len(cellpose_input.shape) == 2:
+        # Convert grayscale to RGB format for Cellpose
+        img_rgb = np.stack([cellpose_input, cellpose_input, cellpose_input], axis=2)
+    else:
+        img_rgb = cellpose_input.copy()
+    
+    # Normalize to [0,1] range
+    img_min, img_max = float(img_rgb.min()), float(img_rgb.max())
+    if img_max > img_min:
+        img_rgb = (img_rgb - img_min) / (img_max - img_min)
+    else:
+        # Handle constant image
+        return []
+    
+    # Cellpose parameters
+    diameter_guess = kwargs.get('diameter', 60)
+    model_type = kwargs.get('model_type', 'cyto3')
+    gpu = kwargs.get('gpu', False)
+    flow_threshold = kwargs.get('flow_threshold', 0.4)
+    cellprob_threshold = kwargs.get('cellprob_threshold', 0.0)
+    channels = kwargs.get('channels', [0, 0])  # [cytoplasm, nucleus] channels
+    
+    # Initialize model
+    model = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+    
+    # Run detection
+    try:
+        res = model.eval(
+            img_rgb,
+            channels=channels,
+            diameter=diameter_guess,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold
+        )
+        
+        # Handle different return formats
+        if len(res) == 4:
+            masks, flows, styles, diams = res
+        else:
+            masks, flows, styles = res
+            
+    except Exception as e:
+        print(f"Cellpose detection failed: {e}")
+        return []
+    
+    # Convert masks to boxes and areas
+    boxes, areas = _masks_to_boxes_and_areas(masks)
+    
+    # Filter by diameter range if specified
+    min_diameter = kwargs.get('min_diameter', 0)
+    max_diameter = kwargs.get('max_diameter', float('inf'))
+    
+    detections = []
+    for box, area in zip(boxes, areas):
+        # Check area threshold
+        if area < min_area:
+            continue
+            
+        # Check diameter threshold
+        equiv_diameter = _area_to_equiv_diameter(area)
+        if not (min_diameter <= equiv_diameter <= max_diameter):
+            continue
+        
+        # Calculate center and radius from bounding box
+        x1, y1, x2, y2 = box
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        
+        # Use equivalent radius from area for consistency
+        radius = equiv_diameter / 2
+        
+        detections.append({
+            'center': (int(center_x), int(center_y)),
+            'radius': int(radius),
+            'area': area,
+            'equiv_diameter': equiv_diameter,
+            'bbox': box
+        })
+    
+    return detections
+
+
+def _detect_blobs_watershed(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Watershed segmentation for blob detection"""
+    from scipy import ndimage
+    from skimage.segmentation import watershed
+    from skimage.feature import peak_local_max
+    
+    # Apply threshold
+    _, binary = cv2.threshold(img_norm, min_thresh, 255, cv2.THRESH_BINARY)
+    
+    # Distance transform
+    dist_transform = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    
+    # Find local maxima as markers
+    local_max_coords = peak_local_max(
+        dist_transform, 
+        min_distance=kwargs.get('min_distance', 10),
+        threshold_abs=kwargs.get('threshold_abs', 0.3 * dist_transform.max())
+    )
+    
+    # Create markers
+    markers = np.zeros_like(binary, dtype=np.int32)
+    for i, (y, x) in enumerate(local_max_coords):
+        markers[y, x] = i + 1
+    
+    # Apply watershed
+    labels = watershed(-dist_transform, markers, mask=binary)
+    
+    detections = []
+    for label_id in np.unique(labels):
+        if label_id == 0:  # Skip background
+            continue
+        
+        mask = labels == label_id
+        area = np.sum(mask)
+        
+        if area >= min_area:
+            # Calculate centroid
+            y_coords, x_coords = np.where(mask)
+            x = int(np.mean(x_coords))
+            y = int(np.mean(y_coords))
+            radius = int(np.sqrt(area / np.pi))
+            detections.append({'center': (x, y), 'radius': radius})
+    
+    return detections
+
+def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, 
+                 file_name, method='simple', 
+                 include_method_info=False, **kwargs):
+    """
+    General blob detection function that supports multiple detection methods.
+    
+    Parameters:
+    -----------
+    img_norm : np.ndarray
+        Normalized image for detection
+    img_orig : np.ndarray  
+        Original image for intensity calculations
+    min_thresh : float
+        Minimum threshold for detection
+    min_area : float
+        Minimum area for blob filtering
+    color : str
+        Color label for the blobs
+    file_name : str
+        Name of the file being processed
+    method : str
+        Detection method to use. Options:
+        - 'simple': OpenCV SimpleBlobDetector (default) - Good for general circular/elliptical blobs
+        - 'contours': Contour-based detection - Good for irregular shapes
+        - 'hough': Hough circle detection - Best for perfect circles
+        - 'connected_components': Connected components labeling - Fast, good for well-separated objects
+        - 'watershed': Watershed segmentation - Good for touching/overlapping objects
+        - 'cellpose': Cellpose deep learning segmentation - Best for cells and complex biological objects
+    include_method_info : bool
+        If True, includes 'method' key in output for compatibility (default: False)
+    **kwargs : dict
+        Additional method-specific parameters:
+        
+        For 'simple' method:
+            max_threshold=255, max_area=1600, threshold_step=2,
+            filter_by_color=False, filter_by_circularity=False, etc.
+            
+        For 'hough' method:
+            max_radius=40, dp=1, min_dist=20, param1=50, param2=30
+            
+        For 'watershed' method:
+            min_distance=10, threshold_abs=0.3
+            
+        For 'cellpose' method:
+            diameter=60, model_type='cyto3', gpu=False, flow_threshold=0.4,
+            cellprob_threshold=0.0, channels=[0,0], min_diameter=0, max_diameter=inf
+        
+    Returns:
+    --------
+    list : List of detected blob dictionaries with keys:
+        'Box', 'center', 'radius', 'color', 'file', 
+        'max_intensity', 'mean_intensity', 'mean_dilation',
+        'box_x', 'box_y', 'box_size'
+        (plus 'method' key if include_method_info=True)
+        
+    Examples:
+    ---------
+    # Basic usage (default simple method) - SAME OUTPUT FORMAT AS BEFORE
+    blobs = detect_blobs(img_norm, img_orig, 50, 100, 'red', 'test.tiff')
+    
+    # Use contour detection for irregular shapes
+    blobs = detect_blobs(img_norm, img_orig, 50, 100, 'red', 'test.tiff', method='contours')
+    
+    # Use Hough circles with custom parameters 
+    blobs = detect_blobs(img_norm, img_orig, 50, 100, 'red', 'test.tiff', 
+                        method='hough', max_radius=50, min_dist=30)
+                        
+    # Use Cellpose for biological samples
+    blobs = detect_blobs(img_norm, img_orig, 50, 100, 'red', 'test.tiff',
+                        method='cellpose', diameter=60, model_type='cyto3')
+                        method='contours', include_method_info=True)
+                        
+    # Compare multiple methods (automatically includes method info)
+    results = detect_blobs_multi_method(img_norm, img_orig, 50, 100, 'red', 'test.tiff',
+                                       methods=['simple', 'contours', 'hough'])
+    """
+    
+    # Method dispatch
+    method_map = {
+        'simple': _detect_blobs_simple,
+        'contours': _detect_blobs_contours, 
+        'hough': _detect_blobs_hough_circles,
+        'connected_components': _detect_blobs_connected_components,
+        'watershed': _detect_blobs_watershed,
+        'cellpose': _detect_blobs_cellpose
+    }
+    
+    if method not in method_map:
+        raise ValueError(f"Unknown detection method: {method}. Available: {list(method_map.keys())}")
+    
+    # Special check for Cellpose availability
+    if method == 'cellpose' and not CELLPOSE_AVAILABLE:
+        raise ImportError(f"Cellpose not available. Install with: pip install cellpose[gui]")
+    
+    # Detect blobs using the selected method
+    detections = method_map[method](img_norm, img_orig, min_thresh, min_area, **kwargs)
+    
+    # Convert detections to standard format
+    blobs = []
+    for idx, detection in enumerate(detections, start=1):
+        x, y = detection['center']
+        radius = detection['radius']
         box_size = 2 * radius
         box_x, box_y = x - radius, y - radius
 
@@ -723,8 +1151,8 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name):
         roi_dilated = img_norm[y1:y2, x1:x2]
 
         if roi_orig.size > 0:
-            blobs.append({
-                'Box': f"{file_name} Box #{idx}",  # <-- Your new label
+            blob_dict = {
+                'Box': f"{file_name} Box #{idx}",
                 'center': (x, y),
                 'radius': radius,
                 'color': color,
@@ -735,8 +1163,96 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name):
                 'box_x': box_x,
                 'box_y': box_y,
                 'box_size': box_size
-            })
+            }
+            
+            # Only add method info if requested for backward compatibility
+            if include_method_info:
+                blob_dict['method'] = method
+                
+            blobs.append(blob_dict)
+    
     return blobs
+
+
+# Helper functions for convenient method-specific detection
+
+def detect_blobs_simple(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for simple blob detection"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name, 
+                       method='simple', include_method_info=include_method_info, **kwargs)
+
+def detect_blobs_contours(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for contour-based blob detection"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='contours', include_method_info=include_method_info, **kwargs)
+
+def detect_blobs_hough(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):  
+    """Convenient wrapper for Hough circle detection"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='hough', include_method_info=include_method_info, **kwargs)
+
+def detect_blobs_connected_components(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for connected components detection"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='connected_components', include_method_info=include_method_info, **kwargs)
+
+def detect_blobs_watershed(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for watershed segmentation detection"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='watershed', include_method_info=include_method_info, **kwargs)
+
+def detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for Cellpose deep learning segmentation"""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='cellpose', include_method_info=include_method_info, **kwargs)
+
+
+def get_available_detection_methods():
+    """Returns list of available detection methods"""
+    methods = ['simple', 'contours', 'hough', 'connected_components', 'watershed']
+    if CELLPOSE_AVAILABLE:
+        methods.append('cellpose')
+    return methods
+
+
+def detect_blobs_multi_method(img_norm, img_orig, min_thresh, min_area, color, file_name, 
+                             methods=['simple'], combine_results=True, **kwargs):
+    """
+    Apply multiple detection methods and optionally combine results.
+    
+    Parameters:
+    -----------
+    methods : list
+        List of detection methods to apply
+    combine_results : bool  
+        If True, combine all results into single list. If False, return dict by method.
+    **kwargs : dict
+        Additional parameters for detection methods
+        
+    Returns:
+    --------
+    list or dict : Combined results or dict of results by method
+    """
+    all_results = {}
+    
+    for method in methods:
+        try:
+            blobs = detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                               method=method, include_method_info=True, **kwargs)
+            all_results[method] = blobs
+            print(f"Method '{method}': Found {len(blobs)} blobs")
+        except Exception as e:
+            print(f"Error with method '{method}': {e}")
+            all_results[method] = []
+    
+    if combine_results:
+        # Combine all results (method info already included via include_method_info=True)
+        combined_blobs = []
+        for method, blobs in all_results.items():
+            combined_blobs.extend(blobs)
+        return combined_blobs
+    
+    return all_results
 
 
 
@@ -871,6 +1387,7 @@ def is_featureless(img):
     edge_map = cv2.Canny(img.astype(np.uint8), 50, 150)
     edge_ratio = np.count_nonzero(edge_map) / img.size
 
+
     return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
 
@@ -880,6 +1397,7 @@ def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3,
 
     if is_featureless(img):
         print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
+        print(f"[DEBUG] is_featureless triggered! Max: {img.max()}, Mean: {img.mean()}, Entropy: {shannon_entropy(img)}, PNR: {(img.max() - img.mean()) / (img.std() + 1e-5)}, Edge Ratio: {np.count_nonzero(cv2.Canny(img.astype(np.uint8), 50, 150)) / img.size}")
         return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
 
     if blur_kernel:
@@ -891,14 +1409,23 @@ def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3,
     dilated = cv2.dilate(norm, kernel, iterations=iterations)
     return norm, dilated
 
-def normalize_and_dilate(img):
+def normalize_and_dilate(img, kernel_size=None, iterations=None):
     img = np.nan_to_num(img)
 
     if is_featureless(img):
         print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
         return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
+    
     norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    dilated = cv2.dilate(norm, np.ones((3, 3), np.uint8), iterations=2)
+    
+    # Use defaults if parameters not provided (backwards compatibility)
+    if kernel_size is None:
+        kernel_size = (3, 3)
+    if iterations is None:
+        iterations = 2
+    
+    kernel = np.ones(kernel_size, np.uint8) if isinstance(kernel_size, tuple) else np.ones((3, 3), np.uint8)
+    dilated = cv2.dilate(norm, kernel, iterations=iterations)
     return norm, dilated
 
 def boxes_intersect(b1, b2):
@@ -1176,7 +1703,7 @@ def _pad_scalar_to_expected_length(scalar, expected_length):
     print(f"[SCALAR] Padded scalar from {len(scalar)} to {len(padded_scalar)} points using last value {last_point}")
     return padded_scalar
 
-def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
+def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[]):
     """
     Export XRF data to remote handler for remote segmentation.
     
@@ -1184,10 +1711,9 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
-        real_test: 0 for test mode (skip export), 1 for real export
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping remote XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
@@ -1219,7 +1745,8 @@ def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
             xrf_img = spectrum.reshape(scan_dim)
             remote_sender.write(xrf_img)
 
-def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_test=0):
+def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
+                                 append_meta_with = {}):
     """
     Export XRF data to remote handler for remote segmentation.
     
@@ -1227,18 +1754,21 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
-        real_test: 0 for test mode (skip export), 1 for real export
     """
 
     
-    if real_test == 0:
-        print("[EXPORT] Skipping remote XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
     scan_id = hdr.start["scan_id"]
 
-    meta = export_scan_params(sid=scan_id, real_test=real_test)
+    meta = export_scan_params(sid=scan_id)
+    
+    # Append additional metadata if provided
+    if append_meta_with:
+        meta.update(append_meta_with)
 
     import time
     timestamp = int(time.time())
@@ -1261,6 +1791,11 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
     # Collect all normalized XRF images for stacking
     xrf_images = []
     element_names = []
+
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list(set(elem for sublist in elem_list for elem in sublist))
+    else:
+        elem_list = list(set(elem_list)) if elem_list else []
     
     for elem in sorted(elem_list):
         try:
@@ -1293,11 +1828,14 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[], real_t
             print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
+
+        print(f"[REMOTE] meta for scan {scan_id}: {meta}") 
     else:
         print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
+
         #remote_sender.write(xrf_img)
 
-def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0):
+def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
     """
     Export XRF data as local TIFF files.
     
@@ -1306,10 +1844,9 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
         wd: Working directory for output files
-        real_test: 0 for test mode (skip export), 1 for real export
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping local XRF export in test mode.")
+    if not scan_id:
+        print("[EXPORT] Skipping local XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
@@ -1340,7 +1877,8 @@ def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test
         tiff.imwrite(os.path.join(wd, f"scan_{scan_id}_{elem}.tiff"), xrf_img)
 
 
-def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_test=0, remote_seg=False):
+def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], 
+                        wd='.', remote_seg=False, append_meta_with={}):
     """
     Export XRF ROI data either remotely or as local TIFF files.
     
@@ -1349,17 +1887,20 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[], wd='.', real_te
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
         wd: Working directory for local export
-        real_test: 0 for test mode (skip export), 1 for real export
         remote_seg: If True, use remote handler; if False, write local TIFFs
+        append_meta_with: Additional metadata to append (default: empty dict)
     """
     if remote_seg:
-       # _export_xrf_remote(scan_id, norm, elem_list, real_test)
-       _export_xrf_remote_container(scan_id, norm, elem_list, real_test)
+       # _export_xrf_remote(scan_id, norm, elem_list)
+       _export_xrf_remote_container(scan_id, 
+                                    norm=norm, 
+                                    elem_list=elem_list, 
+                                    append_meta_with=append_meta_with)
     else:
-        _export_xrf_local(scan_id, norm, elem_list, wd, real_test)
+        _export_xrf_local(scan_id, norm, elem_list, wd)
 
 
-def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
+def export_scan_params(sid=-1, zp_flag=True, save_to=None):
     """
     Fetch scan parameters, ROI positions, step size, and the full start_doc
     for scan `sid`.  Optionally write them out as JSON.
@@ -1370,8 +1911,8 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
       - roi_positions
       - step_size (computed from scan_input for 2D_FLY_PANDA)
     """
-    if real_test == 0:
-        print("[EXPORT] Skipping scan params export in test mode.")
+    if sid == -1:
+        print("[EXPORT] Skipping scan params export - no valid scan ID provided.")
         return
     # 1) Pull the header
     hdr = db[int(sid)]
@@ -1430,12 +1971,12 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None, real_test=0):
             filename = save_to if save_to.lower().endswith(".json") else save_to + ".json"
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, "w") as f:
-            json.dump(result, f, indent=2)
+            json.dump(make_json_serializable(result), f, indent=2)
 
     return result
 
 
-def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
+def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None):
     """
     Export scan parameters for a batch of scan IDs.
     
@@ -1443,13 +1984,12 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
         scan_ids (list): List of scan IDs to export
         zp_flag (bool): Whether to use ZP motors or DS motors
         save_to (str): Directory or base filename to save to
-        real_test (int): If 0, skip actual export (test mode)
     
     Returns:
         dict: Dictionary mapping scan_id to exported parameters
     """
-    if real_test == 0:
-        print(f"[EXPORT] Skipping batch scan params export in test mode for {len(scan_ids)} scans.")
+    if not scan_ids:
+        print(f"[EXPORT] Skipping batch scan params export - no scan IDs provided.")
         return {}
     
     results = {}
@@ -1470,8 +2010,7 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None, real_test=0):
             result = export_scan_params(
                 sid=sid,
                 zp_flag=zp_flag,
-                save_to=scan_save_to,
-                real_test=real_test
+                save_to=scan_save_to
             )
             
             if result:
@@ -1517,8 +2056,7 @@ def _fly2d_qserver_scan_export(label,
                            # **POST-SCAN EXPORTS**
                            elem_list=None,           # list of elements for XRF
                            export_norm='sclr1_ch4',  # channel to normalize by
-                           data_wd='.',              # where to write TIFFs
-                           pos_save_to=None):        # JSON filename or dir
+                           data_wd='.'):             # where to write TIFFs
     """
     1) Optionally recover a previous scan or ROI dict
     2) Do beam/flux checks
@@ -1586,6 +2124,7 @@ def _fly2d_qserver_scan_export(label,
 
 def send_fly2d_to_queue(label,
                         dets,
+                        det_names,
                         mot1, mot1_s, mot1_e, mot1_n,
                         mot2, mot2_s, mot2_e, mot2_n,
                         exp_t,
@@ -1597,10 +2136,10 @@ def send_fly2d_to_queue(label,
                         elem_list=None,
                         export_norm='sclr1_ch4',
                         data_wd='.',
-                        pos_save_to=None,
                         real_test=0):
-    # det_names = [d.name for d in eval(dets)]
-    det_names = ['fs', 'eiger2', 'xspress3']
+    # Use provided det_names or fallback to default
+    if not det_names:
+        det_names = ['fs', 'eiger2', 'xspress3']
 
     roi_json = ""
     if isinstance(roi_positions, dict):
@@ -1608,29 +2147,24 @@ def send_fly2d_to_queue(label,
     elif isinstance(roi_positions, str):
         roi_json = roi_positions
 
-    print("Coarse scan")
-    if real_test == 1:
-        RM.item_add(BPlan("fly2d_qserver_scan_export",
-                          label,
-                          det_names,
-                          mot1, mot1_s, mot1_e, mot1_n,
-                          mot2, mot2_s, mot2_e, mot2_n,
-                          exp_t,
-                          roi_json,
-                          scan_id or "",
-                          zp_move_flag,
-                          smar_move_flag,
-                          ic1_count,
-                          json.dumps(elem_list or []),
-                          export_norm,
-                          data_wd,
-                          pos_save_to or ""#,
-                        #   real_test
-                          ))
-        
-    print("Coarse scan sent to queue")
+    print("Coarse scan - submitting to queue...")
+    RM.item_add(BPlan("fly2d_qserver_scan_export",
+                      label,
+                      det_names,
+                      mot1, mot1_s, mot1_e, mot1_n,
+                      mot2, mot2_s, mot2_e, mot2_n,
+                      exp_t,
+                      roi_json,
+                      scan_id or "",
+                      zp_move_flag,
+                      smar_move_flag,
+                      ic1_count,
+                      json.dumps(elem_list or []),
+                      export_norm,
+                      data_wd))
+    print("Coarse scan sent to queue.")
 
-def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
+def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True):
     """
     Wait until QServer queue is empty and manager is idle.
     Optionally restart the queue if stuck in idle with items remaining.
@@ -1639,6 +2173,9 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
         poll_interval (float): Seconds between polls.
         idle_timeout (float): How long to wait in idle with items before triggering restart.
         auto_restart (bool): If True, will automatically call RM.queue_start() after timeout.
+        
+    Returns:
+        bool: True if queue completed normally, False if timed out
     """
     import time
 
@@ -1652,7 +2189,7 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
 
         if items == 0 and state == "idle":
             print(" done.")
-            return
+            return True
 
         if items > 0 and state == "idle":
             if idle_stuck_start is None:
@@ -1665,39 +2202,71 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=60, auto_restart=True):
                 else:
                     print("\n⚠️ Queue is idle with items still in queue.")
                     print("🔁 Consider running: RM.queue_start() to resume.")
-                return
+                return False
         else:
             idle_stuck_start = None  # reset if queue becomes active again
 
         print(".", end="", flush=True)
         time.sleep(poll_interval)
 
-def submit_and_export(**params):
+def submit_and_export(execution_params, scan_params, export_params, segmentation_params=None):
     """
     Step 1: Enqueue scan (if real), wait (if real), export data (real/offline).
-    Returns: (last_id, out_dir)
-    """
-    mode = params.get('real_test', 0)
-    is_real = (mode == 1)
-    is_sim  = (mode == 0)
-    is_offline = (mode == 2)
     
-    # Pass remote_seg to the export function
-    is_remote = params.get('remote_seg', False)
+    Args:
+        execution_params (dict): Execution mode and flags
+        scan_params (dict): Scan parameters (motors, dets, positions, etc)
+        export_params (dict): Export settings (elem_list, data_wd, etc)
+        segmentation_params (dict): Segmentation settings (optional)
+    
+    Returns:
+        tuple: (last_id, out_dir)
+    """
+    if segmentation_params is None:
+        segmentation_params = {}
+    
+    # Get mode from execution_params
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_sim  = (mode == 'simulation')
+    is_offline = (mode == 'offline')
+    
+    # Get remote_seg flag
+    is_remote = segmentation_params.get('remote_seg', False)
 
     # --- 1. Enqueue (Real Only) ---
-    label = params.get('label', '')
+    label = scan_params.get('label', '')
     
     if is_real:
         print(f"[REAL] [SUBMIT] Queueing scan '{label}'...")
-        # Filter params for send_fly2d_to_queue...
-        try:
-            valid_keys = inspect.signature(send_fly2d_to_queue).parameters.keys()
-            clean_params = {k: v for k, v in params.items() if k in valid_keys}
-        except NameError:
-            clean_params = params
         
-        send_fly2d_to_queue(**clean_params)
+        # Build flat parameter dict for send_fly2d_to_queue
+        flat_params = {
+            'label': label,
+            'dets': scan_params.get('dets', 'dets_fast'),
+            'det_names': scan_params.get('det_names', ['fs', 'eiger2', 'xspress3']),
+            'mot1': scan_params.get('mot1', 'zpssx'),
+            'mot1_s': scan_params.get('mot1_s', 0),
+            'mot1_e': scan_params.get('mot1_e', 0),
+            'mot2': scan_params.get('mot2', 'zpssy'),
+            'mot2_s': scan_params.get('mot2_s', 0),
+            'mot2_e': scan_params.get('mot2_e', 0),
+            'exp_t': scan_params.get('exp_t', 0.01),
+            'roi_positions': scan_params.get('roi_positions_file'),
+            'scan_id': scan_params.get('scan_id'),
+            'zp_move_flag': scan_params.get('zp_move_flag', 1),
+            'smar_move_flag': scan_params.get('smar_move_flag', 1),
+            'elem_list': export_params.get('elem_list', []),
+            'export_norm': export_params.get('export_norm', 'sclr1_ch4'),
+            'data_wd': export_params.get('data_wd', '.'),
+        }
+        
+        # Calculate mot1_n and mot2_n from step_size
+        step_size = scan_params.get('step_size', 1.0)
+        flat_params['mot1_n'] = int(abs(flat_params['mot1_e'] - flat_params['mot1_s']) / step_size) if step_size > 0 else 1
+        flat_params['mot2_n'] = int(abs(flat_params['mot2_e'] - flat_params['mot2_s']) / step_size) if step_size > 0 else 1
+        
+        send_fly2d_to_queue(**flat_params)
         RM.queue_start()
         time.sleep(1)
         
@@ -1708,29 +2277,37 @@ def submit_and_export(**params):
         print(f"[SIM] Would call: send_fly2d_to_queue(...)")
         time.sleep(1)
 
-    # --- 2. Wait for Completion (Real Only) ---
-    if is_real:
-        print("[WAIT] Waiting for scan to finish...")
-        while True:
-            st = RM.status()
-            if st['items_in_queue'] == 0 and st['manager_state'] == 'idle':
-                break
-            time.sleep(1.0)
-        print("[WAIT] Scan complete.")
-    else:
-        # Offline/Sim: No waiting needed
-        pass
-
-    # --- 3. Get ID and Folder ---
-    data_wd = params.get('data_wd', '/data/users/current_user')
+    # --- 2. Wait for Completion & Get ID ---
+    data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     if is_real:
-        hdr = db[-1]
-        last_id = hdr.start['scan_id']
+        queue_success = wait_for_queue_done(poll_interval=1.0, idle_timeout=60, auto_restart=True)
+        
+        if not queue_success:
+            raise RuntimeError("❌ Coarse scan queue timed out or failed to complete!")
+        
+        # Verify scan completed successfully
+        try:
+            hdr = db[-1]
+            last_id = hdr.start['scan_id']
+            
+            # Check if scan has a stop document (completed)
+            if not hasattr(hdr, 'stop') or hdr.stop is None:
+                raise RuntimeError(f"❌ Scan {last_id} did not complete - no stop document found!")
+            
+            # Check exit_status if available
+            exit_status = hdr.stop.get('exit_status', 'unknown')
+            if exit_status not in ['success', 'unknown']:
+                raise RuntimeError(f"❌ Scan {last_id} exit status: {exit_status}")
+            
+            print(f"✅ Coarse scan {last_id} completed successfully")
+            
+        except IndexError:
+            raise RuntimeError("❌ No scan found in database after queue completion!")
     elif is_offline:
-        last_id = params.get('target_id')
+        last_id = export_params.get('target_id')
         if last_id is None:
-            raise ValueError("Mode is Offline (2) but no 'target_id' provided!")
+            raise ValueError("Mode is Offline but no 'target_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
     else:
         last_id = 111111 
@@ -1740,8 +2317,8 @@ def submit_and_export(**params):
     os.makedirs(out_dir, exist_ok=True)
     print(f"[EXPORT] Output directory: {out_dir}")
 
-    # --- 4. Export Data ---
-    all_elem_list = params.get('elem_list', [])
+    # --- 3. Export Data ---
+    all_elem_list = export_params.get('elem_list', [])
     
     # Flatten nested list and remove duplicates
     if all_elem_list and isinstance(all_elem_list[0], list):
@@ -1754,17 +2331,16 @@ def submit_and_export(**params):
         print(f"[{'REAL' if is_real else 'OFFLINE'}] Exporting data (remote_seg={is_remote})...")
         export_xrf_roi_data(
             last_id,
-            norm=params.get('export_norm', 'sclr1_ch4'),
+            norm=export_params.get('export_norm', 'sclr1_ch4'),
             elem_list=all_elem_list,
             wd=out_dir,
-            real_test=1,         # Force '1' here so the export function knows to actually run
-            remote_seg=is_remote # Pass the remote flag
+            remote_seg=is_remote, # Pass the remote flag,
+            append_meta_with=segmentation_params
         )
         export_scan_params(
             sid=last_id,
-            zp_flag=bool(params.get('zp_move_flag', True)),
-            save_to=out_dir,
-            real_test=1
+            zp_flag=bool(scan_params.get('zp_move_flag', True)),
+            save_to=out_dir
         )
     else:
         # Sim Mode: Manual Copy
@@ -1793,19 +2369,37 @@ def analyze_data_remote(results_dict, np_array, scan_metadata):
     # Implement remote analysis logic here
     return results_dict, np_array, scan_metadata
 
-def analyze_data_local(scan_id, out_dir, **params):
+def analyze_data_local(scan_id=None, 
+                       return_results=False, 
+                       params=None):
     """
     Step 2: Analysis. 
     Iterates through element groups, calculates unions, and saves individual 
     blob JSONs into 'out_dir' for the headless scanner to find.
+    
+    Args:
+        scan_id: Scan ID for analysis (can also be in params)
+        return_results: Deprecated. Always saves and returns results.
+        params: Dictionary of analysis parameters from JSON config (must include 'out_dir' and 'scan_id')
+    
+    Returns:
+        dict: Analysis results with scan data, blobs, and groups
     """
+    # Initialize params if not provided
+    if params is None:
+        params = {}
+    
+    # Handle keyword-only arguments
+    if scan_id is None:
+        scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
     print(f"\n[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True (data sent to remote port, no TIFFs)
-    remote_seg = params.get('remote_seg', False)
+    remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
     if remote_seg:
         print("[ANALYSIS] remote_seg=True, skipping local analysis (handled remotely)...")
-        return
+        return {'error': 'Remote segmentation requested - no local results available'}
     
     # --- 1. Read Scan Parameters ---
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
@@ -1823,7 +2417,7 @@ def analyze_data_local(scan_id, out_dir, **params):
                 y_start = scan_input[3]
 
     # --- 2. Prepare Elements ---
-    elem_list_of_lists = params.get("elem_list", [])
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
     if not elem_list_of_lists:
         print("elem_list is empty.")
         return
@@ -1841,8 +2435,54 @@ def analyze_data_local(scan_id, out_dir, **params):
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
-    min_thresh = params.get("min_threshold_intensity", "")
-    min_area = params.get("min_threshold_area", "")
+    segmentation = params.get("segmentation_params", {})
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
+    
+    # Method-specific parameters from JSON config
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    method_params = {
+        # Simple blob detector parameters
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+        
+        # Hough circle parameters
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+        
+        # Watershed parameters
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+        
+        # Cellpose parameters
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        
+        # Connected components parameters
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+    }
+    
+    # Filter out None values to avoid overriding method defaults
+    method_params = {k: v for k, v in method_params.items() if v is not None}
 
     # --- 3. Blob Detection Loop ---
     for element in all_elements:
@@ -1855,17 +2495,36 @@ def analyze_data_local(scan_id, out_dir, **params):
         print(f"Processing {tiff_path.name} ({color})")
         try:
             tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img)
-            b = detect_blobs(tiff_dilated, tiff_norm, min_thresh, min_area, color, tiff_path.name)
+            
+            # Use configurable normalization and dilation parameters
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+
+            b = detect_blobs(tiff_dilated, 
+                             tiff_norm, min_thresh,
+                             min_area, color, 
+                             tiff_path.name, 
+                             method=detection_method,
+                             **method_params)
+            
             precomputed_blobs[color][(min_thresh, min_area)] = b
         except Exception as e:
             print(f"❌ Error processing {tiff_path.name}: {e}")
             traceback.print_exc()
 
     # --- 4. Union & Export Loop ---
+    all_results = {
+        'scan_id': scan_id,
+        'precomputed_blobs': precomputed_blobs,
+        'groups': {},
+        'tiff_paths': tiff_paths
+    }
+    
     for elem_list in elem_list_of_lists:
         group_name = "".join(elem_list)
-        print(f"\n--- Processing Group: {group_name} ---")
+        print(f"\n--- Processing Group: {group_name} (Elements: {len(elem_list)}) ---")
 
         group_blobs_for_union = {}
         for i, element in enumerate(elem_list):
@@ -1877,12 +2536,50 @@ def analyze_data_local(scan_id, out_dir, **params):
             if original_color in precomputed_blobs:
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
 
-        # Must have at least 2 elements to form a union
-        if len(group_blobs_for_union) >= 2:
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs without union formation
+            print(f"[SINGLE ELEMENT] Processing individual blobs for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            # Get blobs from the (min_thresh, min_area) key
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]  # Get the blob list
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    # Convert blob coordinates to real-world coordinates
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    
+                    # Use blob size or default size
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        # Preserve original blob info
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+                    
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=0.5)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
 
-            formatted_unions = {}
             for idx, union in unions.items():
                 box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
                 formatted_unions[box_name] = {
@@ -1897,15 +2594,53 @@ def analyze_data_local(scan_id, out_dir, **params):
                     "real_center_um": union["real_center_um"],
                     "real_size_um": union["real_size_um"],
                 }
+        else:
+            print(f"[SKIP] No valid blobs found for group {group_name}")
+            continue
 
-            # Save the "Master" Union JSON (Headless ignores this via startswith("unions_output"))
+        # Save results if we have any formatted unions/blobs
+        if formatted_unions:
+            # Save the "Master" output JSON (Headless ignores this via startswith("unions_output"))
             out_json = Path(out_dir) / f"unions_output_{group_name}.json"
+            # Convert to JSON-serializable format
+            serializable_unions = make_json_serializable(formatted_unions)
             with open(out_json, "w") as f:
-                json.dump(formatted_unions, f, indent=2)
+                json.dump(serializable_unions, f, indent=2)
             
             # Save the INDIVIDUAL JSONs (Headless finds these)
-            # This function must create files that do NOT start with "unions_output"
+            # This function must create files that do NOT start with "unions_output"  
             save_each_blob_as_individual_scan(formatted_unions, out_dir)
+            
+            # Initialize results dictionary for this group
+            all_results['groups'][group_name] = {
+                'formatted_unions': formatted_unions,
+                'group_blobs_for_union': group_blobs_for_union,
+                'element_count': len(elem_list),
+                'processing_mode': 'individual' if len(group_blobs_for_union) == 1 else 'union'
+            }
+            
+            # Create and save fine scans table (for remote server compatibility)
+            try:
+                fine_scans_table_path = Path(out_dir) / f"fine_scans_table_{group_name}.csv"
+                print(f"[TABLE] Creating fine scans table from {len(formatted_unions)} formatted unions...")
+                table = formatted_unions_to_table(formatted_unions, save_to=str(fine_scans_table_path))
+                if not table.empty:
+                    # Store table for passing to fine scans submission
+                    if 'fine_scans_tables' not in all_results:
+                        all_results['fine_scans_tables'] = {}
+                    all_results['fine_scans_tables'][group_name] = table
+                    all_results['groups'][group_name]['fine_scans_table'] = table.to_dict()
+                    print(f"[TABLE] ✅ Table saved and stored in results")
+                else:
+                    print(f"[TABLE] ⚠️ Table is empty, skipping storage in results")
+                    all_results['groups'][group_name]['fine_scans_table'] = {}
+            except Exception as e:
+                print(f"⚠️ Error creating fine scans table for {group_name}: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                all_results['groups'][group_name]['fine_scans_table'] = {}
+            # Add union data for multi-element groups
+            if len(group_blobs_for_union) >= 2:
+                all_results['groups'][group_name]['unions'] = unions
 
     # --- 5. Visualization ---
     if tiff_paths:
@@ -1917,27 +2652,419 @@ def analyze_data_local(scan_id, out_dir, **params):
 
         create_rgb_tiff(tiff_paths, out_dir, elem_list, group_name)
         create_all_elements_tiff(tiff_paths, out_dir, elem_list, group_blobs_vis, group_name)
+        
+        # Plot analysis results with bounding boxes
+        # Collect formatted unions for plotting
+        formatted_unions_dict = {}
+        for elem_list in elem_list_of_lists:
+            group_name_plot = "".join(elem_list)
+            # Get formatted_unions from all_results
+            if 'groups' in all_results and group_name_plot in all_results['groups']:
+                formatted_unions_dict[group_name_plot] = all_results['groups'][group_name_plot]['formatted_unions']
+        
+        if formatted_unions_dict:
+            plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir)
 
     print("[ANALYSIS] Done.")
+    
+    return all_results
 
 
-def submit_fine_scans_to_queue(scan_id, out_dir, **params):
+def analyze_data_get_fine_scans_table(scan_id=None, 
+                                      params=None):
+    """
+    Step 2B: Analysis with table return.
+    Same analysis as analyze_data_local but returns fine scan tables for follow-up
+    without saving files or generating plots.
+    
+    Args:
+        scan_id: Scan ID for this analysis
+        params: Dictionary of analysis parameters from JSON config (must include 'out_dir' and 'scan_id')
+    
+    Returns:
+        dict: Mapping of group_name -> pandas DataFrame with fine scan parameters
+              Columns: label, cx, cy, num_x, num_y, color, element, max_intensity, mean_intensity
+    """
+    # Initialize params if not provided
+    if params is None:
+        params = {}
+    
+    # Handle keyword-only arguments
+    if scan_id is None:
+        scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
+    print(f"\n[ANALYSIS-TABLE] Starting analysis for Scan {scan_id} in {out_dir}")
+    
+    # Skip analysis if remote_seg is True
+    remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
+    if remote_seg:
+        print("[ANALYSIS-TABLE] remote_seg=True, skipping (no TIFFs available)...")
+        return {}
+    
+    # --- 1. Read Scan Parameters ---
+    params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
+    step_size = 1.0
+    x_start = 0.0
+    y_start = 0.0
+
+    if os.path.exists(params_json_path):
+        with open(params_json_path, 'r') as f:
+            params_data = json.load(f)
+            step_size = params_data.get('step_size', 1.0)
+            scan_input = params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
+            if len(scan_input) >= 4:
+                x_start = scan_input[0]
+                y_start = scan_input[3]
+
+    # --- 2. Prepare Elements ---
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
+    if not elem_list_of_lists:
+        print("elem_list is empty.")
+        return {}
+
+    if isinstance(elem_list_of_lists[0], str):
+        elem_list_of_lists = [elem_list_of_lists]
+
+    # Flatten to get unique elements for loading
+    all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
+    
+    # Load Tiff Paths
+    tiff_paths = wait_for_element_tiffs(all_elements, out_dir)
+
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    precomputed_blobs = {color: {} for color in COLOR_ORDER}
+    element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
+    
+    segmentation = params.get("segmentation_params", {})
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
+    
+    # Method-specific parameters from JSON config
+    method_params = {
+        # Simple blob detector parameters
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+        
+        # Hough circle parameters
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+        
+        # Watershed parameters
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+        
+        # Cellpose parameters
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        
+        # Connected components parameters
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+    }
+    
+    # Filter out None values to avoid overriding method defaults
+    method_params = {k: v for k, v in method_params.items() if v is not None}
+
+    # --- 3. Blob Detection Loop ---
+    for element in all_elements:
+        if element not in tiff_paths: continue
+        
+        color = element_to_color.get(element)
+        if not color: continue
+
+        tiff_path = tiff_paths[element]
+        print(f"Processing {tiff_path.name} ({color})")
+        try:
+            tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
+            
+            # Use configurable normalization and dilation parameters
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+
+            b = detect_blobs(tiff_dilated, 
+                             tiff_norm, min_thresh,
+                             min_area, color, 
+                             tiff_path.name, 
+                             method=detection_method,
+                             **method_params)
+            
+            precomputed_blobs[color][(min_thresh, min_area)] = b
+        except Exception as e:
+            print(f"❌ Error processing {tiff_path.name}: {e}")
+            traceback.print_exc()
+
+    # --- 4. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    for elem_list in elem_list_of_lists:
+        group_name = "".join(elem_list)
+        print(f"\n--- Processing Group: {group_name} (Elements: {len(elem_list)}) ---")
+
+        group_blobs_for_union = {}
+        for i, element in enumerate(elem_list):
+            if i >= 3: break
+            original_color = element_to_color.get(element)
+            if not original_color: continue
+            
+            new_color = ['red', 'green', 'blue'][i]
+            if original_color in precomputed_blobs:
+                group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs without union formation
+            print(f"[SINGLE ELEMENT] Processing individual blobs for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            # Get blobs from the (min_thresh, min_area) key
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]  # Get the blob list
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    # Convert blob coordinates to real-world coordinates
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    
+                    # Use blob size or default size
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        # Preserve original blob info
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+                    
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[UNION MODE] Creating union boxes for {group_name}")
+            unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
+
+            for idx, union in unions.items():
+                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                formatted_unions[box_name] = {
+                    "text": box_name,
+                    "cx": union["real_center_um"][0],
+                    "cy": union["real_center_um"][1],
+                    "num_x": union["real_size_um"][0],
+                    "num_y": union["real_size_um"][1],
+                    # Preserve original verbose keys if needed for other logs
+                    "image_center": union["center"],
+                    "image_length": union["length"],
+                    "real_center_um": union["real_center_um"],
+                    "real_size_um": union["real_size_um"],
+                }
+        else:
+            print(f"[SKIP] No valid blobs found for group {group_name}")
+            continue
+
+        # Convert to table if we have formatted unions
+        if formatted_unions:
+            try:
+                table = formatted_unions_to_table(formatted_unions)
+                fine_scans_tables[group_name] = table
+                print(f"✅ Created fine scans table for {group_name}: {len(table)} rows")
+            except Exception as e:
+                print(f"❌ Error creating table for {group_name}: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                fine_scans_tables[group_name] = pd.DataFrame()  # Empty dataframe as fallback
+
+    print("[ANALYSIS-TABLE] Done.")
+    
+    # Return all tables
+    return fine_scans_tables
+
+
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+    """
+    Plot image with bounding boxes overlay.
+    
+    Args:
+        image: numpy array of the image
+        formatted_unions: dict with union/blob data containing 'image_center' and 'image_length' (or 'box_x', 'box_y', 'box_size')
+        title: plot title
+        save_path: optional path to save the figure
+        show_plot: whether to display the plot (default: False for headless mode)
+    """
+    import matplotlib
+    # Use non-interactive backend if not displaying
+    if not show_plot:
+        matplotlib.use('Agg')
+    
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    
+    # Display image
+    if len(image.shape) == 2:
+        ax.imshow(image, cmap='gray')
+    else:
+        ax.imshow(image)
+    
+    # Draw bounding boxes
+    color_cycle = plt.cm.tab20(range(len(formatted_unions)))
+    for idx, (name, info) in enumerate(formatted_unions.items()):
+        color = color_cycle[idx % len(color_cycle)]
+        
+        # Try different key formats
+        if 'image_center' in info and 'image_length' in info:
+            cx, cy = info['image_center']
+            size = info['image_length']
+            x = cx - size / 2
+            y = cy - size / 2
+        elif 'box_x' in info and 'box_y' in info and 'box_size' in info:
+            x = info['box_x']
+            y = info['box_y']
+            size = info['box_size']
+        else:
+            continue
+        
+        # Draw rectangle
+        rect = patches.Rectangle((x, y), size, size, linewidth=2, edgecolor=color, facecolor='none')
+        ax.add_patch(rect)
+        
+        # Add label
+        ax.text(x, y - 5, name, fontsize=8, color=color, weight='bold', 
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+    
+    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_xlabel('X (pixels)')
+    ax.set_ylabel('Y (pixels)')
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
+    
+    if show_plot:
+        plt.tight_layout()
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir, group_name=None):
+    """
+    Plot analysis results with bounding boxes for each element.
+    
+    Args:
+        tiff_paths: dict of element -> TIFF path
+        elem_list: list of elements
+        formatted_unions_dict: dict of group_name -> formatted_unions
+        out_dir: output directory for saving plots
+        group_name: specific group to plot (if None, plots all groups)
+    """
+    import matplotlib.pyplot as plt
+    
+    if group_name:
+        groups_to_plot = {group_name: formatted_unions_dict.get(group_name, {})}
+    else:
+        groups_to_plot = formatted_unions_dict
+    
+    for gname, formatted_unions in groups_to_plot.items():
+        if not formatted_unions:
+            print(f"⏭️ Skipping {gname}: no unions/blobs found")
+            continue
+        
+        # Get the first element's image for visualization
+        first_element = None
+        for elem in elem_list:
+            if elem in tiff_paths:
+                first_element = elem
+                break
+        
+        if not first_element:
+            print(f"❌ No TIFF found for visualization in {gname}")
+            continue
+        
+        try:
+            tiff_path = tiff_paths[first_element]
+            image = tiff.imread(str(tiff_path)).astype(np.float32)
+            
+            # Normalize for display
+            image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            
+            # Create plot
+            title = f"Analysis Results - Group {gname} (Element: {first_element})"
+            save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
+            
+            plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
+            
+        except Exception as e:
+            print(f"❌ Error plotting {gname}: {e}")
+            traceback.print_exc()
+
+
+def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
     """
     Step 3: Queue Submission.
-    Only actually queues if real_test == 1. 
-    Offline (2) and Sim (0) will just print.
+    Only actually queues if mode == 'real'. 
+    Offline and Sim will just print.
+    
+    Args:
+        json_path (str): Path to JSON config file
+        scan_id (int): Scan ID for fine scans
+        out_dir (str): Output directory
+        execution_params (dict): Execution mode and flags
+        fine_scans_tables (dict): Pre-computed fine scans tables by group_name (optional)
     """
-    mode = params.get('real_test', 0)
-    is_real = (mode == 1)
+    # Get mode from execution_params
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
     
     print(f"\n[QUEUE] Processing fine scans in: {out_dir}")
     
     if is_real:
-        headless_send_queue_fine_scan(out_dir, params, scan_id, 1)
+        # Process each table if provided
+        if fine_scans_tables:
+            for group_name, table in fine_scans_tables.items():
+                print(f"[QUEUE] Submitting {len(table)} fine scans for group '{group_name}'")
+                headless_send_queue_fine_scan(json_path, fine_scans_table=table)
+        else:
+            # Fallback: load from JSON config or CSV files
+            headless_send_queue_fine_scan(json_path)
     else:
-        # Covers both Sim (0) and Offline (2)
-        print(f"[{'OFFLINE' if mode==2 else 'SIM'}] Skipping actual queue submission.")
-        print(f"Would call: headless_send_queue_fine_scan('{out_dir}', ...)")
+        # Covers both Sim and Offline
+        print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Skipping actual queue submission.")
+        if fine_scans_tables:
+            print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Would queue {sum(len(t) for t in fine_scans_tables.values())} fine scans from {len(fine_scans_tables)} groups")
+        print(f"Would call: headless_send_queue_fine_scan('{json_path}')")
 
 def run_fine_scans(is_real): 
     """
@@ -1955,8 +3082,19 @@ def run_fine_scans(is_real):
     else:
         print("[SIM] Would check RM.status() and start queue.")
 
-def load_and_queue(json_path, real_test, target_id=None, 
+
+
+
+def load_and_queue(json_path, target_id=None, 
                    remote_seg=False, proceed_fine_scans=True):
+    """
+    Main workflow function supporting multiple modes.
+    Mode is specified in JSON config file as 'mode' key:
+    - 'simulation': Simulation mode
+    - 'real': Real scanning mode 
+    - 'offline': Offline mode (use existing scan)
+    - 'analysis-only': Analysis-only mode (use existing scan, return results)
+    """
     
     # 0) Clear caches
     if 'remote_handler' in globals():
@@ -1973,7 +3111,7 @@ def load_and_queue(json_path, real_test, target_id=None,
             raise FileNotFoundError(f"ROI file not found: {roi_file}")
         with open(roi_file, 'r') as rf:
             params['roi_positions'] = json.load(rf)
-    elif isinstance(params.get('roi_positions'), str) and os.path.isfile(params['roi_positions']):
+    elif isinstance(params.get('roi_positions') or params.get('scan_params', {}).get('roi_positions'), str) and os.path.isfile(params.get('roi_positions') or params.get('scan_params', {}).get('roi_positions', '')):
         with open(params['roi_positions'], 'r') as rf:
             params['roi_positions'] = json.load(rf)
 
@@ -1982,31 +3120,132 @@ def load_and_queue(json_path, real_test, target_id=None,
         params['mot1_n'] = int(abs(params['mot1_e'] - params['mot1_s']) / step)
         params['mot2_n'] = int(abs(params['mot2_e'] - params['mot2_s']) / step)
 
-    # 3) Set Flags
-    params['real_test'] = real_test
+    # 3) Get mode from JSON config
+    mode = str(params.get('execution_params', {}).get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_sim  = (mode == 'simulation')
+    is_offline = (mode == 'offline')
+    is_analysis_only = (mode == 'analysis-only')
+    
+    # Map mode to legacy real_test for backward compatibility with other functions
+    mode_map = {'simulation': 0, 'real': 1, 'offline': 2, 'analysis-only': 3}
+    params['real_test'] = mode_map.get(mode, 0)
     params['remote_seg'] = remote_seg
     
-    # IMPORTANT: If Offline (real_test=2), target_id is mandatory.
+    # 3.1) Add default segmentation parameters if not present
+    segmentation = params.get('segmentation_params', {})
+    morphology = params.get('morphology_params', {})
+    detection_methods = params.get('detection_methods', {})
+    simple_methods = detection_methods.get('simple', {})
+    hough_methods = detection_methods.get('hough', {})
+    watershed_methods = detection_methods.get('watershed', {})
+    cellpose_methods = detection_methods.get('cellpose', {})
+    connected_components_methods = detection_methods.get('connected_components', {})
+    contours_methods = detection_methods.get('contours', {})
+    
+    segmentation_defaults = {
+        # Basic detection parameters
+        'min_threshold_intensity': segmentation.get('min_threshold_intensity', params.get('min_threshold_intensity', 50)),
+        'min_threshold_area': segmentation.get('min_threshold_area', params.get('min_threshold_area', 100)),
+        'blob_detection_method': segmentation.get('blob_detection_method', params.get('blob_detection_method', 'simple')),
+        'overlap_thresh': segmentation.get('overlap_thresh', params.get('overlap_thresh', 0.5)),
+        
+        # Normalization and morphology parameters
+        'normalize_kernel_size': morphology.get('normalize_kernel_size', params.get('normalize_kernel_size', [3, 3])),
+        'dilate_iterations': morphology.get('dilate_iterations', params.get('dilate_iterations', 2)),
+        'blur_kernel': morphology.get('blur_kernel', params.get('blur_kernel', [3, 3])),
+        
+        # Method-specific parameters for simple detection
+        'simple_max_threshold': simple_methods.get('max_threshold', params.get('simple_max_threshold', 255)),
+        'simple_max_area': simple_methods.get('max_area', params.get('simple_max_area', 1600)),
+        'simple_threshold_step': simple_methods.get('threshold_step', params.get('simple_threshold_step', 2)),
+        'simple_filter_by_color': simple_methods.get('filter_by_color', params.get('simple_filter_by_color', False)),
+        'simple_filter_by_circularity': simple_methods.get('filter_by_circularity', params.get('simple_filter_by_circularity', False)),
+        
+        # Hough circle detection parameters
+        'hough_max_radius': hough_methods.get('max_radius', params.get('hough_max_radius', 40)),
+        'hough_dp': hough_methods.get('dp', params.get('hough_dp', 1)),
+        'hough_min_dist': hough_methods.get('min_dist', params.get('hough_min_dist', 20)),
+        'hough_param1': hough_methods.get('param1', params.get('hough_param1', 50)),
+        'hough_param2': hough_methods.get('param2', params.get('hough_param2', 30)),
+        
+        # Watershed segmentation parameters
+        'watershed_min_distance': watershed_methods.get('min_distance', params.get('watershed_min_distance', 10)),
+        'watershed_threshold_abs': watershed_methods.get('threshold_abs', params.get('watershed_threshold_abs', 0.3)),
+        
+        # Cellpose parameters
+        'cellpose_diameter': cellpose_methods.get('diameter', params.get('cellpose_diameter', 8)),
+        'cellpose_model_type': cellpose_methods.get('model_type', params.get('cellpose_model_type', 'cyto3')),
+        'cellpose_gpu': cellpose_methods.get('gpu', params.get('cellpose_gpu', False)),
+        'cellpose_flow_threshold': cellpose_methods.get('flow_threshold', params.get('cellpose_flow_threshold', 0.4)),
+        'cellpose_cellprob_threshold': cellpose_methods.get('cellprob_threshold', params.get('cellpose_cellprob_threshold', 0.0)),
+        'cellpose_channels': cellpose_methods.get('channels', params.get('cellpose_channels', [0, 0])),
+        'cellpose_min_diameter': cellpose_methods.get('min_diameter', params.get('cellpose_min_diameter', 2)),
+        'cellpose_max_diameter': cellpose_methods.get('max_diameter', params.get('cellpose_max_diameter', float('100'))),
+        
+        # Connected components parameters
+        'connected_components_connectivity': connected_components_methods.get('connectivity', params.get('connected_components_connectivity', 8)),
+        
+        # Contour detection parameters
+        'contours_mode': contours_methods.get('mode', params.get('contours_mode', 'external')),
+        'contours_method': contours_methods.get('method', params.get('contours_method', 'simple'))
+    }
+    
+    # Update params with segmentation defaults
+    for key, default_value in segmentation_defaults.items():
+        if key not in params:
+            params[key] = default_value
+    
+    # IMPORTANT: If offline or analysis-only mode, target_id is mandatory.
     if target_id is not None:
         params['target_id'] = target_id
-    elif real_test == 2 and 'target_id' not in params:
-        print("[WARNING] Running in Offline mode (2) but no target_id provided.")
+    elif (is_offline or is_analysis_only) and 'target_id' not in params:
+        print(f"[WARNING] Running in '{mode}' mode but no target_id provided.")
         # You might want to raise an error or rely on it being in the JSON
     
+    # For analysis-only mode, force local analysis and skip fine scans
+    if is_analysis_only:
+        remote_seg = False
+        params['remote_seg'] = False
+        proceed_fine_scans = False
+    
     # 4) EXECUTE
-    print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {real_test}) ---")
+    print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {mode.capitalize()}) ---")
 
-    # A. Submit / Export
-    scan_id, out_dir = submit_and_export(**params) #this handles the remote submission
+    # A. Submit / Export (skip for analysis-only mode)
+    if is_analysis_only:
+        # For analysis-only mode, use the target_id directly and create output directory
+        scan_id = target_id
+        data_wd = params.get('data_wd', '/data/users/current_user')
+        out_dir = os.path.join(data_wd, f"automap_{scan_id}")
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"[ANALYSIS-ONLY] Using existing scan {scan_id}, output dir: {out_dir}")
+    else:
+        scan_id, out_dir = submit_and_export(
+            params['execution_params'],
+            params['scan_params'],
+            params['export_params'],
+            params.get('segmentation_params')
+        )
     
     # Update params with scan_id and out_dir
     params['scan_id'] = scan_id
     params['out_dir'] = out_dir
     
     # B. Analyze
+    analysis_results = None
+    fine_scans_tables = None
     if remote_seg:
-        print("no reciever implemented yet, skipping remote analysis...")
-        pass 
+        elem_list=params['export_params']['elem_list']
+        export_xrf_roi_data(scan_id, 
+                            norm=params['export_params']['export_norm'],
+                            elem_list=elem_list, 
+                            remote_seg=remote_seg, 
+                            append_meta_with=params)  # Ensure ROI data is exported for remote analysis
+        print(f"{elem_list=}")
+        print("[DATA], Exported ROI data for remote analysis.")
+        #print("no reciever implemented yet, skipping remote analysis...")
+        #pass 
         # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         # #placeholder for Seher
         # remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
@@ -2016,21 +3255,39 @@ def load_and_queue(json_path, real_test, target_id=None,
         # results_dict = {} #remote.recieve results
         # np_array = np.array([]) #remote.recieve results
         # scan_metadata = {} #remote.recieve results
-        # analyze_data_remote(results_dict, np_array, scan_metadata)
+        #table = analyze_data_remote(np_array, metadata)
+
     else:
-        analyze_data_local(**params)
+        # For analysis-only mode, return the results
+        analysis_results = analyze_data_local(scan_id=scan_id, params=params)
+        # Extract fine scans tables if available (created during analysis)
+        if analysis_results and 'fine_scans_tables' in analysis_results:
+            fine_scans_tables = analysis_results['fine_scans_tables']
+            print(f"[WORKFLOW] Captured {len(fine_scans_tables)} fine scans table groups from analysis")
 
     if not proceed_fine_scans:
         print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
         return
     
-    # C. Queue (Will skip if mode != 1)
-    submit_fine_scans_to_queue(**params)
+    # For analysis-only mode, return results immediately
+    if is_analysis_only:
+        print("--- Analysis-only mode complete ---")
+        return analysis_results
     
-    # D. Run (Will skip if mode != 1)
-    run_fine_scans(real_test == 1)
+    # C. Queue (Will skip if mode != real)
+    submit_fine_scans_to_queue(
+        json_path,
+        scan_id,
+        out_dir,
+        params['execution_params'],
+        fine_scans_tables=fine_scans_tables
+    )
+    
+    # D. Run (Will skip if mode != real)
+    run_fine_scans(is_real)
     
     print("--- Done ---")
+    return None  # Explicit return for other modes
 
 
 
@@ -2146,11 +3403,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                         RM.item_add(BPlan("bps.mov", "dsx", j))
                         
                         # yield from fly2dpd(dets,dssx,-1*fly_dim,fly_dim,num_steps,dssy,-1*fly_dim,fly_dim,num_steps,dwell)
-                        headless_send_queue_coarse_scan(beamline_params, 
-                                                        initial_scan_path, 
-                                                        real_test = 1, 
-                                                        remote_seg=remote_seg, 
-                                                        proceed_with_fine_scan=followup_fine_scan)
+                        headless_send_queue_coarse_scan(initial_scan_path, 
+                                                        remote_seg=remote_seg)
 
                         RM.item_add(BPlan("bps.sleep", 3))
                         RM.item_add(BPlan("bps.mov", "dssx", 0, "dssy", 0))
@@ -2165,11 +3419,8 @@ def mosaic_overlap_scan_auto(dets = None, ylen = 100, xlen = 100, overlap_per = 
                         RM.item_add(BPlan("bps.mov", "smarx", j))
                         
                         # yield from fly2dpd(dets, zpssx,-1*fly_dim,fly_dim,num_steps,zpssy, -1*fly_dim,fly_dim,num_steps,dwell)
-                        headless_send_queue_coarse_scan(beamline_params, 
-                                                        initial_scan_path, 
-                                                        real_test = 1, 
-                                                        remote_seg=remote_seg, 
-                                                        proceed_with_fine_scan=followup_fine_scan)
+                        headless_send_queue_coarse_scan(initial_scan_path, 
+                                                        remote_seg=remote_seg)
 
                         RM.item_add(BPlan("bps.sleep", 1))
                         RM.item_add(BPlan("bps.mov", "zpssx", 0, "zpssy", 0))
@@ -2257,11 +3508,8 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
             # Execute the fly scan
             headless_send_queue_coarse_scan(
-                beamline_params, 
                 initial_scan_path, 
-                real_test=1, 
-                remote_seg=remote_seg, 
-                proceed_with_fine_scan=followup_fine_scan
+                remote_seg=remote_seg
             )
 
             # Reset internal fine stages to zero before next move

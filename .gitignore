@@ -23,3 +23,22 @@ data/
 
 # Ignore folders starting with "auto"
 auto*/
+
+# Ignore plot output directories from blob detection tests
+demo_plots/
+non_circular_tests/
+simple_non_circular_test/
+test_plots/
+minimal_plots/
+plot_results/
+cellpose_limitations_test/
+
+# Ignore any other plot directories
+*_plots/
+*_comparison/
+*results/
+*test/
+*tests/
+*.png
+*.jpg
+*.jpeg
