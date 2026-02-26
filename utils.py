@@ -18,6 +18,8 @@ from scipy import ndimage
 from skimage.segmentation import watershed  
 from skimage.feature import peak_local_max
 import warnings
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 # Cellpose imports (optional - will gracefully handle if not installed)
 try:
@@ -3161,7 +3163,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     return fine_scans_tables
 
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
+                          save_path=None, show_plot=True):
     """
     Plot image with bounding boxes overlay.
     
@@ -3172,21 +3175,8 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
         save_path: optional path to save the figure
         show_plot: whether to display the plot (default: False for headless mode)
     """
-    import matplotlib
-    # Use non-interactive backend if not displaying
-    if not show_plot:
-        matplotlib.use('Agg')
-    
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    
-    # Display image
-    if len(image.shape) == 2:
-        ax.imshow(image, cmap='gray')
-    else:
-        ax.imshow(image)
+    ax.imshow(image)
     
     # Draw bounding boxes
     color_cycle = plt.cm.tab20(range(len(formatted_unions)))
