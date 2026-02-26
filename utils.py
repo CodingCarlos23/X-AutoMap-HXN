@@ -61,6 +61,10 @@ from remote_segmentation import RemoteSegmentationSender, RemoteSegmentationRece
 # Create a global instance of the remote sender
 remote_sender = RemoteSegmentationSender() 
 
+# Cache for Cellpose models to avoid reloading on every detection call
+# Key: (model_type, gpu), Value: CellposeModel instance
+_CELLPOSE_MODEL_CACHE = {}
+
 
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
     output_dir = Path(output_dir)
@@ -934,9 +938,20 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     flow_threshold = kwargs.get('flow_threshold', 0.4)
     cellprob_threshold = kwargs.get('cellprob_threshold', 0.0)
     channels = kwargs.get('channels', [0, 0])  # [cytoplasm, nucleus] channels
+    print(f"Running Cellpose with  '{model_type = }' "
+          f"and {diameter_guess = }..., "
+          f"{gpu = }")
     
-    # Initialize model
-    model = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+    # Initialize model (with caching to avoid reloading)
+    cache_key = (model_type, gpu)
+    if cache_key not in _CELLPOSE_MODEL_CACHE:
+        print(f"Loading Cellpose model: {model_type} (GPU={gpu})...")
+        _CELLPOSE_MODEL_CACHE[cache_key] = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+        print(f"Cellpose model loaded and cached.")
+    else:
+        print(f"Using cached Cellpose model: {model_type} (GPU={gpu})")
+    
+    model = _CELLPOSE_MODEL_CACHE[cache_key]
     
     # Run detection
     try:
