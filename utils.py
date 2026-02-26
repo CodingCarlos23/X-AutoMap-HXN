@@ -3162,8 +3162,10 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     # Return all tables
     return fine_scans_tables
 
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results"):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None):
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.imshow(image)
     
@@ -3197,8 +3199,72 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results"):
         ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
                 bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
     ax.set_title(title)
     plt.show()
+
+
+def _plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
+                          save_path=None, show_plot=True):
+    """
+    Plot image with bounding boxes overlay.
+    
+    Args:
+        image: numpy array of the image
+        formatted_unions: dict with union/blob data containing 'image_center' and 'image_length' (or 'box_x', 'box_y', 'box_size')
+        title: plot title
+        save_path: optional path to save the figure
+        show_plot: whether to display the plot (default: False for headless mode)
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    ax.imshow(image)
+    
+    # Draw bounding boxes
+    color_cycle = plt.cm.tab20(range(len(formatted_unions)))
+    for idx, (name, info) in enumerate(formatted_unions.items()):
+        color = color_cycle[idx % len(color_cycle)]
+        
+        # Try different key formats
+        if 'image_center' in info and 'image_length' in info:
+            cx, cy = info['image_center']
+            size = info['image_length']
+            x = cx - size / 2
+            y = cy - size / 2
+        elif 'box_x' in info and 'box_y' in info and 'box_size' in info:
+            x = info['box_x']
+            y = info['box_y']
+            size = info['box_size']
+        else:
+            continue
+        
+        # Draw rectangle
+        rect = patches.Rectangle((x, y), size, 
+                                 size, 
+                                 linewidth=2, 
+                                 edgecolor=color, 
+                                 facecolor='none',
+                                 zorder=10)
+        ax.add_patch(rect)
+        
+        # Add label
+        ax.text(x, y - 5, name, fontsize=8, color=color, weight='bold', 
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+    
+    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_xlabel('X (pixels)')
+    ax.set_ylabel('Y (pixels)')
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
+    
+    if show_plot:
+        plt.tight_layout()
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir, group_name=None):
