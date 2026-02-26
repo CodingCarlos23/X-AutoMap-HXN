@@ -2795,13 +2795,13 @@ def analyze_data_from_arrays(element_arrays, params):
         try:
             img = element_array_dict[element]
             
-            # Apply normalization and dilation
-            img_norm, img_dilated = normalize_and_dilate(img, kernel_size=kernel_size, iterations=iterations)
             
             # Detect blobs
-            b = detect_blobs(img_dilated, 
-                             img_norm, min_thresh,
-                             min_area, color, 
+            b = detect_blobs(img, 
+                             img, 
+                             min_thresh,
+                             min_area, 
+                             color, 
                              f"{element}_array", 
                              method=detection_method,
                              **method_params)
