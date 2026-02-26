@@ -1256,7 +1256,7 @@ def detect_blobs_multi_method(img_norm, img_orig, min_thresh, min_area, color, f
 
 
 
-
+#not used
 def first_scan_detect_blobs():
     COLOR_ORDER = [
         'red', 'green', 'blue', 'orange', 'purple',
@@ -2800,7 +2800,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             morphology = params.get('morphology_params', {})
             kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
             iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
+                                                           kernel_size=kernel_size, iterations=iterations)
 
             b = detect_blobs(tiff_dilated, 
                              tiff_norm, min_thresh,
