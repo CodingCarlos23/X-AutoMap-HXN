@@ -38,7 +38,6 @@ class RemoteSegmentationSender:
         """Write metadata as a dictionary."""
         pass
 
-
 class RemoteSegmentationReceiver:
     def __init__(self, num_elements):
     
@@ -46,10 +45,10 @@ class RemoteSegmentationReceiver:
 
         self.client = from_uri('https://tiled.nsls2.bnl.gov')
         self.reader = self.client['tst/sandbox/synaps/segmentations']
-        self.keys = []
-        self.values = []
         self.num_elements = num_elements
         self.count_connect = 0
+        self.METADATA_UPDATES = {}
+        self.data_w_metadata = []
 
     def subscribe(self):
         self.sub = self.reader.subscribe()
@@ -59,16 +58,21 @@ class RemoteSegmentationReceiver:
 
     def get_keys(self, data):
         print(f"Received Key : {data}")
-        #self.keys.append(data)
+        path_parts = tuple(data.subscription.segments)  # e.g. ('tst', 'sandbox', ...)
+        self.METADATA_UPDATES[path_parts] = data
         sub = data.child().subscribe()
         sub.new_data.add_callback(self.get_data)
         sub.start_in_thread(start=1)
-        #sub1.disconnect()
 
-    def get_data(self, data):
-        print(f"count num : {self.count_connect}")
-        #print(f"Received Data : {data}")
-        #self.values.append(data)
+    def get_data(self, update):
+        print(f"Received data number : {self.count_connect}")
+        data = update.data()  # Extract the numpy array from the update.
+        # Look up the metadata which we should have already received.
+        path_parts = tuple(update.subscription.segments)  # e.g. ('tst', 'sandbox', ...)
+        update = METADATA_UPDATES.pop(path_parts)
+        metadata = update.metadata
+        self.data_w_metadata.append((metadata, data))
         self.count_connect += 1 
         if self.count_connect == self.num_elements:
             self.sub.disconnect()
+
