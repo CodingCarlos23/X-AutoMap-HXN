@@ -3431,11 +3431,11 @@ def load_and_queue(json_path, target_id=None,
         if key not in params:
             params[key] = default_value
     
-    # IMPORTANT: If offline or analysis-only mode, target_id is mandatory.
+    # IMPORTANT: If offline or analysis-only mode, scan_id is mandatory.
     if target_id is not None:
-        params['target_id'] = target_id
-    elif (is_offline or is_analysis_only) and 'target_id' not in params:
-        print(f"[WARNING] Running in '{mode}' mode but no target_id provided.")
+        params['scan_id'] = target_id
+    elif (is_offline or is_analysis_only) and 'scan_id' not in params:
+        print(f"[WARNING] Running in '{mode}' mode but no scan_id provided.")
         # You might want to raise an error or rely on it being in the JSON
     
     # For analysis-only mode, force local analysis and skip fine scans
@@ -3477,14 +3477,18 @@ def load_and_queue(json_path, target_id=None,
                             elem_list=elem_list, 
                             remote_seg=remote_seg, 
                             append_meta_with=params)  # Ensure ROI data is exported for remote analysis
-        print(f"{elem_list=}")
-        print("[DATA], Exported ROI data for remote analysis.")
+        #print(f"{elem_list=}")
+        print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
+
+
         #print("no reciever implemented yet, skipping remote analysis...")
         #pass 
         # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         # #placeholder for Seher
-        # remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
-        # remote_receiver.subscribe()
+        remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
+        remote_receiver.subscribe()
+        metadata = remote_receiver.data_w_metadata[0][0] # assuming there is only 1 segmentation done
+        data = remote_receiver.data_w_metadata[0][1] # assuming there is only 1 segmentation done
 
         # print("\n[ANALYSIS] Remote segmentation results received ...")
         # results_dict = {} #remote.recieve results
