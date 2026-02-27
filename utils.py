@@ -962,13 +962,16 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     
     # Run detection
     try:
+        # Use min_size from kwargs if provided, otherwise fall back to min_area
+        cellpose_min_size = kwargs.get('min_size', min_area)
+        
         res = model.eval(
             img_rgb,
             channels=channels,
             diameter=diameter_guess,
             flow_threshold=flow_threshold,
             cellprob_threshold=cellprob_threshold,
-            min_size=min_area  # Pass min_area to Cellpose
+            min_size=cellpose_min_size
         )
         
         # Handle different return formats
