@@ -85,7 +85,7 @@
       "flow_threshold": 0.6,
       "cellprob_threshold": -2.0,
       "channels": [0, 0],
-      "min_diameter": 75,
+      "min_diameter": 65,
       "max_diameter": 999999,
       "min_size": 2000
     },
