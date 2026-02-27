@@ -80,7 +80,7 @@
     },
     "cellpose": {
       "diameter": 100,
-      "model_type": "cpsam",
+      "model_type": "cyto3",
       "gpu": true,
       "flow_threshold": 0.6,
       "cellprob_threshold": -2.0,
