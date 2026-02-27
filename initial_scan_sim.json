@@ -79,7 +79,7 @@
       "threshold_abs": 0.3
     },
     "cellpose": {
-      "diameter": 8,
+      "diameter": 60,
       "model_type": "cpsam",
       "gpu": true,
       "flow_threshold": 0.4,
