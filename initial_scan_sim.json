@@ -6,7 +6,7 @@
 
   "scan_params": {
     "label": "cellpose_test",
-    "scan_id": 393748,
+    "scan_id": 392456,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
     "mot1": "zpssx",
