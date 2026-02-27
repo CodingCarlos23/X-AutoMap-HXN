@@ -79,13 +79,13 @@
       "threshold_abs": 0.3
     },
     "cellpose": {
-      "diameter": 100,
+      "diameter": 80,
       "model_type": "cpsam",
       "gpu": true,
       "flow_threshold": 0.4,
       "cellprob_threshold": 0.0,
       "channels": [0, 0],
-      "min_diameter": 40,
+      "min_diameter": 20,
       "max_diameter": 999999
     },
     "connected_components": {
