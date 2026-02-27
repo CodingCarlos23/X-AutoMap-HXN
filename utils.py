@@ -967,7 +967,8 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
             channels=channels,
             diameter=diameter_guess,
             flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold
+            cellprob_threshold=cellprob_threshold,
+            min_size=min_area  # Pass min_area to Cellpose
         )
         
         # Handle different return formats
@@ -3032,6 +3033,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
         'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        'min_size': cellpose_methods.get('min_size') or params.get('cellpose_min_size'),
         
         # Connected components parameters
         'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
