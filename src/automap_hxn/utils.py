@@ -18,6 +18,13 @@ from scipy import ndimage
 from skimage.segmentation import watershed  
 from skimage.feature import peak_local_max
 import warnings
+import matplotlib
+# This is the equivalent of %matplotlib qt
+matplotlib.use('Qt5Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+plt.ion()
+
 
 # Cellpose imports (optional - will gracefully handle if not installed)
 try:
@@ -60,6 +67,10 @@ from PyQt5.QtCore import Qt, QRect, QTimer
 from .remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
 # Create a global instance of the remote sender
 remote_sender = RemoteSegmentationSender() 
+
+# Cache for Cellpose models to avoid reloading on every detection call
+# Key: (model_type, gpu), Value: CellposeModel instance
+_CELLPOSE_MODEL_CACHE = {}
 
 
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
@@ -934,18 +945,33 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     flow_threshold = kwargs.get('flow_threshold', 0.4)
     cellprob_threshold = kwargs.get('cellprob_threshold', 0.0)
     channels = kwargs.get('channels', [0, 0])  # [cytoplasm, nucleus] channels
+    print(f"Running Cellpose with  '{model_type = }' "
+          f"and {diameter_guess = }..., "
+          f"{gpu = }")
     
-    # Initialize model
-    model = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+    # Initialize model (with caching to avoid reloading)
+    cache_key = (model_type, gpu)
+    if cache_key not in _CELLPOSE_MODEL_CACHE:
+        print(f"Loading Cellpose model: {model_type} (GPU={gpu})...")
+        _CELLPOSE_MODEL_CACHE[cache_key] = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+        print(f"Cellpose model loaded and cached.")
+    else:
+        print(f"Using cached Cellpose model: {model_type} (GPU={gpu})")
+    
+    model = _CELLPOSE_MODEL_CACHE[cache_key]
     
     # Run detection
     try:
+        # Use min_size from kwargs if provided, otherwise fall back to min_area
+        cellpose_min_size = kwargs.get('min_size', min_area)
+        
         res = model.eval(
             img_rgb,
             channels=channels,
             diameter=diameter_guess,
             flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold
+            cellprob_threshold=cellprob_threshold,
+            min_size=cellpose_min_size
         )
         
         # Handle different return formats
@@ -1769,7 +1795,11 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     timestamp = int(time.time())
     scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
+<<<<<<< HEAD:src/automap_hxn/utils.py
                                                 access_tags=["tst_sandbox"])    # access_tags=["synaps_project"])
+=======
+                                                access_tags=["tst_sandbox"])
+>>>>>>> cellpose_remote_w_placeholders:utils.py
     
     channels = [1, 2, 3]
     print(f"[REMOTE] {elem_list = }")
@@ -1819,7 +1849,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
             compound_key = "".join(element_names)
             
             # Send stacked array with compound key
-            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["synaps_project"])
+            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["tst_sandbox"])
             print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
@@ -3010,6 +3040,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
         'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        'min_size': cellpose_methods.get('min_size') or params.get('cellpose_min_size'),
         
         # Connected components parameters
         'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
@@ -3145,8 +3176,54 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     # Return all tables
     return fine_scans_tables
 
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    ax.imshow(image)
+    
+    for name, info in formatted_unions.items():
+        # 1. Extract Center
+        if 'image_center' in info:
+            cx, cy = info['image_center']
+        else:
+            continue
+            
+        # 2. Extract Size/Radius
+        if 'image_radius' in info:
+            radius = info['image_radius']
+            size = radius * 2
+            # Offset center to find bottom-left corner
+            x = cx - radius
+            y = cy - radius
+        else:
+            # Fallback if size is provided directly
+            size = info.get('image_length', 10) 
+            x = cx - size / 2
+            y = cy - size / 2
+
+        # 3. Draw the Rectangle
+        # We use size for both width and height to make it a square
+        rect = patches.Rectangle((x, y), size, size, linewidth=2, 
+                                 edgecolor='red', facecolor='none')
+        ax.add_patch(rect)
+        
+        # 4. Add Label
+        ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
+    plt.tight_layout()
+    ax.set_title(title)
+    plt.show()
+    plt.pause(0.1)
+
+
+def _plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
+                          save_path=None, show_plot=True):
     """
     Plot image with bounding boxes overlay.
     
@@ -3157,21 +3234,8 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
         save_path: optional path to save the figure
         show_plot: whether to display the plot (default: False for headless mode)
     """
-    import matplotlib
-    # Use non-interactive backend if not displaying
-    if not show_plot:
-        matplotlib.use('Agg')
-    
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    
-    # Display image
-    if len(image.shape) == 2:
-        ax.imshow(image, cmap='gray')
-    else:
-        ax.imshow(image)
+    ax.imshow(image)
     
     # Draw bounding boxes
     color_cycle = plt.cm.tab20(range(len(formatted_unions)))
@@ -3192,7 +3256,12 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
             continue
         
         # Draw rectangle
-        rect = patches.Rectangle((x, y), size, size, linewidth=2, edgecolor=color, facecolor='none')
+        rect = patches.Rectangle((x, y), size, 
+                                 size, 
+                                 linewidth=2, 
+                                 edgecolor=color, 
+                                 facecolor='none',
+                                 zorder=10)
         ax.add_patch(rect)
         
         # Add label
@@ -3225,7 +3294,6 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
         out_dir: output directory for saving plots
         group_name: specific group to plot (if None, plots all groups)
     """
-    import matplotlib.pyplot as plt
     
     if group_name:
         groups_to_plot = {group_name: formatted_unions_dict.get(group_name, {})}
@@ -3248,22 +3316,19 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             print(f"❌ No TIFF found for visualization in {gname}")
             continue
         
-        try:
-            tiff_path = tiff_paths[first_element]
-            image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        tiff_path = tiff_paths[first_element]
+        image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        # Normalize for display
+        image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        # Create plot
+        title = f"Analysis Results - Group {gname} (Element: {first_element})"
+        save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
+        
+        plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
             
-            # Normalize for display
-            image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            
-            # Create plot
-            title = f"Analysis Results - Group {gname} (Element: {first_element})"
-            save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
-            
-            plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
-            
-        except Exception as e:
-            print(f"❌ Error plotting {gname}: {e}")
-            traceback.print_exc()
 
 
 def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
