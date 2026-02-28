@@ -18,6 +18,13 @@ from scipy import ndimage
 from skimage.segmentation import watershed  
 from skimage.feature import peak_local_max
 import warnings
+import matplotlib
+# This is the equivalent of %matplotlib qt
+matplotlib.use('Qt5Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+plt.ion()
+
 
 # Cellpose imports (optional - will gracefully handle if not installed)
 try:
@@ -60,6 +67,10 @@ from PyQt5.QtCore import Qt, QRect, QTimer
 from remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
 # Create a global instance of the remote sender
 remote_sender = RemoteSegmentationSender() 
+
+# Cache for Cellpose models to avoid reloading on every detection call
+# Key: (model_type, gpu), Value: CellposeModel instance
+_CELLPOSE_MODEL_CACHE = {}
 
 
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
@@ -934,18 +945,33 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     flow_threshold = kwargs.get('flow_threshold', 0.4)
     cellprob_threshold = kwargs.get('cellprob_threshold', 0.0)
     channels = kwargs.get('channels', [0, 0])  # [cytoplasm, nucleus] channels
+    print(f"Running Cellpose with  '{model_type = }' "
+          f"and {diameter_guess = }..., "
+          f"{gpu = }")
     
-    # Initialize model
-    model = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+    # Initialize model (with caching to avoid reloading)
+    cache_key = (model_type, gpu)
+    if cache_key not in _CELLPOSE_MODEL_CACHE:
+        print(f"Loading Cellpose model: {model_type} (GPU={gpu})...")
+        _CELLPOSE_MODEL_CACHE[cache_key] = models.CellposeModel(pretrained_model=model_type, gpu=gpu)
+        print(f"Cellpose model loaded and cached.")
+    else:
+        print(f"Using cached Cellpose model: {model_type} (GPU={gpu})")
+    
+    model = _CELLPOSE_MODEL_CACHE[cache_key]
     
     # Run detection
     try:
+        # Use min_size from kwargs if provided, otherwise fall back to min_area
+        cellpose_min_size = kwargs.get('min_size', min_area)
+        
         res = model.eval(
             img_rgb,
             channels=channels,
             diameter=diameter_guess,
             flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold
+            cellprob_threshold=cellprob_threshold,
+            min_size=cellpose_min_size
         )
         
         # Handle different return formats
@@ -1134,8 +1160,21 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
     if method == 'cellpose' and not CELLPOSE_AVAILABLE:
         raise ImportError(f"Cellpose not available. Install with: pip install cellpose[gui]")
     
+    # Apply morphological preprocessing (normalize and dilate)
+    # EXCEPTION: Skip for cellpose - deep learning models need raw/original images
+    # Morphological dilation can destroy fine details that cellpose was trained to recognize
+    if method == 'cellpose': #TODO not clean fix later
+        # Use original images for cellpose (no morphological preprocessing)
+        processed_norm = img_norm
+        processed_dilated = img_orig
+    else:
+        # Apply morphological preprocessing for all other methods
+        processed_norm, processed_dilated = normalize_and_dilate(img_orig, 
+                                                                 kernel_size=3, 
+                                                                 iterations=1)
+    
     # Detect blobs using the selected method
-    detections = method_map[method](img_norm, img_orig, min_thresh, min_area, **kwargs)
+    detections = method_map[method](processed_dilated, processed_norm, min_thresh, min_area, **kwargs)
     
     # Convert detections to standard format
     blobs = []
@@ -1146,9 +1185,9 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         box_x, box_y = x - radius, y - radius
 
         x1, y1 = max(0, box_x), max(0, box_y)
-        x2, y2 = min(img_orig.shape[1], x + radius), min(img_orig.shape[0], y + radius)
-        roi_orig = img_orig[y1:y2, x1:x2]
-        roi_dilated = img_norm[y1:y2, x1:x2]
+        x2, y2 = min(processed_norm.shape[1], x + radius), min(processed_norm.shape[0], y + radius)
+        roi_orig = processed_norm[y1:y2, x1:x2]
+        roi_dilated = processed_dilated[y1:y2, x1:x2]
 
         if roi_orig.size > 0:
             blob_dict = {
@@ -1256,7 +1295,7 @@ def detect_blobs_multi_method(img_norm, img_orig, min_thresh, min_area, color, f
 
 
 
-
+#not used
 def first_scan_detect_blobs():
     COLOR_ORDER = [
         'red', 'green', 'blue', 'orange', 'purple',
@@ -1390,24 +1429,6 @@ def is_featureless(img):
 
     return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
-
-
-def normalize_and_dilate_(img, kernel_size=(3, 3), iterations=3, blur_kernel=(3, 3),):
-    img = np.nan_to_num(img)
-
-    if is_featureless(img):
-        print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
-        print(f"[DEBUG] is_featureless triggered! Max: {img.max()}, Mean: {img.mean()}, Entropy: {shannon_entropy(img)}, PNR: {(img.max() - img.mean()) / (img.std() + 1e-5)}, Edge Ratio: {np.count_nonzero(cv2.Canny(img.astype(np.uint8), 50, 150)) / img.size}")
-        return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
-
-    if blur_kernel:
-        blurred = cv2.GaussianBlur(img, blur_kernel, 0)
-    else:
-        blurred = img.copy()
-    norm = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size)
-    dilated = cv2.dilate(norm, kernel, iterations=iterations)
-    return norm, dilated
 
 def normalize_and_dilate(img, kernel_size=None, iterations=None):
     img = np.nan_to_num(img)
@@ -2305,9 +2326,9 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
         except IndexError:
             raise RuntimeError("❌ No scan found in database after queue completion!")
     elif is_offline:
-        last_id = export_params.get('target_id')
+        last_id = scan_params.get('scan_id')
         if last_id is None:
-            raise ValueError("Mode is Offline but no 'target_id' provided in export_params!")
+            raise ValueError("Mode is Offline but no 'scan_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
     else:
         last_id = 111111 
@@ -2359,7 +2380,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
 
     return last_id, out_dir
 
-def analyze_data_remote(results_dict, np_array, scan_metadata):
+def analyze_data_remote(np_array, scan_metadata):
     """
     Placeholder for remote analysis function.
     In a real implementation, this would send data to a remote server
@@ -2367,7 +2388,7 @@ def analyze_data_remote(results_dict, np_array, scan_metadata):
     """
     print("[REMOTE ANALYSIS] This is a placeholder function.")
     # Implement remote analysis logic here
-    return results_dict, np_array, scan_metadata
+    return np_array, scan_metadata
 
 def analyze_data_local(scan_id=None, 
                        return_results=False, 
@@ -2670,6 +2691,245 @@ def analyze_data_local(scan_id=None,
     return all_results
 
 
+def analyze_data_from_arrays(element_arrays, params):
+    """
+    Analyze XRF data from a 3D numpy array instead of loading TIFF files.
+    Performs equivalent processing to analyze_data_local() but with in-memory arrays.
+    
+    Args:
+        element_arrays (np.ndarray): 3D array of shape (n_elements, height, width) containing XRF images
+        params (dict): Analysis parameters dictionary with element order info.
+                      Must contain 'elem_list' or 'export_params.elem_list' specifying element names/order
+                      and segmentation/detection parameters
+    
+    Returns:
+        dict: Analysis results containing:
+              - scan_id: Scan ID used for analysis
+              - precomputed_blobs: Detected blobs by color
+              - groups: Analysis results grouped by element combinations
+              - element_arrays: Reference to input arrays used
+              
+    Example:
+    --------
+    >>> # 3D array: (n_elements, height, width)
+    >>> element_arrays = np.random.rand(3, 100, 100).astype(np.float32) * 1000
+    >>> params = {
+    ...     'scan_id': 12345,
+    ...     'elem_list': ['Fe', 'Cu', 'Ni'],  # Element order matching array indices
+    ...     'segmentation_params': {...}
+    ... }
+    >>> results = analyze_data_from_arrays(element_arrays, params)
+    """
+    # Extract parameters
+    scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    
+    print(f"\n[ANALYSIS-ARRAYS] Analyzing 3D array for Scan {scan_id}")
+    print(f"[ANALYSIS-ARRAYS] Array shape: {element_arrays.shape}")
+    
+    # Check input array
+    if element_arrays is None or element_arrays.size == 0:
+        print("[ANALYSIS-ARRAYS] Error: element_arrays is empty")
+        return {'error': 'No arrays provided'}
+    
+    if len(element_arrays.shape) != 3:
+        print(f"[ANALYSIS-ARRAYS] Error: expected 3D array, got shape {element_arrays.shape}")
+        return {'error': 'Array must be 3D (n_elements, height, width)'}
+    
+    # Get element order from params
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
+    if not elem_list_of_lists:
+        print("[ANALYSIS-ARRAYS] Error: elem_list not found in params")
+        return {'error': 'Element list not provided'}
+    
+    if isinstance(elem_list_of_lists[0], str):
+        elem_list_of_lists = [elem_list_of_lists]
+    
+    all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
+    print(f"[ANALYSIS-ARRAYS] Element order from params: {all_elements}")
+    
+    # Verify array has correct number of elements
+    if element_arrays.shape[0] != len(all_elements):
+        print(f"[ANALYSIS-ARRAYS] Warning: array has {element_arrays.shape[0]} elements but {len(all_elements)} expected")
+        return {'error': f'Array dimension mismatch: {element_arrays.shape[0]} != {len(all_elements)}'}
+    
+    # Create dict mapping element names to 2D arrays
+    element_array_dict = {elem: element_arrays[i].astype(np.float32) 
+                         for i, elem in enumerate(all_elements)}
+    
+    # --- 1. Extract Analysis Parameters ---
+    segmentation = params.get("segmentation_params", {})
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
+    
+    # Spatial parameters (with defaults)
+    step_size = params.get('step_size', 1.0)
+    x_start = params.get('x_start', 0.0)
+    y_start = params.get('y_start', 0.0)
+    
+    print(f"[ANALYSIS-ARRAYS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
+    
+    # Method-specific parameters
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    method_params = {
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+    }
+    method_params = {k: v for k, v in method_params.items() if v is not None}
+    
+    # Prepare colors
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    precomputed_blobs = {color: {} for color in COLOR_ORDER}
+    element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
+    
+    # --- 2. Blob Detection from Arrays ---
+    morphology = params.get('morphology_params', {})
+    kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+    iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+    
+    for element in all_elements:
+        color = element_to_color.get(element)
+        if not color:
+            continue
+        
+        print(f"[ANALYSIS-ARRAYS] Processing {element} ({color})")
+        try:
+            img = element_array_dict[element]
+            
+            
+            # Detect blobs
+            b = detect_blobs(img, 
+                             img, 
+                             min_thresh,
+                             min_area, 
+                             color, 
+                             f"{element}_array", 
+                             method=detection_method,
+                             **method_params)
+            
+            precomputed_blobs[color][(min_thresh, min_area)] = b
+            print(f"[ANALYSIS-ARRAYS] Found {len(b)} blobs for {element}")
+        except Exception as e:
+            print(f"[ANALYSIS-ARRAYS] ❌ Error processing {element}: {e}")
+            traceback.print_exc()
+    
+    # --- 3. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    # --- 3. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    for elem_list in elem_list_of_lists:
+        group_name = "".join(elem_list)
+        print(f"\n[ANALYSIS-ARRAYS] Processing group: {group_name}")
+        
+        group_blobs_for_union = {}
+        for i, element in enumerate(elem_list):
+            if i >= 3:
+                break
+            original_color = element_to_color.get(element)
+            if not original_color:
+                continue
+            
+            new_color = ['red', 'green', 'blue'][i]
+            if original_color in precomputed_blobs:
+                group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+        
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs
+            print(f"[ANALYSIS-ARRAYS] Single element mode for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+        
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[ANALYSIS-ARRAYS] Union mode for {group_name}")
+            unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
+            
+            for idx, union in unions.items():
+                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                formatted_unions[box_name] = {
+                    "text": box_name,
+                    "cx": union["real_center_um"][0],
+                    "cy": union["real_center_um"][1],
+                    "num_x": union["real_size_um"][0],
+                    "num_y": union["real_size_um"][1],
+                    "image_center": union["center"],
+                    "image_length": union["length"],
+                    "real_center_um": union["real_center_um"],
+                    "real_size_um": union["real_size_um"],
+                }
+        else:
+            print(f"[ANALYSIS-ARRAYS] Skipping {group_name} - no blobs found")
+            continue
+        
+        # Create fine scans table for this group
+        if formatted_unions:
+            try:
+                table = formatted_unions_to_table(formatted_unions, save_to=None)
+                if not table.empty:
+                    fine_scans_tables[group_name] = table
+                    print(f"[ANALYSIS-ARRAYS] Created fine scans table with {len(table)} rows")
+            except Exception as e:
+                print(f"[ANALYSIS-ARRAYS] Warning: Could not create fine scans table: {e}")
+    
+    print("[ANALYSIS-ARRAYS] Complete.")
+    return fine_scans_tables
+
+
 def analyze_data_get_fine_scans_table(scan_id=None, 
                                       params=None):
     """
@@ -2776,6 +3036,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
         'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        'min_size': cellpose_methods.get('min_size') or params.get('cellpose_min_size'),
         
         # Connected components parameters
         'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
@@ -2800,7 +3061,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             morphology = params.get('morphology_params', {})
             kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
             iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
+                                                           kernel_size=kernel_size, iterations=iterations)
 
             b = detect_blobs(tiff_dilated, 
                              tiff_norm, min_thresh,
@@ -2910,8 +3172,54 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     # Return all tables
     return fine_scans_tables
 
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 
-def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None, show_plot=False):
+def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    ax.imshow(image)
+    
+    for name, info in formatted_unions.items():
+        # 1. Extract Center
+        if 'image_center' in info:
+            cx, cy = info['image_center']
+        else:
+            continue
+            
+        # 2. Extract Size/Radius
+        if 'image_radius' in info:
+            radius = info['image_radius']
+            size = radius * 2
+            # Offset center to find bottom-left corner
+            x = cx - radius
+            y = cy - radius
+        else:
+            # Fallback if size is provided directly
+            size = info.get('image_length', 10) 
+            x = cx - size / 2
+            y = cy - size / 2
+
+        # 3. Draw the Rectangle
+        # We use size for both width and height to make it a square
+        rect = patches.Rectangle((x, y), size, size, linewidth=2, 
+                                 edgecolor='red', facecolor='none')
+        ax.add_patch(rect)
+        
+        # 4. Add Label
+        ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✅ Plot saved to: {save_path}")
+    plt.tight_layout()
+    ax.set_title(title)
+    plt.show()
+    plt.pause(0.1)
+
+
+def _plot_image_with_boxes(image, formatted_unions, title="Analysis Results", 
+                          save_path=None, show_plot=True):
     """
     Plot image with bounding boxes overlay.
     
@@ -2922,21 +3230,8 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
         save_path: optional path to save the figure
         show_plot: whether to display the plot (default: False for headless mode)
     """
-    import matplotlib
-    # Use non-interactive backend if not displaying
-    if not show_plot:
-        matplotlib.use('Agg')
-    
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    
-    # Display image
-    if len(image.shape) == 2:
-        ax.imshow(image, cmap='gray')
-    else:
-        ax.imshow(image)
+    ax.imshow(image)
     
     # Draw bounding boxes
     color_cycle = plt.cm.tab20(range(len(formatted_unions)))
@@ -2957,7 +3252,12 @@ def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", sav
             continue
         
         # Draw rectangle
-        rect = patches.Rectangle((x, y), size, size, linewidth=2, edgecolor=color, facecolor='none')
+        rect = patches.Rectangle((x, y), size, 
+                                 size, 
+                                 linewidth=2, 
+                                 edgecolor=color, 
+                                 facecolor='none',
+                                 zorder=10)
         ax.add_patch(rect)
         
         # Add label
@@ -2990,7 +3290,6 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
         out_dir: output directory for saving plots
         group_name: specific group to plot (if None, plots all groups)
     """
-    import matplotlib.pyplot as plt
     
     if group_name:
         groups_to_plot = {group_name: formatted_unions_dict.get(group_name, {})}
@@ -3013,22 +3312,19 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
             print(f"❌ No TIFF found for visualization in {gname}")
             continue
         
-        try:
-            tiff_path = tiff_paths[first_element]
-            image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        tiff_path = tiff_paths[first_element]
+        image = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        # Normalize for display
+        image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        # Create plot
+        title = f"Analysis Results - Group {gname} (Element: {first_element})"
+        save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
+        
+        plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
             
-            # Normalize for display
-            image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            
-            # Create plot
-            title = f"Analysis Results - Group {gname} (Element: {first_element})"
-            save_path = Path(out_dir) / f"analysis_plot_{gname}.png"
-            
-            plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
-            
-        except Exception as e:
-            print(f"❌ Error plotting {gname}: {e}")
-            traceback.print_exc()
 
 
 def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
@@ -3196,11 +3492,12 @@ def load_and_queue(json_path, target_id=None,
         if key not in params:
             params[key] = default_value
     
-    # IMPORTANT: If offline or analysis-only mode, target_id is mandatory.
+    # IMPORTANT: If offline or analysis-only mode, scan_id is mandatory.
     if target_id is not None:
-        params['target_id'] = target_id
-    elif (is_offline or is_analysis_only) and 'target_id' not in params:
-        print(f"[WARNING] Running in '{mode}' mode but no target_id provided.")
+        params['scan_id'] = target_id
+
+    elif (is_offline or is_analysis_only) and 'scan_id' not in params['scan_params']:
+        print(f"[WARNING] Running in '{mode}' mode but no scan_id provided.")
         # You might want to raise an error or rely on it being in the JSON
     
     # For analysis-only mode, force local analysis and skip fine scans
@@ -3242,20 +3539,24 @@ def load_and_queue(json_path, target_id=None,
                             elem_list=elem_list, 
                             remote_seg=remote_seg, 
                             append_meta_with=params)  # Ensure ROI data is exported for remote analysis
-        print(f"{elem_list=}")
-        print("[DATA], Exported ROI data for remote analysis.")
+        #print(f"{elem_list=}")
+        print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
+
+
         #print("no reciever implemented yet, skipping remote analysis...")
         #pass 
         # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         # #placeholder for Seher
-        # remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
-        # remote_receiver.subscribe()
+        remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
+        remote_receiver.subscribe()
+        metadata = remote_receiver.data_w_metadata[0][0] # assuming there is only 1 segmentation done
+        data = remote_receiver.data_w_metadata[0][1] # assuming there is only 1 segmentation done
 
         # print("\n[ANALYSIS] Remote segmentation results received ...")
         # results_dict = {} #remote.recieve results
         # np_array = np.array([]) #remote.recieve results
         # scan_metadata = {} #remote.recieve results
-        #table = analyze_data_remote(np_array, metadata)
+        #fine_scans_tables= analyze_data_remote(np_array, metadata)
 
     else:
         # For analysis-only mode, return the results

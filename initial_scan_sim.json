@@ -1,12 +1,12 @@
 {
   "execution_params": {
-    "mode": "real",
+    "mode": "offline",
     "proceed_with_fine_scan": false
   },
 
   "scan_params": {
     "label": "cellpose_test",
-    "scan_id": null,
+    "scan_id": 392456,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
     "mot1": "zpssx",
@@ -31,7 +31,7 @@
   "export_params": {
     "elem_list": [["Ni"]],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/data/users/current_user"
+    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1"
   },
 
   "calibration_params": {
@@ -79,14 +79,15 @@
       "threshold_abs": 0.3
     },
     "cellpose": {
-      "diameter": 8,
+      "diameter": 100,
       "model_type": "cpsam",
-      "gpu": false,
-      "flow_threshold": 0.4,
-      "cellprob_threshold": 0.0,
+      "gpu": true,
+      "flow_threshold": 0.6,
+      "cellprob_threshold": -2.0,
       "channels": [0, 0],
-      "min_diameter": 2,
-      "max_diameter": 999999
+      "min_diameter": 65,
+      "max_diameter": 999999,
+      "min_size": 2000
     },
     "connected_components": {
       "connectivity": 8
