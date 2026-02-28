@@ -42,7 +42,7 @@ pixi run python src/automap_hxn/main.py
 
 ## SVG Export
 
-Export XRF intensity arrays as publication-ready SVG figures with contour lines. See `examples/svg_export.py` for a working example:
+Export XRF intensity arrays as publication-ready SVG figures with contour lines. See `examples/svg_export.py` for a working example (uses `xrf_to_svg` from `automap_hxn.export`):
 
 ```bash
 pixi run python examples/svg_export.py

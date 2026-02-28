@@ -1,11 +1,15 @@
+import io
 import json
-import tifffile as tiff
-import numpy as np
-import cv2
+import os
 from collections import Counter
 from pathlib import Path
-from hxntools.CompositeBroker import db
-import os
+
+import cv2
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server use
+import matplotlib.pyplot as plt
+import numpy as np
+import tifffile as tiff
 
 from .utils import resize_if_needed, merge_overlapping_boxes_dict, make_json_serializable
 
@@ -292,7 +296,7 @@ def _pad_scalar_to_expected_length(scalar, expected_length):
 def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, append_meta_with = None):
     """
     Export XRF data to Tiled for remote segmentation.
-    
+
     Args:
         tiled_client: Tiled client to use for export
         scan_id: Scan ID to export
@@ -300,6 +304,7 @@ def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, ap
         elem_list: List of elements to export
         append_meta_with: Additional metadata to append to the export (default: empty dict)
     """
+    from hxntools.CompositeBroker import db
 
     elem_list = elem_list or []
     append_meta_with = append_meta_with or {}
@@ -384,13 +389,15 @@ def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, ap
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
     """
     Export XRF data as local TIFF files.
-    
+
     Args:
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
         wd: Working directory for output files
     """
+    from hxntools.CompositeBroker import db
+
     if not scan_id:
         print("[EXPORT] Skipping local XRF export - no scan ID provided.")
         return
@@ -459,6 +466,8 @@ def export_scan_params(sid=-1, zp_flag=True, save_to=None):
       - roi_positions
       - step_size (computed from scan_input for 2D_FLY_PANDA)
     """
+    from hxntools.CompositeBroker import db
+
     if sid == -1:
         print("[EXPORT] Skipping scan params export - no valid scan ID provided.")
         return
@@ -590,3 +599,62 @@ def export_batch_scan_params(scan_ids, zp_flag=True, save_to=None):
     
     print(f"[BATCH] Completed batch export: {len(results)} scans processed")
     return results
+
+
+def xrf_to_svg(array, metadata=None):
+    """
+    Convert XRF intensity array to SVG with contour visualization.
+
+    Creates publication-ready SVG with contour lines, colorbar,
+    axes labels, and title.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        2D array of XRF intensity values. 3D arrays with shape (1, H, W)
+        will be squeezed to 2D.
+    metadata : dict, optional
+        Metadata dictionary. Recognized keys:
+        - 'element': Element name (e.g., 'Ni', 'Fe')
+        - 'scan_id': Scan identifier
+
+    Returns
+    -------
+    bytes
+        SVG content as bytes.
+    """
+    # Handle 3D arrays (1, H, W) -> squeeze to 2D
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array.squeeze(0)
+
+    if array.ndim != 2:
+        raise ValueError(f"Expected 2D array, got {array.ndim}D")
+
+    # Extract metadata
+    element = metadata.get('element', 'unknown') if metadata else 'unknown'
+    scan_id = metadata.get('scan_id', '') if metadata else ''
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Plot filled contours with colorbar
+    levels = 10
+    contour = ax.contourf(array, levels=levels, cmap='viridis')
+    ax.contour(array, levels=levels, colors='black', linewidths=0.5, alpha=0.5)
+
+    # Add colorbar
+    cbar = plt.colorbar(contour, ax=ax)
+    cbar.set_label('Intensity')
+
+    # Labels and title
+    ax.set_xlabel('X (pixels)')
+    ax.set_ylabel('Y (pixels)')
+    ax.set_title(f'XRF Intensity: {element}' + (f' (Scan {scan_id})' if scan_id else ''))
+    ax.set_aspect('equal')
+
+    # Save to SVG
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format='svg', bbox_inches='tight')
+    plt.close(fig)
+
+    return buffer.getvalue()

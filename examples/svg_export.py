@@ -7,9 +7,9 @@ Usage:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from utils.svg_exporter import xrf_to_svg
+from automap_hxn.export import xrf_to_svg
 from tiled.client import from_uri
 
 # Connect to Tiled and fetch an element array
