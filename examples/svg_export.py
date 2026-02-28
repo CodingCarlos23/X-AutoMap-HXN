@@ -5,6 +5,10 @@ Usage:
     pixi run python examples/svg_export.py
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from utils.svg_exporter import xrf_to_svg
 from tiled.client import from_uri
 
@@ -15,7 +19,11 @@ arr = client["/tst/sandbox/synaps/reconstructions/automap_393748_1772242656/Ni"]
 # Export as SVG with contour lines
 svg_bytes = xrf_to_svg(arr, metadata={"element": "Ni", "scan_id": "393748"})
 
-with open("Ni_intensity.svg", "wb") as f:
+output_dir = Path(__file__).parent.parent / "output"
+output_dir.mkdir(exist_ok=True)
+output_path = output_dir / "Ni_intensity.svg"
+
+with open(output_path, "wb") as f:
     f.write(svg_bytes)
 
-print("Wrote Ni_intensity.svg")
+print(f"Wrote {output_path}")
