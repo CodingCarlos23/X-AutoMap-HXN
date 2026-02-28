@@ -18,20 +18,8 @@ import pandas as pd
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
 
-def load_and_queue(json_path, target_id=None, 
-                   remote_seg=False, proceed_fine_scans=True):
-    """
-    Main workflow function supporting multiple modes.
-    Mode is specified in JSON config file as 'mode' key:
-    - 'simulation': Simulation mode
-    - 'real': Real scanning mode 
-    - 'offline': Offline mode (use existing scan)
-    - 'analysis-only': Analysis-only mode (use existing scan, return results)
-    """
-    
-    # 0) Clear caches
-    if 'remote_handler' in globals():
-        remote_handler.clear_cache() 
+def load_params_from_json(json_path, target_id=None):
+    """Load parameters from JSON file and perform necessary preprocessing."""
 
     # 1) Load JSON
     with open(json_path, 'r') as f:
@@ -53,17 +41,13 @@ def load_and_queue(json_path, target_id=None,
         params['mot1_n'] = int(abs(params['mot1_e'] - params['mot1_s']) / step)
         params['mot2_n'] = int(abs(params['mot2_e'] - params['mot2_s']) / step)
 
-    # 3) Get mode from JSON config
-    mode = str(params.get('execution_params', {}).get('mode', 'simulation')).lower()
-    is_real = (mode == 'real')
-    is_sim  = (mode == 'simulation')
-    is_offline = (mode == 'offline')
-    is_analysis_only = (mode == 'analysis-only')
+    # 3) Get mode from JSON config; set to 'simulation' if not specified
+    params['execution_params'] = params.get('execution_params', {})
+    mode = params['execution_params']['mode'] = str(params['execution_params'].get('mode', 'simulation')).lower()
     
     # Map mode to legacy real_test for backward compatibility with other functions
     mode_map = {'simulation': 0, 'real': 1, 'offline': 2, 'analysis-only': 3}
     params['real_test'] = mode_map.get(mode, 0)
-    params['remote_seg'] = remote_seg
     
     # 3.1) Add default segmentation parameters if not present
     segmentation = params.get('segmentation_params', {})
@@ -133,21 +117,40 @@ def load_and_queue(json_path, target_id=None,
     if target_id is not None:
         params['scan_id'] = target_id
 
-    elif (is_offline or is_analysis_only) and 'scan_id' not in params['scan_params']:
+    elif (mode in {'offline', 'analysis-only'}) and ('scan_id' not in params['scan_params']):
         print(f"[WARNING] Running in '{mode}' mode but no scan_id provided.")
         # You might want to raise an error or rely on it being in the JSON
+
+    return params
+
+def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_scans=True):
+    """
+    Main workflow function supporting multiple modes.
+    Mode is specified in JSON config file as 'mode' key:
+    - 'simulation': Simulation mode
+    - 'real': Real scanning mode 
+    - 'offline': Offline mode (use existing scan)
+    - 'analysis-only': Analysis-only mode (use existing scan, return results)
+    """
     
+    # 0) Clear caches
+    if 'remote_handler' in globals():
+        remote_handler.clear_cache() 
+
+    # 1) Load segmentation parameters from JSON
+    params = load_params_from_json(json_path, target_id)
+    mode = params['execution_params']['mode']
+
     # For analysis-only mode, force local analysis and skip fine scans
-    if is_analysis_only:
-        remote_seg = False
-        params['remote_seg'] = False
-        proceed_fine_scans = False
+    if (mode == 'analysis-only'):
+        remote_seg, proceed_fine_scans = False, False
+    params['remote_seg'] = remote_seg
     
     # 4) EXECUTE
     print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {mode.capitalize()}) ---")
 
     # A. Submit / Export (skip for analysis-only mode)
-    if is_analysis_only:
+    if (mode == 'analysis-only'):
         # For analysis-only mode, use the target_id directly and create output directory
         scan_id = target_id
         data_wd = params.get('data_wd', '/data/users/current_user')
@@ -208,7 +211,7 @@ def load_and_queue(json_path, target_id=None,
         return
     
     # For analysis-only mode, return results immediately
-    if is_analysis_only:
+    if (mode == 'analysis-only'):
         print("--- Analysis-only mode complete ---")
         return analysis_results
     
@@ -222,7 +225,8 @@ def load_and_queue(json_path, target_id=None,
     )
     
     # D. Run (Will skip if mode != real)
-    run_fine_scans(is_real)
+    if mode == 'real':
+        run_fine_scans(True)
     
     print("--- Done ---")
     return None  # Explicit return for other modes
