@@ -2,7 +2,7 @@
 requires = ["pixi", "setuptools"]
 
 [project]
-name = "automap-hxn"
+name = "automap_hxn"
 version = "0.1.0"
 description = "HXN Beamline AutoMap Wokflow"
 requires-python = ">=3.11"
