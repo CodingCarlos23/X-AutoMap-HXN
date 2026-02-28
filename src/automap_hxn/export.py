@@ -8,10 +8,6 @@ from hxntools.CompositeBroker import db
 import os
 
 from .utils import resize_if_needed, merge_overlapping_boxes_dict, make_json_serializable
-from .remote_segmentation import RemoteSegmentationSender
-
-# Create a global instance of the remote sender
-remote_sender = RemoteSegmentationSender() 
 
 def process_and_save_json(input_path, overlap_thresh=0.5):
     """Load JSON file, merge overlapping boxes, save as *_merged.json."""
@@ -292,60 +288,22 @@ def _pad_scalar_to_expected_length(scalar, expected_length):
     print(f"[SCALAR] Padded scalar from {len(scalar)} to {len(padded_scalar)} points using last value {last_point}")
     return padded_scalar
 
-def _export_xrf_remote(scan_id, norm='sclr1_ch4', elem_list=[]):
+
+def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, append_meta_with = None):
     """
-    Export XRF data to remote handler for remote segmentation.
+    Export XRF data to Tiled for remote segmentation.
     
     Args:
+        tiled_client: Tiled client to use for export
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
-    """
-    if not scan_id:
-        print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
-        return
-
-    hdr = db[int(scan_id)]
-    scan_id = hdr.start["scan_id"]
-    
-    channels = [1, 2, 3]
-    print(f"[REMOTE] {elem_list = }")
-    print(f"[REMOTE] fetching XRF ROIs")
-    scan_dim = _get_flyscan_dimensions(hdr)
-    print(f"[REMOTE] fetching scalar values")
-
-    scalar = np.array(list(hdr.data(norm))).squeeze()
-    print(f"[REMOTE] fetching scalar {norm} values done")
-    
-    # Calculate expected length from scan dimensions
-    expected_length = np.prod(scan_dim)
-    
-    for elem in sorted(elem_list):
-        if elem not in remote_sender.get_cache():
-            remote_sender.append_cache(elem)
-            roi_keys = [f'Det{chan}_{elem}' for chan in channels]
-            spectrum = np.sum([np.array(list(hdr.data(roi)), dtype=np.float32).squeeze() for roi in roi_keys], axis=0)
-            
-            # Pad scalar if needed to match spectrum length
-            if norm is not None:
-                padded_scalar = _pad_scalar_to_expected_length(scalar, len(spectrum))
-                spectrum = spectrum / padded_scalar
-            
-            xrf_img = spectrum.reshape(scan_dim)
-            remote_sender.write(xrf_img)
-
-def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
-                                 append_meta_with = {}):
-    """
-    Export XRF data to remote handler for remote segmentation.
-    
-    Args:
-        scan_id: Scan ID to export
-        norm: Normalization channel (default: 'sclr1_ch4')
-        elem_list: List of elements to export
+        append_meta_with: Additional metadata to append to the export (default: empty dict)
     """
 
-    
+    elem_list = elem_list or []
+    append_meta_with = append_meta_with or {}
+
     if not scan_id:
         print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
@@ -359,9 +317,10 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     if append_meta_with:
         meta.update(append_meta_with)
 
+    # Create a container for this scan's data in the provided parent Tiled client
     import time
     timestamp = int(time.time())
-    scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
+    scan_container = tiled_client.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
                                                 access_tags=["tst_sandbox"])    # access_tags=["synaps_project"])
     
@@ -422,8 +381,6 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     else:
         print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
 
-        #remote_sender.write(xrf_img)
-
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
     """
     Export XRF data as local TIFF files.
@@ -481,10 +438,12 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[],
     """
     if remote_seg:
        # _export_xrf_remote(scan_id, norm, elem_list)
-       _export_xrf_remote_container(scan_id, 
-                                    norm=norm, 
-                                    elem_list=elem_list, 
-                                    append_meta_with=append_meta_with)
+    #    export_xrf_tiled(scan_id, 
+    #                                 tiled_client=tiled_client,
+    #                                 norm=norm, 
+    #                                 elem_list=elem_list, 
+    #                                 append_meta_with=append_meta_with)
+        raise NotImplementedError("Remote export is not implemented. Use export_xrf_tiled with a Tiled client for remote export.")
     else:
         _export_xrf_local(scan_id, norm, elem_list, wd)
 

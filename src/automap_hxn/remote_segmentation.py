@@ -44,7 +44,7 @@ class RemoteSegmentationReceiver:
         from tiled.client import from_uri
 
         self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.reader = self.client['tst/sandbox/synaps/segmentations']
+        self.reader = self.client['tst/sandbox/eugene/synaps/segmentations']
         self.num_elements = num_elements
         self.count_connect = 0
         self.METADATA_UPDATES = {}

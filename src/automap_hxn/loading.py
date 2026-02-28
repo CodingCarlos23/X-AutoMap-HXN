@@ -2,11 +2,20 @@ import json
 import os
 from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans
 from .analysis import analyze_data_local, analyze_data_remote
-from .export import export_xrf_roi_data
+from .export import export_xrf_tiled
 from automap_hxn.remote_segmentation import RemoteSegmentationReceiver
 
 import warnings
 import pandas as pd
+
+from tiled.client import from_uri
+c = from_uri('https://tiled.nsls2.bnl.gov')
+c_reconstructions = c["tst/sandbox/eugene/synaps/reconstructions"]
+
+from .remote_segmentation import RemoteSegmentationSender
+
+# Create a global instance of the remote sender
+remote_sender = RemoteSegmentationSender() 
 
 # import matplotlib
 # # This is the equivalent of %matplotlib qt
@@ -17,6 +26,7 @@ import pandas as pd
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
+
 
 def load_params_from_json(json_path, target_id=None):
     """Load parameters from JSON file and perform necessary preprocessing."""
@@ -123,6 +133,7 @@ def load_params_from_json(json_path, target_id=None):
 
     return params
 
+
 def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_scans=True):
     """
     Main workflow function supporting multiple modes.
@@ -150,6 +161,10 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
     print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {mode.capitalize()}) ---")
 
     # A. Submit / Export (skip for analysis-only mode)
+    print(f"\n[STEP A] Submit and/or Export Coarse Scan")
+    # This returns scan_id and out_dir which are needed for subsequent steps, even in analysis-only
+    # mode where we assume the scan already exists. In that case, we just use the target_id as the
+    # scan_id and create an output directory for any results.
     if (mode == 'analysis-only'):
         # For analysis-only mode, use the target_id directly and create output directory
         scan_id = target_id
@@ -164,24 +179,25 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
             params['export_params'],
             params.get('segmentation_params')
         )
+        print(f"[{mode.upper()}] Scan ID: {scan_id}, Output Directory: {out_dir}")
     
     # Update params with scan_id and out_dir
     params['scan_id'] = scan_id
     params['out_dir'] = out_dir
-    
+
     # B. Analyze
+    print(f"\n[STEP B] Analyze Data {'with Remote Segmentation' if remote_seg else 'Locally'}")
     analysis_results = None
     fine_scans_tables = None
     if remote_seg:
         elem_list=params['export_params']['elem_list']
-        export_xrf_roi_data(scan_id, 
-                            norm=params['export_params']['export_norm'],
-                            elem_list=elem_list, 
-                            remote_seg=remote_seg, 
-                            append_meta_with=params)  # Ensure ROI data is exported for remote analysis
-        #print(f"{elem_list=}")
-        print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
+        export_xrf_tiled(tiled_client=c_reconstructions,
+                        scan_id=scan_id, 
+                        norm=params['export_params']['export_norm'],
+                        elem_list=elem_list, 
+                        append_meta_with=params)
 
+        print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
 
         #print("no reciever implemented yet, skipping remote analysis...")
         #pass 
@@ -206,16 +222,17 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
             fine_scans_tables = analysis_results['fine_scans_tables']
             print(f"[WORKFLOW] Captured {len(fine_scans_tables)} fine scans table groups from analysis")
 
+    # For analysis-only mode, return results immediately
+    if (mode == 'analysis-only'):
+        print("\n[INFO] Analysis-only mode: returning analysis results without queuing or running fine scans.")
+        return analysis_results
+
     if not proceed_fine_scans:
         print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
         return
     
-    # For analysis-only mode, return results immediately
-    if (mode == 'analysis-only'):
-        print("--- Analysis-only mode complete ---")
-        return analysis_results
-    
     # C. Queue (Will skip if mode != real)
+    print(f"\n[STEP C] Queue Fine Scans for Execution")
     submit_fine_scans_to_queue(
         json_path,
         scan_id,
@@ -226,6 +243,7 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
     
     # D. Run (Will skip if mode != real)
     if mode == 'real':
+        print(f"\n[STEP D] Run Fine Scans")
         run_fine_scans(True)
     
     print("--- Done ---")

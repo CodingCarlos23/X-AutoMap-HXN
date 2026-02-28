@@ -57,10 +57,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QRect, QTimer
 
-from .remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
-# Create a global instance of the remote sender
-remote_sender = RemoteSegmentationSender() 
-
 
 
 def _fly2d_qserver_scan_export(label,
