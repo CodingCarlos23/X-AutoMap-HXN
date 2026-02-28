@@ -1795,11 +1795,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     timestamp = int(time.time())
     scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
-<<<<<<< HEAD:src/automap_hxn/utils.py
                                                 access_tags=["tst_sandbox"])    # access_tags=["synaps_project"])
-=======
-                                                access_tags=["tst_sandbox"])
->>>>>>> cellpose_remote_w_placeholders:utils.py
     
     channels = [1, 2, 3]
     print(f"[REMOTE] {elem_list = }")
