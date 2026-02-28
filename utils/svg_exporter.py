@@ -5,7 +5,7 @@ matplotlib.use('Agg')  # Non-interactive backend for server use
 import matplotlib.pyplot as plt
 
 
-def xrf_intensity_to_svg(array, metadata=None):
+def xrf_to_svg(array, metadata=None):
     """
     Convert XRF intensity array to SVG with contour visualization.
 
