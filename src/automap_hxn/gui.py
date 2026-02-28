@@ -20,7 +20,9 @@ from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QRect, QTimer, QPoint, QEvent
 
 from app_state import AppState
-from utils import (
+
+# TODO: look up these functions and import them from submodules
+from automap_hxn.utils import (
     resize_if_needed, normalize_and_dilate,
     make_json_serializable
 )
