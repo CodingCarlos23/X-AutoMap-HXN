@@ -42,7 +42,7 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 RM = REManagerAPI()
 from tiled.client import from_uri
 c = from_uri('https://tiled.nsls2.bnl.gov')
-container = c["tst/sandbox/synaps/reconstructions"]
+container = c["tst/sandbox/eugene/synaps/reconstructions"]
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -57,7 +57,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from PyQt5.QtCore import Qt, QRect, QTimer
 
-from remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
+from .remote_segmentation import RemoteSegmentationSender, RemoteSegmentationReceiver
 # Create a global instance of the remote sender
 remote_sender = RemoteSegmentationSender() 
 
@@ -1769,7 +1769,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     timestamp = int(time.time())
     scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
-                                                access_tags=["synaps_project"])
+                                                access_tags=["tst_sandbox"])    # access_tags=["synaps_project"])
     
     channels = [1, 2, 3]
     print(f"[REMOTE] {elem_list = }")
