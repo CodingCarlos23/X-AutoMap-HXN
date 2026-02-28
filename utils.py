@@ -49,7 +49,7 @@ from bluesky_queueserver_api.zmq import REManagerAPI
 RM = REManagerAPI()
 from tiled.client import from_uri
 c = from_uri('https://tiled.nsls2.bnl.gov')
-container = c["tst/sandbox/synaps/reconstructions"]
+container = c["tst/sandbox/eugene/synaps/reconstructions"]
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -1795,7 +1795,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
     timestamp = int(time.time())
     scan_container = container.create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
-                                                access_tags=["synaps_project"])
+                                                access_tags=["tst_sandbox"])
     
     channels = [1, 2, 3]
     print(f"[REMOTE] {elem_list = }")
@@ -1845,7 +1845,7 @@ def _export_xrf_remote_container(scan_id, norm='sclr1_ch4', elem_list=[],
             compound_key = "".join(element_names)
             
             # Send stacked array with compound key
-            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["synaps_project"])
+            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["tst_sandbox"])
             print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")

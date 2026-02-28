@@ -7,7 +7,7 @@ class RemoteSegmentationSender:
         from tiled.client import from_uri
 
         self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.writer = self.client['tst/sandbox/synaps/reconstructions']
+        self.writer = self.client['tst/sandbox/eugene/synaps/reconstructions']
         self.segapp_elems = []
 
     def clear_cache(self):
