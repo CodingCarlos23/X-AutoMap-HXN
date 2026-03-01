@@ -382,9 +382,9 @@ def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, ap
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
 
-        print(f"[REMOTE] meta for scan {scan_id}: {meta}") 
     else:
         print(f"[REMOTE WARNING] No XRF images processed for scan {scan_id}")
+
 
 def _export_xrf_local(scan_id, norm='sclr1_ch4', elem_list=[], wd='.'):
     """
