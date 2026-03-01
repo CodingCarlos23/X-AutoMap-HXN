@@ -2425,21 +2425,26 @@ def analyze_data_local(scan_id=None,
     # --- 1. Read Scan Parameters ---
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
     
-    # Prioritize step_size from params dict (scan_params.step_size)
-    step_size = params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+    # Calculate step_size and start positions from scan metadata for accuracy
+    step_size = 1.0
     x_start = 0.0
     y_start = 0.0
 
     if os.path.exists(params_json_path):
         with open(params_json_path, 'r') as f:
             params_data = json.load(f)
-            # Only use saved step_size if not provided in params dict
-            if not params.get('scan_params', {}).get('step_size') and not params.get('step_size'):
-                step_size = params_data.get('step_size', 1.0)
             scan_input = params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
-            if len(scan_input) >= 4:
+            if len(scan_input) >= 6:
+                # Calculate from actual scan dimensions
+                fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+                step_size = abs(fast_end - fast_start) / fast_N
                 x_start = scan_input[0]
                 y_start = scan_input[3]
+                print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+            else:
+                # Fallback to saved or provided values
+                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+                print(f"[ANALYSIS] Using fallback step_size={step_size}")
 
     # --- 2. Prepare Elements ---
     elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
@@ -2772,19 +2777,29 @@ def analyze_data_from_arrays(element_arrays, params):
     min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
-    # Spatial parameters - prioritize scan_params.step_size over calculated values
-    step_size = params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
-    x_start = params.get('x_start', 0.0)
-    y_start = params.get('y_start', 0.0)
+    # Calculate spatial parameters from scan metadata for accuracy
+    step_size = 1.0
+    x_start = 0.0
+    y_start = 0.0
     
-    # Extract x_start and y_start from start_doc if available
+    # Calculate from start_doc scan_input if available
     scan_input = params.get('start_doc', {}).get('scan', {}).get('scan_input', [])
     if len(scan_input) >= 6:
+        # Calculate step_size from actual scan dimensions
+        fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+        step_size = abs(fast_end - fast_start) / fast_N
         x_start = scan_input[0]  # Fast axis start
         y_start = scan_input[3]  # Slow axis start
-        print(f"[ANALYSIS-ARRAYS] Using spatial params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+        print(f"[ANALYSIS-ARRAYS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     else:
-        print(f"[ANALYSIS-ARRAYS] Using default/provided spatial params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+        # Fallback: extract from scan_params (mot1_s, mot2_s, step_size)
+        scan_params = params.get('scan_params', {})
+        if scan_params.get('mot1_s') is not None:
+            x_start = scan_params['mot1_s']
+        if scan_params.get('mot2_s') is not None:
+            y_start = scan_params['mot2_s']
+        step_size = scan_params.get('step_size') or params.get('step_size', 1.0)
+        print(f"[ANALYSIS-ARRAYS] Using fallback from scan_params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     
     print(f"[ANALYSIS-ARRAYS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
     
