@@ -340,14 +340,18 @@ def analyze_data_from_arrays(element_arrays, params):
         element_arrays (np.ndarray): 3D array of shape (n_elements, height, width) containing XRF images
         params (dict): Analysis parameters dictionary with element order info.
                       Must contain 'elem_list' or 'export_params.elem_list' specifying element names/order
-                      and segmentation/detection parameters
+                      and segmentation/detection parameters.
+                      
+                      Spatial calibration (for real-world coordinates):
+                      - 'step_size': Scan step size in microns (default: 1.0)
+                      - 'start_doc.scan.scan_input': [x_start, x_end, x_n, y_start, y_end, y_n]
+                        If present, x_start and y_start will be extracted automatically.
+                      - Alternatively provide 'x_start' and 'y_start' directly (default: 0.0)
     
     Returns:
-        dict: Analysis results containing:
-              - scan_id: Scan ID used for analysis
-              - precomputed_blobs: Detected blobs by color
-              - groups: Analysis results grouped by element combinations
-              - element_arrays: Reference to input arrays used
+        dict: Fine scans tables by group name, each containing:
+              - DataFrame with columns: label, cx, cy, num_x, num_y (in microns)
+              - Coordinates are in real-world units if spatial parameters provided
               
     Example:
     --------
@@ -355,7 +359,9 @@ def analyze_data_from_arrays(element_arrays, params):
     >>> element_arrays = np.random.rand(3, 100, 100).astype(np.float32) * 1000
     >>> params = {
     ...     'scan_id': 12345,
-    ...     'elem_list': ['Fe', 'Cu', 'Ni'],  # Element order matching array indices
+    ...     'elem_list': ['Fe', 'Cu', 'Ni'],
+    ...     'step_size': 0.5,  # microns per pixel
+    ...     'start_doc': {'scan': {'scan_input': [-10, 10, 100, -10, 10, 100]}},
     ...     'segmentation_params': {...}
     ... }
     >>> results = analyze_data_from_arrays(element_arrays, params)
@@ -402,10 +408,29 @@ def analyze_data_from_arrays(element_arrays, params):
     min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
-    # Spatial parameters (with defaults)
-    step_size = params.get('step_size', 1.0)
-    x_start = params.get('x_start', 0.0)
-    y_start = params.get('y_start', 0.0)
+    # Calculate spatial parameters from scan metadata for accuracy
+    step_size = 1.0
+    x_start = 0.0
+    y_start = 0.0
+    
+    # Calculate from start_doc scan_input if available
+    scan_input = params.get('start_doc', {}).get('scan', {}).get('scan_input', [])
+    if len(scan_input) >= 6:
+        # Calculate step_size from actual scan dimensions
+        fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+        step_size = abs(fast_end - fast_start) / fast_N
+        x_start = scan_input[0]  # Fast axis start
+        y_start = scan_input[3]  # Slow axis start
+        print(f"[ANALYSIS-ARRAYS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+    else:
+        # Fallback: extract from scan_params (mot1_s, mot2_s, step_size)
+        scan_params = params.get('scan_params', {})
+        if scan_params.get('mot1_s') is not None:
+            x_start = scan_params['mot1_s']
+        if scan_params.get('mot2_s') is not None:
+            y_start = scan_params['mot2_s']
+        step_size = scan_params.get('step_size') or params.get('step_size', 1.0)
+        print(f"[ANALYSIS-ARRAYS] Using fallback from scan_params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     
     print(f"[ANALYSIS-ARRAYS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
     
@@ -599,6 +624,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         return {}
     
     # --- 1. Read Scan Parameters ---
+    
+    # Calculate step_size and start positions from scan metadata for accuracy
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
     step_size = 1.0
     x_start = 0.0
@@ -609,9 +636,17 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             params_data = json.load(f)
             step_size = params_data.get('step_size', 1.0)
             scan_input = params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
-            if len(scan_input) >= 4:
+            if len(scan_input) >= 6:
+                # Calculate from actual scan dimensions
+                fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+                step_size = abs(fast_end - fast_start) / fast_N
                 x_start = scan_input[0]
                 y_start = scan_input[3]
+                print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+            else:
+                # Fallback to saved or provided values
+                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+                print(f"[ANALYSIS] Using fallback step_size={step_size}")
 
     # --- 2. Prepare Elements ---
     elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
