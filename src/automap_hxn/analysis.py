@@ -324,3 +324,483 @@ def analyze_data_remote(np_array, scan_metadata):
     # Implement remote analysis logic here
     return np_array, scan_metadata
 
+
+def analyze_data_from_arrays(element_arrays, params):
+    """
+    Analyze XRF data from a 3D numpy array instead of loading TIFF files.
+    Performs equivalent processing to analyze_data_local() but with in-memory arrays.
+    
+    Args:
+        element_arrays (np.ndarray): 3D array of shape (n_elements, height, width) containing XRF images
+        params (dict): Analysis parameters dictionary with element order info.
+                      Must contain 'elem_list' or 'export_params.elem_list' specifying element names/order
+                      and segmentation/detection parameters
+    
+    Returns:
+        dict: Analysis results containing:
+              - scan_id: Scan ID used for analysis
+              - precomputed_blobs: Detected blobs by color
+              - groups: Analysis results grouped by element combinations
+              - element_arrays: Reference to input arrays used
+              
+    Example:
+    --------
+    >>> # 3D array: (n_elements, height, width)
+    >>> element_arrays = np.random.rand(3, 100, 100).astype(np.float32) * 1000
+    >>> params = {
+    ...     'scan_id': 12345,
+    ...     'elem_list': ['Fe', 'Cu', 'Ni'],  # Element order matching array indices
+    ...     'segmentation_params': {...}
+    ... }
+    >>> results = analyze_data_from_arrays(element_arrays, params)
+    """
+    # Extract parameters
+    scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    
+    print(f"\n[ANALYSIS-ARRAYS] Analyzing 3D array for Scan {scan_id}")
+    print(f"[ANALYSIS-ARRAYS] Array shape: {element_arrays.shape}")
+    
+    # Check input array
+    if element_arrays is None or element_arrays.size == 0:
+        print("[ANALYSIS-ARRAYS] Error: element_arrays is empty")
+        return {'error': 'No arrays provided'}
+    
+    if len(element_arrays.shape) != 3:
+        print(f"[ANALYSIS-ARRAYS] Error: expected 3D array, got shape {element_arrays.shape}")
+        return {'error': 'Array must be 3D (n_elements, height, width)'}
+    
+    # Get element order from params
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
+    if not elem_list_of_lists:
+        print("[ANALYSIS-ARRAYS] Error: elem_list not found in params")
+        return {'error': 'Element list not provided'}
+    
+    if isinstance(elem_list_of_lists[0], str):
+        elem_list_of_lists = [elem_list_of_lists]
+    
+    all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
+    print(f"[ANALYSIS-ARRAYS] Element order from params: {all_elements}")
+    
+    # Verify array has correct number of elements
+    if element_arrays.shape[0] != len(all_elements):
+        print(f"[ANALYSIS-ARRAYS] Warning: array has {element_arrays.shape[0]} elements but {len(all_elements)} expected")
+        return {'error': f'Array dimension mismatch: {element_arrays.shape[0]} != {len(all_elements)}'}
+    
+    # Create dict mapping element names to 2D arrays
+    element_array_dict = {elem: element_arrays[i].astype(np.float32) 
+                         for i, elem in enumerate(all_elements)}
+    
+    # --- 1. Extract Analysis Parameters ---
+    segmentation = params.get("segmentation_params", {})
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
+    
+    # Spatial parameters (with defaults)
+    step_size = params.get('step_size', 1.0)
+    x_start = params.get('x_start', 0.0)
+    y_start = params.get('y_start', 0.0)
+    
+    print(f"[ANALYSIS-ARRAYS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
+    
+    # Method-specific parameters
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    method_params = {
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+    }
+    method_params = {k: v for k, v in method_params.items() if v is not None}
+    
+    # Prepare colors
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    precomputed_blobs = {color: {} for color in COLOR_ORDER}
+    element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
+    
+    # --- 2. Blob Detection from Arrays ---
+    morphology = params.get('morphology_params', {})
+    kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+    iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+    
+    for element in all_elements:
+        color = element_to_color.get(element)
+        if not color:
+            continue
+        
+        print(f"[ANALYSIS-ARRAYS] Processing {element} ({color})")
+        try:
+            img = element_array_dict[element]
+            
+            
+            # Detect blobs
+            b = detect_blobs(img, 
+                             img, 
+                             min_thresh,
+                             min_area, 
+                             color, 
+                             f"{element}_array", 
+                             method=detection_method,
+                             **method_params)
+            
+            precomputed_blobs[color][(min_thresh, min_area)] = b
+            print(f"[ANALYSIS-ARRAYS] Found {len(b)} blobs for {element}")
+        except Exception as e:
+            print(f"[ANALYSIS-ARRAYS] ❌ Error processing {element}: {e}")
+            traceback.print_exc()
+    
+    # --- 3. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    # --- 3. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    for elem_list in elem_list_of_lists:
+        group_name = "".join(elem_list)
+        print(f"\n[ANALYSIS-ARRAYS] Processing group: {group_name}")
+        
+        group_blobs_for_union = {}
+        for i, element in enumerate(elem_list):
+            if i >= 3:
+                break
+            original_color = element_to_color.get(element)
+            if not original_color:
+                continue
+            
+            new_color = ['red', 'green', 'blue'][i]
+            if original_color in precomputed_blobs:
+                group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+        
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs
+            print(f"[ANALYSIS-ARRAYS] Single element mode for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+        
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[ANALYSIS-ARRAYS] Union mode for {group_name}")
+            unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
+            
+            for idx, union in unions.items():
+                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                formatted_unions[box_name] = {
+                    "text": box_name,
+                    "cx": union["real_center_um"][0],
+                    "cy": union["real_center_um"][1],
+                    "num_x": union["real_size_um"][0],
+                    "num_y": union["real_size_um"][1],
+                    "image_center": union["center"],
+                    "image_length": union["length"],
+                    "real_center_um": union["real_center_um"],
+                    "real_size_um": union["real_size_um"],
+                }
+        else:
+            print(f"[ANALYSIS-ARRAYS] Skipping {group_name} - no blobs found")
+            continue
+        
+        # Create fine scans table for this group
+        if formatted_unions:
+            try:
+                table = formatted_unions_to_table(formatted_unions, save_to=None)
+                if not table.empty:
+                    fine_scans_tables[group_name] = table
+                    print(f"[ANALYSIS-ARRAYS] Created fine scans table with {len(table)} rows")
+            except Exception as e:
+                print(f"[ANALYSIS-ARRAYS] Warning: Could not create fine scans table: {e}")
+    
+    print("[ANALYSIS-ARRAYS] Complete.")
+    return fine_scans_tables
+
+
+def analyze_data_get_fine_scans_table(scan_id=None, 
+                                      params=None):
+    """
+    Step 2B: Analysis with table return.
+    Same analysis as analyze_data_local but returns fine scan tables for follow-up
+    without saving files or generating plots.
+    
+    Args:
+        scan_id: Scan ID for this analysis
+        params: Dictionary of analysis parameters from JSON config (must include 'out_dir' and 'scan_id')
+    
+    Returns:
+        dict: Mapping of group_name -> pandas DataFrame with fine scan parameters
+              Columns: label, cx, cy, num_x, num_y, color, element, max_intensity, mean_intensity
+    """
+    # Initialize params if not provided
+    if params is None:
+        params = {}
+    
+    # Handle keyword-only arguments
+    if scan_id is None:
+        scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
+    out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
+    print(f"\n[ANALYSIS-TABLE] Starting analysis for Scan {scan_id} in {out_dir}")
+    
+    # Skip analysis if remote_seg is True
+    remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
+    if remote_seg:
+        print("[ANALYSIS-TABLE] remote_seg=True, skipping (no TIFFs available)...")
+        return {}
+    
+    # --- 1. Read Scan Parameters ---
+    params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
+    step_size = 1.0
+    x_start = 0.0
+    y_start = 0.0
+
+    if os.path.exists(params_json_path):
+        with open(params_json_path, 'r') as f:
+            params_data = json.load(f)
+            step_size = params_data.get('step_size', 1.0)
+            scan_input = params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
+            if len(scan_input) >= 4:
+                x_start = scan_input[0]
+                y_start = scan_input[3]
+
+    # --- 2. Prepare Elements ---
+    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
+    if not elem_list_of_lists:
+        print("elem_list is empty.")
+        return {}
+
+    if isinstance(elem_list_of_lists[0], str):
+        elem_list_of_lists = [elem_list_of_lists]
+
+    # Flatten to get unique elements for loading
+    all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
+    
+    # Load Tiff Paths
+    tiff_paths = wait_for_element_tiffs(all_elements, out_dir)
+
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    precomputed_blobs = {color: {} for color in COLOR_ORDER}
+    element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
+    
+    segmentation = params.get("segmentation_params", {})
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    
+    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
+    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
+    
+    # Method-specific parameters from JSON config
+    method_params = {
+        # Simple blob detector parameters
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+        
+        # Hough circle parameters
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+        
+        # Watershed parameters
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+        
+        # Cellpose parameters
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+        
+        # Connected components parameters
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+    }
+    
+    # Filter out None values to avoid overriding method defaults
+    method_params = {k: v for k, v in method_params.items() if v is not None}
+
+    # --- 3. Blob Detection Loop ---
+    for element in all_elements:
+        if element not in tiff_paths: continue
+        
+        color = element_to_color.get(element)
+        if not color: continue
+
+        tiff_path = tiff_paths[element]
+        print(f"Processing {tiff_path.name} ({color})")
+        try:
+            tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
+            
+            # Use configurable normalization and dilation parameters
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
+                                                           kernel_size=kernel_size, iterations=iterations)
+
+            b = detect_blobs(tiff_dilated, 
+                             tiff_norm, min_thresh,
+                             min_area, color, 
+                             tiff_path.name, 
+                             method=detection_method,
+                             **method_params)
+            
+            precomputed_blobs[color][(min_thresh, min_area)] = b
+        except Exception as e:
+            print(f"❌ Error processing {tiff_path.name}: {e}")
+            traceback.print_exc()
+
+    # --- 4. Union & Table Generation Loop ---
+    fine_scans_tables = {}
+    
+    for elem_list in elem_list_of_lists:
+        group_name = "".join(elem_list)
+        print(f"\n--- Processing Group: {group_name} (Elements: {len(elem_list)}) ---")
+
+        group_blobs_for_union = {}
+        for i, element in enumerate(elem_list):
+            if i >= 3: break
+            original_color = element_to_color.get(element)
+            if not original_color: continue
+            
+            new_color = ['red', 'green', 'blue'][i]
+            if original_color in precomputed_blobs:
+                group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+
+        formatted_unions = {}
+        
+        if len(group_blobs_for_union) == 1:
+            # Single element: process individual blobs without union formation
+            print(f"[SINGLE ELEMENT] Processing individual blobs for {group_name}")
+            color = list(group_blobs_for_union.keys())[0]
+            blob_data = group_blobs_for_union[color]
+            
+            # Get blobs from the (min_thresh, min_area) key
+            individual_blobs = list(blob_data.values())
+            if individual_blobs:
+                individual_blobs = individual_blobs[0]  # Get the blob list
+                
+                for idx, blob in enumerate(individual_blobs, start=1):
+                    # Convert blob coordinates to real-world coordinates
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    
+                    # Use blob size or default size
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    
+                    box_name = f"Individual Blob {group_name} #{idx}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        # Preserve original blob info
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+                    
+        elif len(group_blobs_for_union) >= 2:
+            # Multiple elements: create union boxes
+            print(f"[UNION MODE] Creating union boxes for {group_name}")
+            unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
+            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
+
+            for idx, union in unions.items():
+                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                formatted_unions[box_name] = {
+                    "text": box_name,
+                    "cx": union["real_center_um"][0],
+                    "cy": union["real_center_um"][1],
+                    "num_x": union["real_size_um"][0],
+                    "num_y": union["real_size_um"][1],
+                    # Preserve original verbose keys if needed for other logs
+                    "image_center": union["center"],
+                    "image_length": union["length"],
+                    "real_center_um": union["real_center_um"],
+                    "real_size_um": union["real_size_um"],
+                }
+        else:
+            print(f"[SKIP] No valid blobs found for group {group_name}")
+            continue
+
+        # Convert to table if we have formatted unions
+        if formatted_unions:
+            try:
+                table = formatted_unions_to_table(formatted_unions)
+                fine_scans_tables[group_name] = table
+                print(f"✅ Created fine scans table for {group_name}: {len(table)} rows")
+            except Exception as e:
+                print(f"❌ Error creating table for {group_name}: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                fine_scans_tables[group_name] = pd.DataFrame()  # Empty dataframe as fallback
+
+    print("[ANALYSIS-TABLE] Done.")
+    
+    # Return all tables
+    return fine_scans_tables
