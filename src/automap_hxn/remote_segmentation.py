@@ -1,13 +1,12 @@
 """Remote segmentation handlers for Tiled integration."""
 
+from tiled.client.stream import LiveTableData
+import threading
+
 
 class RemoteSegmentationSender:
-    def __init__(self):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.writer = self.client['tst/sandbox/eugene/synaps/reconstructions']
+    def __init__(self, tiled_client):
+        self.client = tiled_client
         self.segapp_elems = []
 
     def clear_cache(self):
@@ -25,7 +24,7 @@ class RemoteSegmentationSender:
     def write(self, data, key=None):
         """Write numpy array data to remote handler."""
         try:
-            result = self.writer.write_array(data, key=key, access_tags=['synaps_project'])
+            result = self.client.write_array(data, key=key, access_tags=['synaps_project'])
             print(f"[REMOTE] Data written with key: {key}, result: {result}" if key else f"[REMOTE] Data written, result: {result}")
             return result
         except Exception as e:
@@ -39,40 +38,54 @@ class RemoteSegmentationSender:
         pass
 
 class RemoteSegmentationReceiver:
-    def __init__(self, num_elements):
-    
-        from tiled.client import from_uri
-
-        self.client = from_uri('https://tiled.nsls2.bnl.gov')
-        self.reader = self.client['tst/sandbox/eugene/synaps/segmentations']
-        self.num_elements = num_elements
-        self.count_connect = 0
+    def __init__(self, tiled_client, num_tables):
+        self.client = tiled_client
+        self.num_expected = self._num_left = num_tables
         self.METADATA_UPDATES = {}
-        self.data_w_metadata = []
+        self.results = {}
+        self._lock = threading.Event()
+        self._subs = []
+
+    def wait_for_results(self):
+        """Block until all expected tables are received."""
+        print(f"Waiting for {self.num_expected} table{'s' if self.num_expected != 1 else ''} to be received...")
+        self._lock.wait()  # blocks here until self._lock.set() is called
+        print("All expected tables received. Disconnecting subscription...")
+        for sub in self._subs:
+            sub.disconnect()
+        self.sub.disconnect()
+
+        return self.results
 
     def subscribe(self):
-        self.sub = self.reader.subscribe()
-        self.sub.child_created.add_callback(self.get_keys)
+        self.sub = self.client.subscribe()
+        self.sub.child_created.add_callback(self.get_dataset)
         print("Listening for updates. Use Ctrl+C to stop....")
-        self.sub.start()
+        self.sub.start_in_thread()
 
-    def get_keys(self, data):
-        print(f"Received Key : {data}")
-        path_parts = tuple(data.subscription.segments)  # e.g. ('tst', 'sandbox', ...)
-        self.METADATA_UPDATES[path_parts] = data
-        sub = data.child().subscribe()
+    def get_dataset(self, update):
+        print(f"New dataset created: `{update.key}`. Waiting for tables to be uploaded...")
+        path_parts = tuple(update.subscription.segments)
+        self.METADATA_UPDATES[path_parts] = update
+        sub = update.child().subscribe()
+        sub.child_created.add_callback(self.get_table)
+        sub.start_in_thread(start=0)
+        self._subs.append(sub)
+
+    def get_table(self, update):
+        print(f"New table created: `{update.key}`. Waiting for data to be uploaded...")
+        sub = update.child().subscribe()
         sub.new_data.add_callback(self.get_data)
-        sub.start_in_thread(start=1)
+        sub.start_in_thread(start=0)
+        self._subs.append(sub)
 
-    def get_data(self, update):
-        print(f"Received data number : {self.count_connect}")
-        data = update.data()  # Extract the numpy array from the update.
-        # Look up the metadata which we should have already received.
-        path_parts = tuple(update.subscription.segments)  # e.g. ('tst', 'sandbox', ...)
-        update = METADATA_UPDATES.pop(path_parts)
-        metadata = update.metadata
-        self.data_w_metadata.append((metadata, data))
-        self.count_connect += 1 
-        if self.count_connect == self.num_elements:
-            self.sub.disconnect()
+    def get_data(self, update: LiveTableData):
+        path_parts = tuple(update.subscription.segments)
+        channel = path_parts[-1]  # Key is the table name
+        print(f"Received data for table: `{channel}`")
+        self.results[channel] = update.data()
 
+        # If all expected tables have been received, unblock the main thread
+        self._num_left -= 1
+        if not self._num_left:
+            self._lock.set()

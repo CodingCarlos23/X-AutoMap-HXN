@@ -1,21 +1,16 @@
 import json
 import os
 from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans
-from .analysis import analyze_data_local, analyze_data_remote
+from .analysis import analyze_data_local
 from .export import export_xrf_tiled
-from automap_hxn.remote_segmentation import RemoteSegmentationReceiver
+from .remote_segmentation import RemoteSegmentationReceiver
 
 import warnings
 import pandas as pd
 
-from tiled.client import from_uri
-c = from_uri('https://tiled.nsls2.bnl.gov')
-c_reconstructions = c["tst/sandbox/eugene/synaps/reconstructions"]
-
-from .remote_segmentation import RemoteSegmentationSender
-
-# Create a global instance of the remote sender
-remote_sender = RemoteSegmentationSender() 
+# # Create a global instance of the remote sender
+# c_reconstructions = tiled_client["tst/sandbox/eugene/synaps/reconstructions"]
+# remote_sender = RemoteSegmentationSender(c_reconstructions)
 
 # import matplotlib
 # # This is the equivalent of %matplotlib qt
@@ -123,75 +118,85 @@ def load_params_from_json(json_path, target_id=None):
         if key not in params:
             params[key] = default_value
     
-    # IMPORTANT: If offline or analysis-only mode, scan_id is mandatory.
-    if target_id is not None:
-        params['scan_id'] = target_id
-
-    elif (mode in {'offline', 'analysis-only'}) and ('scan_id' not in params['scan_params']):
+    # IMPORTANT: If offline, scan_id is mandatory.
+    params['scan_id'] = params['scan_params'].get("scan_id", target_id)
+    if (mode == 'offline') and (not params['scan_id']):
         print(f"[WARNING] Running in '{mode}' mode but no scan_id provided.")
         # You might want to raise an error or rely on it being in the JSON
+
+    # 4) Add default export parameters if not present
+    export = params.get('export_params', {})
+    export_defaults = {
+        'data_wd': export.get('data_wd', params.get('data_wd', "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1")),
+        'tiled_reconstructions': export.get('tiled_reconstructions', params.get('tiled_reconstructions', "tst/sandbox/synaps/reconstructions")),
+        'tiled_segmentations': export.get('tiled_segmentations', params.get('tiled_segmentations', "tst/sandbox/synaps/segmentations")),
+        'tiled_raw': export.get('tiled_raw', params.get('tiled_raw', "hxn/raw"))
+    }
+    for key, default_value in export_defaults.items():
+        if key not in params:
+            params[key] = default_value
 
     return params
 
 
-def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_scans=True):
+def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_scans=True, tiled_client=None):
     """
     Main workflow function supporting multiple modes.
     Mode is specified in JSON config file as 'mode' key:
     - 'simulation': Simulation mode
     - 'real': Real scanning mode 
     - 'offline': Offline mode (use existing scan)
-    - 'analysis-only': Analysis-only mode (use existing scan, return results)
+
+    Args:
+        json_path: Path to JSON configuration file
+        target_id: Optional target ID to use if not specified in JSON
+        remote_seg: Whether to perform segmentation remotely (default: False)
+        proceed_fine_scans: Whether to proceed with fine scans after segmentation (default: True)
+        tiled_client: Tiled client to use for remote segmentation (required if remote_seg is True).
+            The client should have access to the paths specified in the JSON config for raw data,
+            reconstructions, and segmentations.
+            E.g. instantiate it with from_uri('https://tiled.nsls2.bnl.gov') and ensure the client
+            has access to the relevant datasets.
     """
-    
-    # 0) Clear caches
-    if 'remote_handler' in globals():
-        remote_handler.clear_cache() 
 
     # 1) Load segmentation parameters from JSON
     params = load_params_from_json(json_path, target_id)
     mode = params['execution_params']['mode']
-
-    # For analysis-only mode, force local analysis and skip fine scans
-    if (mode == 'analysis-only'):
-        remote_seg, proceed_fine_scans = False, False
     params['remote_seg'] = remote_seg
+
+    if remote_seg and not tiled_client:
+        raise ValueError("Remote segmentation is only supported with a valid tiled_client.")
     
     # 4) EXECUTE
     print(f"--- Workflow: {os.path.basename(json_path)} (Mode: {mode.capitalize()}) ---")
 
-    # A. Submit / Export (skip for analysis-only mode)
+    # A. Submit / Export
     print(f"\n[STEP A] Submit and/or Export Coarse Scan")
-    # This returns scan_id and out_dir which are needed for subsequent steps, even in analysis-only
-    # mode where we assume the scan already exists. In that case, we just use the target_id as the
-    # scan_id and create an output directory for any results.
-    if (mode == 'analysis-only'):
-        # For analysis-only mode, use the target_id directly and create output directory
-        scan_id = target_id
-        data_wd = params.get('data_wd', '/data/users/current_user')
-        out_dir = os.path.join(data_wd, f"automap_{scan_id}")
-        os.makedirs(out_dir, exist_ok=True)
-        print(f"[ANALYSIS-ONLY] Using existing scan {scan_id}, output dir: {out_dir}")
-    else:
-        scan_id, out_dir = submit_and_export(
-            params['execution_params'],
-            params['scan_params'],
-            params['export_params'],
-            params.get('segmentation_params')
-        )
-        print(f"[{mode.upper()}] Scan ID: {scan_id}, Output Directory: {out_dir}")
+    # This returns scan_id and out_dir which are needed for subsequent steps
+    # TODO: Check the `submit_and_export` function; 'segmentation_params/remote_seg' is allways treated as False? (look up `is_remote`)
+    scan_id, out_dir = submit_and_export(
+        params['execution_params'],
+        params['scan_params'],
+        params['export_params'],
+        params.get('segmentation_params')
+    )
+    print(f"[{mode.upper()}] Scan ID: {scan_id}, Output Directory: {out_dir}")
     
     # Update params with scan_id and out_dir
     params['scan_id'] = scan_id
     params['out_dir'] = out_dir
 
-    # B. Analyze
-    print(f"\n[STEP B] Analyze Data {'with Remote Segmentation' if remote_seg else 'Locally'}")
-    analysis_results = None
-    fine_scans_tables = None
+    # B. Segmentation
+    print(f"\n[STEP B] Segment the Data {'Remotely' if remote_seg else 'Locally'}")
     if remote_seg:
         elem_list=params['export_params']['elem_list']
-        export_xrf_tiled(tiled_client=c_reconstructions,
+        c_segmentations = tiled_client[params['tiled_segmentations']]
+        blocking_receiver = RemoteSegmentationReceiver(c_segmentations, num_tables=len(elem_list))
+        blocking_receiver.subscribe()
+
+        export_xrf_tiled(tiled_client=tiled_client,
+                        path_raw=params['tiled_raw'],
+                        path_out=params['tiled_reconstructions'],
                         scan_id=scan_id, 
                         norm=params['export_params']['export_norm'],
                         elem_list=elem_list, 
@@ -199,40 +204,23 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
 
         print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
 
-        #print("no reciever implemented yet, skipping remote analysis...")
-        #pass 
-        # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
-        # #placeholder for Seher
-        remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
-        remote_receiver.subscribe()
-        metadata = remote_receiver.data_w_metadata[0][0] # assuming there is only 1 segmentation done
-        data = remote_receiver.data_w_metadata[0][1] # assuming there is only 1 segmentation done
-
-        # print("\n[ANALYSIS] Remote segmentation results received ...")
-        # results_dict = {} #remote.recieve results
-        # np_array = np.array([]) #remote.recieve results
-        # scan_metadata = {} #remote.recieve results
-        #fine_scans_tables= analyze_data_remote(np_array, metadata)
+        print("[ANALYSIS] Remote analysis selected, receiving data remotely...")
+        fine_scans_tables = blocking_receiver.wait_for_results()
+        print("[ANALYSIS] Remote segmentation results received ...")
 
     else:
-        # For analysis-only mode, return the results
-        analysis_results = analyze_data_local(scan_id=scan_id, params=params)
+        segmentation_results = analyze_data_local(scan_id=scan_id, params=params)
         # Extract fine scans tables if available (created during analysis)
-        if analysis_results and 'fine_scans_tables' in analysis_results:
-            fine_scans_tables = analysis_results['fine_scans_tables']
+        if segmentation_results and 'fine_scans_tables' in segmentation_results:
+            fine_scans_tables = segmentation_results['fine_scans_tables']
             print(f"[WORKFLOW] Captured {len(fine_scans_tables)} fine scans table groups from analysis")
-
-    # For analysis-only mode, return results immediately
-    if (mode == 'analysis-only'):
-        print("\n[INFO] Analysis-only mode: returning analysis results without queuing or running fine scans.")
-        return analysis_results
-
-    if not proceed_fine_scans:
-        print("\n[INFO] Skipping fine scan queue submission and execution as per flag.")
-        return
     
     # C. Queue (Will skip if mode != real)
     print(f"\n[STEP C] Queue Fine Scans for Execution")
+    if not proceed_fine_scans:
+        print("[INFO] Skipping fine scan queue submission and execution as per flag.")
+        return
+
     submit_fine_scans_to_queue(
         json_path,
         scan_id,
@@ -248,4 +236,3 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
     
     print("--- Done ---")
     return None  # Explicit return for other modes
-

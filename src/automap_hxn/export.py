@@ -293,12 +293,14 @@ def _pad_scalar_to_expected_length(scalar, expected_length):
     return padded_scalar
 
 
-def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, append_meta_with = None):
+def export_xrf_tiled(tiled_client, path_raw: str, path_out: str, scan_id: int, norm='sclr1_ch4', elem_list=None, append_meta_with = None):
     """
     Export XRF data to Tiled for remote segmentation.
 
     Args:
         tiled_client: Tiled client to use for export
+        path_raw: Path to raw data in Tiled
+        path_out: Path to output data in Tiled
         scan_id: Scan ID to export
         norm: Normalization channel (default: 'sclr1_ch4')
         elem_list: List of elements to export
@@ -307,25 +309,20 @@ def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, ap
     from hxntools.CompositeBroker import db
 
     elem_list = elem_list or []
-    append_meta_with = append_meta_with or {}
 
     if not scan_id:
         print("[EXPORT] Skipping remote XRF export - no scan ID provided.")
         return
 
     hdr = db[int(scan_id)]
-    scan_id = hdr.start["scan_id"]
 
     meta = export_scan_params(sid=scan_id)
-    
-    # Append additional metadata if provided
-    if append_meta_with:
-        meta.update(append_meta_with)
+    meta.update(append_meta_with or {})
 
     # Create a container for this scan's data in the provided parent Tiled client
     import time
     timestamp = int(time.time())
-    scan_container = tiled_client.create_container(f"automap_{scan_id}_{timestamp}", 
+    scan_container = tiled_client[path_out].create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 
                                                 access_tags=["tst_sandbox"])    # access_tags=["synaps_project"])
     
@@ -378,7 +375,7 @@ def export_xrf_tiled(tiled_client, scan_id, norm='sclr1_ch4', elem_list=None, ap
             
             # Send stacked array with compound key
             result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["tst_sandbox"])
-            print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}, result: {result}")
+            print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
 
@@ -444,7 +441,7 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[],
         append_meta_with: Additional metadata to append (default: empty dict)
     """
     if remote_seg:
-       # _export_xrf_remote(scan_id, norm, elem_list)
+    # _export_xrf_remote(scan_id, norm, elem_list)
     #    export_xrf_tiled(scan_id, 
     #                                 tiled_client=tiled_client,
     #                                 norm=norm, 
