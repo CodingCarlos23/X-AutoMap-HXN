@@ -30,8 +30,11 @@
 
   "export_params": {
     "elem_list": [["Ni"]],
+    "elem_list__": [["Ni"], ["Mn"], ["Ni", "Co", "Mn"]],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1"
+    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
+    "tiled_reconstructions": "tst/sandbox/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/synaps/segmentations"
   },
 
   "calibration_params": {
