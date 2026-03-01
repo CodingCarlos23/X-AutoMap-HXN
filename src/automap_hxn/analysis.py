@@ -6,6 +6,7 @@ import tifffile as tiff
 import numpy as np
 import time
 import cv2
+import pandas as pd
 from .blobs.detection import detect_blobs
 from .blobs.processing import find_union_blobs
 from .plotting import plot_analysis_results
@@ -137,26 +138,22 @@ def analyze_data_local(scan_id=None,
 
         tiff_path = tiff_paths[element]
         print(f"Processing {tiff_path.name} ({color})")
-        try:
-            tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
-            
-            # Use configurable normalization and dilation parameters
-            morphology = params.get('morphology_params', {})
-            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
+        tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        # Use configurable normalization and dilation parameters
+        morphology = params.get('morphology_params', {})
+        kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+        iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+        tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
 
-            b = detect_blobs(tiff_dilated, 
-                             tiff_norm, min_thresh,
-                             min_area, color, 
-                             tiff_path.name, 
-                             method=detection_method,
-                             **method_params)
-            
-            precomputed_blobs[color][(min_thresh, min_area)] = b
-        except Exception as e:
-            print(f"❌ Error processing {tiff_path.name}: {e}")
-            traceback.print_exc()
+        b = detect_blobs(tiff_dilated, 
+                            tiff_norm, min_thresh,
+                            min_area, color, 
+                            tiff_path.name, 
+                            method=detection_method,
+                            **method_params)
+        
+        precomputed_blobs[color][(min_thresh, min_area)] = b
 
     # --- 4. Union & Export Loop ---
     all_results = {
@@ -552,13 +549,10 @@ def analyze_data_from_arrays(element_arrays, params):
         
         # Create fine scans table for this group
         if formatted_unions:
-            try:
-                table = formatted_unions_to_table(formatted_unions, save_to=None)
-                if not table.empty:
-                    fine_scans_tables[group_name] = table
-                    print(f"[ANALYSIS-ARRAYS] Created fine scans table with {len(table)} rows")
-            except Exception as e:
-                print(f"[ANALYSIS-ARRAYS] Warning: Could not create fine scans table: {e}")
+            table = formatted_unions_to_table(formatted_unions, save_to=None)
+            if not table.empty:
+                fine_scans_tables[group_name] = table
+                print(f"[ANALYSIS-ARRAYS] Created fine scans table with {len(table)} rows")
     
     print("[ANALYSIS-ARRAYS] Complete.")
     return fine_scans_tables
@@ -686,28 +680,25 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         if not color: continue
 
         tiff_path = tiff_paths[element]
-        print(f"Processing {tiff_path.name} ({color})")
-        try:
-            tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
-            
-            # Use configurable normalization and dilation parameters
-            morphology = params.get('morphology_params', {})
-            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
-            tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
-                                                           kernel_size=kernel_size, iterations=iterations)
 
-            b = detect_blobs(tiff_dilated, 
-                             tiff_norm, min_thresh,
-                             min_area, color, 
-                             tiff_path.name, 
-                             method=detection_method,
-                             **method_params)
-            
-            precomputed_blobs[color][(min_thresh, min_area)] = b
-        except Exception as e:
-            print(f"❌ Error processing {tiff_path.name}: {e}")
-            traceback.print_exc()
+        print(f"Processing {tiff_path.name} ({color})")
+        tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
+        
+        # Use configurable normalization and dilation parameters
+        morphology = params.get('morphology_params', {})
+        kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+        iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+        tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
+                                                        kernel_size=kernel_size, iterations=iterations)
+
+        b = detect_blobs(tiff_dilated, 
+                            tiff_norm, min_thresh,
+                            min_area, color, 
+                            tiff_path.name, 
+                            method=detection_method,
+                            **method_params)
+        
+        precomputed_blobs[color][(min_thresh, min_area)] = b
 
     # --- 4. Union & Table Generation Loop ---
     fine_scans_tables = {}
