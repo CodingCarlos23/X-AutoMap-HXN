@@ -2768,17 +2768,23 @@ def analyze_data_from_arrays(element_arrays, params):
     min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
-    # Spatial parameters - extract from start_doc like analyze_data_local does
+    # Spatial parameters - extract and CALCULATE from start_doc like analyze_data_local does
     step_size = params.get('step_size', 1.0)
     x_start = params.get('x_start', 0.0)
     y_start = params.get('y_start', 0.0)
     
-    # Try to extract x_start and y_start from start_doc if available
+    # Try to extract x_start, y_start AND CALCULATE step_size from start_doc if available
     scan_input = params.get('start_doc', {}).get('scan', {}).get('scan_input', [])
     if len(scan_input) >= 6:
+        # Extract start positions
         x_start = scan_input[0]  # Fast axis start
         y_start = scan_input[3]  # Slow axis start
-        print(f"[ANALYSIS-ARRAYS] Using spatial params from start_doc: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+        
+        # CALCULATE step_size from scan dimensions (same as export_scan_params)
+        fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+        step_size = abs(fast_end - fast_start) / fast_N
+        
+        print(f"[ANALYSIS-ARRAYS] Using spatial params from start_doc: x_start={x_start}, y_start={y_start}, step_size={step_size} (calculated)")
     else:
         print(f"[ANALYSIS-ARRAYS] Using default/provided spatial params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     
