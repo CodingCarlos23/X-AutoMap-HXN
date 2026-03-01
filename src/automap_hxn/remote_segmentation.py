@@ -40,10 +40,8 @@ class RemoteSegmentationSender:
 class RemoteSegmentationReceiver:
     def __init__(self, tiled_client, num_tables):
         self.client = tiled_client
-        self.num_expected = num_tables
-        self._num_received = 0
+        self.num_expected = self._num_left = num_tables
         self.METADATA_UPDATES = {}
-        self.data_w_metadata = []
         self.results = {}
         self._lock = threading.Event()
         self._subs = []
@@ -57,7 +55,7 @@ class RemoteSegmentationReceiver:
             sub.disconnect()
         self.sub.disconnect()
 
-        return self.results, self.data_w_metadata
+        return self.results
 
     def subscribe(self):
         self.sub = self.client.subscribe()
@@ -88,6 +86,6 @@ class RemoteSegmentationReceiver:
         self.results[channel] = update.data()
 
         # If all expected tables have been received, unblock the main thread
-        self._num_received += 1 
-        if self._num_received == self.num_expected:
+        self._num_left -= 1
+        if not self._num_left:
             self._lock.set()

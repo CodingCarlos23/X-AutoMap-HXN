@@ -183,16 +183,8 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
         print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
 
         print("[ANALYSIS] Remote analysis selected, receiving data remotely...")
-        results, data_w_metadata = blocking_receiver.wait_for_results()
-
-        # metadata = blocking_receiver.data_w_metadata[0][1] # assuming there is only 1 segmentation done
-        # data = blocking_receiver.data_w_metadata[0][0] # assuming there is only 1 segmentation done
-
-        # print("\n[ANALYSIS] Remote segmentation results received ...")
-        # results_dict = {} #remote.recieve results
-        # np_array = np.array([]) #remote.recieve results
-        # scan_metadata = {} #remote.recieve results
-        #fine_scans_tables= analyze_data_remote(np_array, metadata)
+        fine_scans_tables = blocking_receiver.wait_for_results()
+        print("\n[ANALYSIS] Remote segmentation results received ...")
 
     else:
         segmentation_results = analyze_data_local(scan_id=scan_id, params=params)
@@ -222,4 +214,3 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
     
     print("--- Done ---")
     return None  # Explicit return for other modes
-
