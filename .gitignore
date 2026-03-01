@@ -176,3 +176,5 @@ cellpose_limitations_test/
 *.png
 *.jpg
 *.jpeg
+*.svg
+output/

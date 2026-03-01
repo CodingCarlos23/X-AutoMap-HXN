@@ -22,6 +22,7 @@ ipython = ">=9.10.0,<10"
 opencv = "*"
 scikit-image = ">=0.26.0,<0.27"
 pyqt = ">=5.15.11,<6"
+llvmlite = "*"
 
 [tool.pixi.pypi-dependencies]
 tiled = { version = ">0.2.7", extras=["client"]}
