@@ -444,7 +444,7 @@ def export_xrf_roi_data(scan_id, norm='sclr1_ch4', elem_list=[],
         append_meta_with: Additional metadata to append (default: empty dict)
     """
     if remote_seg:
-       # _export_xrf_remote(scan_id, norm, elem_list)
+    # _export_xrf_remote(scan_id, norm, elem_list)
     #    export_xrf_tiled(scan_id, 
     #                                 tiled_client=tiled_client,
     #                                 norm=norm, 
