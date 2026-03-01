@@ -38,7 +38,7 @@ def analyze_data_local(scan_id=None,
     if scan_id is None:
         scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
     out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
-    print(f"\n[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
+    print(f"[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True (data sent to remote port, no TIFFs)
     remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
@@ -369,33 +369,33 @@ def analyze_data_from_arrays(element_arrays, params):
     # Extract parameters
     scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
     
-    print(f"\n[ANALYSIS-ARRAYS] Analyzing 3D array for Scan {scan_id}")
-    print(f"[ANALYSIS-ARRAYS] Array shape: {element_arrays.shape}")
+    print(f"[ANALYSIS] Analyzing 3D array for Scan {scan_id}")
+    print(f"[ANALYSIS] Array shape: {element_arrays.shape}")
     
     # Check input array
     if element_arrays is None or element_arrays.size == 0:
-        print("[ANALYSIS-ARRAYS] Error: element_arrays is empty")
+        print("[ANALYSIS] Error: element_arrays is empty")
         return {'error': 'No arrays provided'}
     
     if len(element_arrays.shape) != 3:
-        print(f"[ANALYSIS-ARRAYS] Error: expected 3D array, got shape {element_arrays.shape}")
+        print(f"[ANALYSIS] Error: expected 3D array, got shape {element_arrays.shape}")
         return {'error': 'Array must be 3D (n_elements, height, width)'}
     
     # Get element order from params
     elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
     if not elem_list_of_lists:
-        print("[ANALYSIS-ARRAYS] Error: elem_list not found in params")
+        print("[ANALYSIS] Error: elem_list not found in params")
         return {'error': 'Element list not provided'}
     
     if isinstance(elem_list_of_lists[0], str):
         elem_list_of_lists = [elem_list_of_lists]
     
     all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
-    print(f"[ANALYSIS-ARRAYS] Element order from params: {all_elements}")
+    print(f"[ANALYSIS] Element order from params: {all_elements}")
     
     # Verify array has correct number of elements
     if element_arrays.shape[0] != len(all_elements):
-        print(f"[ANALYSIS-ARRAYS] Warning: array has {element_arrays.shape[0]} elements but {len(all_elements)} expected")
+        print(f"[ANALYSIS] Warning: array has {element_arrays.shape[0]} elements but {len(all_elements)} expected")
         return {'error': f'Array dimension mismatch: {element_arrays.shape[0]} != {len(all_elements)}'}
     
     # Create dict mapping element names to 2D arrays
@@ -421,7 +421,7 @@ def analyze_data_from_arrays(element_arrays, params):
         step_size = abs(fast_end - fast_start) / fast_N
         x_start = scan_input[0]  # Fast axis start
         y_start = scan_input[3]  # Slow axis start
-        print(f"[ANALYSIS-ARRAYS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+        print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     else:
         # Fallback: extract from scan_params (mot1_s, mot2_s, step_size)
         scan_params = params.get('scan_params', {})
@@ -430,9 +430,9 @@ def analyze_data_from_arrays(element_arrays, params):
         if scan_params.get('mot2_s') is not None:
             y_start = scan_params['mot2_s']
         step_size = scan_params.get('step_size') or params.get('step_size', 1.0)
-        print(f"[ANALYSIS-ARRAYS] Using fallback from scan_params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+        print(f"[ANALYSIS] Using fallback from scan_params: x_start={x_start}, y_start={y_start}, step_size={step_size}")
     
-    print(f"[ANALYSIS-ARRAYS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
+    print(f"[ANALYSIS] Detection method: {detection_method}, threshold: {min_thresh}, area: {min_area}")
     
     # Method-specific parameters
     detection_methods = params.get("detection_methods", {})
@@ -482,7 +482,7 @@ def analyze_data_from_arrays(element_arrays, params):
         if not color:
             continue
         
-        print(f"[ANALYSIS-ARRAYS] Processing {element} ({color})")
+        print(f"[ANALYSIS] Processing {element} ({color})")
         try:
             img = element_array_dict[element]
             
@@ -498,9 +498,9 @@ def analyze_data_from_arrays(element_arrays, params):
                              **method_params)
             
             precomputed_blobs[color][(min_thresh, min_area)] = b
-            print(f"[ANALYSIS-ARRAYS] Found {len(b)} blobs for {element}")
+            print(f"[ANALYSIS] Found {len(b)} blobs for {element}")
         except Exception as e:
-            print(f"[ANALYSIS-ARRAYS] ❌ Error processing {element}: {e}")
+            print(f"[ANALYSIS] ❌ Error processing {element}: {e}")
             traceback.print_exc()
     
     # --- 3. Union & Table Generation Loop ---
@@ -511,7 +511,7 @@ def analyze_data_from_arrays(element_arrays, params):
     
     for elem_list in elem_list_of_lists:
         group_name = "".join(elem_list)
-        print(f"\n[ANALYSIS-ARRAYS] Processing group: {group_name}")
+        print(f"[ANALYSIS] Processing group: {group_name}")
         
         group_blobs_for_union = {}
         for i, element in enumerate(elem_list):
@@ -529,7 +529,7 @@ def analyze_data_from_arrays(element_arrays, params):
         
         if len(group_blobs_for_union) == 1:
             # Single element: process individual blobs
-            print(f"[ANALYSIS-ARRAYS] Single element mode for {group_name}")
+            print(f"[ANALYSIS] Single element mode for {group_name}")
             color = list(group_blobs_for_union.keys())[0]
             blob_data = group_blobs_for_union[color]
             
@@ -560,7 +560,7 @@ def analyze_data_from_arrays(element_arrays, params):
         
         elif len(group_blobs_for_union) >= 2:
             # Multiple elements: create union boxes
-            print(f"[ANALYSIS-ARRAYS] Union mode for {group_name}")
+            print(f"[ANALYSIS] Union mode for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
             unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
             
@@ -578,7 +578,7 @@ def analyze_data_from_arrays(element_arrays, params):
                     "real_size_um": union["real_size_um"],
                 }
         else:
-            print(f"[ANALYSIS-ARRAYS] Skipping {group_name} - no blobs found")
+            print(f"[ANALYSIS] Skipping {group_name} - no blobs found")
             continue
         
         # Create fine scans table for this group
@@ -586,9 +586,9 @@ def analyze_data_from_arrays(element_arrays, params):
             table = formatted_unions_to_table(formatted_unions, save_to=None)
             if not table.empty:
                 fine_scans_tables[group_name] = table
-                print(f"[ANALYSIS-ARRAYS] Created fine scans table with {len(table)} rows")
+                print(f"[ANALYSIS] Created fine scans table with {len(table)} rows")
     
-    print("[ANALYSIS-ARRAYS] Complete.")
+    print("[ANALYSIS] Complete.")
     return fine_scans_tables
 
 
@@ -615,7 +615,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     if scan_id is None:
         scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
     out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
-    print(f"\n[ANALYSIS-TABLE] Starting analysis for Scan {scan_id} in {out_dir}")
+    print(f"[ANALYSIS-TABLE] Starting analysis for Scan {scan_id} in {out_dir}")
     
     # Skip analysis if remote_seg is True
     remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
