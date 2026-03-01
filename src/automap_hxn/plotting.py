@@ -1,5 +1,9 @@
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+import numpy as np
+import tifffile as tiff
+import cv2
+from pathlib import Path
 
 def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None):
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
