@@ -6,7 +6,7 @@
 
   "scan_params": {
     "label": "cellpose_test",
-    "scan_id": 392456,
+    "scan_id": 392446,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
     "mot1": "zpssx",
@@ -79,15 +79,15 @@
       "threshold_abs": 0.3
     },
     "cellpose": {
-      "diameter": 100,
+      "diameter": 125,
       "model_type": "cpsam",
       "gpu": true,
-      "flow_threshold": 0.6,
+      "flow_threshold": 0.4,
       "cellprob_threshold": -2.0,
       "channels": [0, 0],
-      "min_diameter": 65,
+      "min_diameter":50,
       "max_diameter": 999999,
-      "min_size": 2000
+      "min_size": 10
     },
     "connected_components": {
       "connectivity": 8
