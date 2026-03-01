@@ -47,6 +47,8 @@ def analyze_data_local(scan_id=None,
     
     # --- 1. Read Scan Parameters ---
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
+    
+    # Calculate step_size and start positions from scan metadata for accuracy
     step_size = 1.0
     x_start = 0.0
     y_start = 0.0
@@ -54,11 +56,18 @@ def analyze_data_local(scan_id=None,
     if os.path.exists(params_json_path):
         with open(params_json_path, 'r') as f:
             params_data = json.load(f)
-            step_size = params_data.get('step_size', 1.0)
             scan_input = params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
-            if len(scan_input) >= 4:
+            if len(scan_input) >= 6:
+                # Calculate from actual scan dimensions
+                fast_start, fast_end, fast_N = scan_input[0], scan_input[1], scan_input[2]
+                step_size = abs(fast_end - fast_start) / fast_N
                 x_start = scan_input[0]
                 y_start = scan_input[3]
+                print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
+            else:
+                # Fallback to saved or provided values
+                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+                print(f"[ANALYSIS] Using fallback step_size={step_size}")
 
     # --- 2. Prepare Elements ---
     elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
