@@ -214,6 +214,8 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
             fine_scans_tables = segmentation_results['fine_scans_tables']
             print(f"[WORKFLOW] Captured {len(fine_scans_tables)} fine scans table groups from analysis")
     
+    print(fine_scans_tables)
+
     # C. Queue (Will skip if mode != real)
     print(f"\n[STEP C] Queue Fine Scans for Execution")
     if not proceed_fine_scans:

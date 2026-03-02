@@ -1,12 +1,12 @@
 {
   "execution_params": {
-    "mode": "offline",
+    "mode": "real",
     "proceed_with_fine_scan": false
   },
 
   "scan_params": {
     "label": "cellpose_test",
-    "scan_id": 392446,
+    "scan_id": null,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
     "mot1": "zpssx",
@@ -16,25 +16,24 @@
     "mot2_s": -12.5,
     "mot2_e": 12.5,
     "exp_t": 0.005,
-    "step_size": 1,
+    "step_size": 0.25,
     "zp_move_flag": 0,
     "smar_move_flag": 0,
     "roi_positions_file": null
   },
 
   "fine_scan_params": {
-    "step_size_fine": 0.02,
+    "step_size_fine": 0.1,
     "exp_t_fine": 0.005,
-    "fine_scan_pad_ratio": 0.0
+    "fine_scan_pad_ratio": 0.1
   },
 
   "export_params": {
     "elem_list": [["Ni"]],
-    "elem_list__": [["Ni"], ["Mn"], ["Ni", "Co", "Mn"]],
     "export_norm": "sclr1_ch4",
     "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
-    "tiled_reconstructions": "tst/sandbox/synaps/reconstructions",
-    "tiled_segmentations": "tst/sandbox/synaps/segmentations"
+    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations"
   },
 
   "calibration_params": {
