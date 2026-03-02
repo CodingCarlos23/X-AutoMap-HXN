@@ -158,13 +158,18 @@ def analyze_data_local(scan_id=None,
         iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
         tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
 
-        b = detect_blobs(tiff_dilated, 
-                            tiff_norm, min_thresh,
-                            min_area, color, 
-                            tiff_path.name, 
-                            method=detection_method,
-                            **method_params)
-        
+        img_min, img_max = float(tiff_img.min()), float(tiff_img.max())
+        if img_max>img_min:
+            tiff_img = (tiff_img-img_min)/(img_max-img_min)
+
+        b = detect_blobs(tiff_img, 
+                        tiff_img, 
+                        min_thresh,
+                        min_area, color, 
+                        tiff_path.name, 
+                        method=detection_method,
+                        **method_params)
+    
         precomputed_blobs[color][(min_thresh, min_area)] = b
 
     # --- 4. Union & Export Loop ---
@@ -488,8 +493,8 @@ def analyze_data_from_arrays(element_arrays, params):
             img_norm, img_dilated = normalize_and_dilate(img, kernel_size=kernel_size, iterations=iterations)
             
             # Detect blobs
-            b = detect_blobs(img_norm, 
-                             img_dilated, 
+            b = detect_blobs(img_dilated, 
+                             img_norm, 
                              min_thresh,
                              min_area, 
                              color, 

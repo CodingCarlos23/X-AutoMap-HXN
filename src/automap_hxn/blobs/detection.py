@@ -193,7 +193,7 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
         return []
     
     # Cellpose parameters
-    diameter_guess = kwargs.get('diameter', 60)
+    diameter_guess = kwargs.get('diameter', 30)
     model_type = kwargs.get('model_type', 'cyto3')
     gpu = kwargs.get('gpu', False)
     flow_threshold = kwargs.get('flow_threshold', 0.4)
@@ -227,12 +227,25 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
             cellprob_threshold=cellprob_threshold,
             min_size=cellpose_min_size
         )
+
         
+
+        # res = model.eval(
+        #     img_rgb,
+        #     channels=[0,0],
+        #     diameter=30,
+        #     flow_threshold=0.4,
+        #     cellprob_threshold=0)
+        
+        print(len(res))
         # Handle different return formats
         if len(res) == 4:
             masks, flows, styles, diams = res
         else:
             masks, flows, styles = res
+        import matplotlib.pyplot as plt
+        plt.imshow(masks)
+        plt.show()
             
     except Exception as e:
         print(f"Cellpose detection failed: {e}")

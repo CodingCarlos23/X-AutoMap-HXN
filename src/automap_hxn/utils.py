@@ -7,6 +7,9 @@ import cv2
 from skimage.measure import shannon_entropy
 from pathlib import Path
 
+from bluesky_queueserver_api.zmq import REManagerAPI
+RM = REManagerAPI()
+
 def wait_for_element_tiffs(element_list, watch_dir):
     tiff_paths = {}
     print(watch_dir)

@@ -97,16 +97,16 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
         
         plot_image_with_boxes(image_norm, formatted_unions, title=title, save_path=str(save_path))
 
-def plot_segmentation_from_tables(segmentation_tables, params, image=None, title="Segmentation Results", show_labels=True):
+
+def plot_segmentation_from_tables(segmentation_tables,
+                                  params,
+                                  image=None,
+                                  title="Segmentation Results",
+                                  show_labels=True):
     """
-    Plot segmentation results from tables containing bounding box information.
-    
-    Args:
-        segmentation_tables: dict[group_name] -> DataFrame
-        params: same params dict used in segmentation
-        image: 2D numpy array (raster)
-        title: title for the plot
-        show_labels: whether to show labels on the plot
+    image: 2D numpy array (raster)
+    segmentation_tables: dict[group_name] -> DataFrame
+    params: same params dict used in segmentation
     """
 
     if image is None:
@@ -117,16 +117,30 @@ def plot_segmentation_from_tables(segmentation_tables, params, image=None, title
         image = tiff.imread(str(tiff_path)).astype(np.float32)
 
     # Normalize image
-    image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    ax.imshow(image_norm)
+    image_norm = cv2.normalize(
+        np.nan_to_num(image),
+        None, 0, 255,
+        cv2.NORM_MINMAX
+    ).astype(np.uint8)
 
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    ax.imshow(image_norm, extent=[-12.5,12.5,12.5,-12.5])
+
+    colors = ['r', 'g', 'b', 'y', 'c', 'm']
     for i, (name, df) in enumerate(segmentation_tables.items()):
-                                 edgecolor=color, facecolor='none')
+        color = colors[i % len(colors)]
+
+        for _, row in df.iterrows():
+            size = (row.get('num_x') + row.get('num_y')) /2
+            x = row['cx'] - size / 2
+            y = row['cy']- size / 2
+            rect = patches.Rectangle((x,y), size, size, linewidth=2, 
+                                 edgecolor='red', facecolor='none')
             ax.add_patch(rect)
             
+            
             if show_labels and "label" in row:
-                ax.text(x, y - 2, name, fontsize=9, color=color, weight='bold',
+                ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
     plt.tight_layout()
