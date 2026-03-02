@@ -198,14 +198,40 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
         print("[ANALYSIS] Remote analysis selected, receiving data remotely...")
         fine_scans_tables = blocking_receiver.wait_for_results()
         print("[ANALYSIS] Segmentation results received ...")
+        print(fine_scans_tables)
 
         # Plot the results of segmentation
         print("[PLOTTING] Plotting segmentation results...")
-        fig, ax = plot_segmentation_from_tables(
+        plot_segmentation_from_tables(
             fine_scans_tables,
             params=params,
             title=f"Segmentation Results for Scan {scan_id}"
         )
+        print(fine_scans_tables)
+
+
+        # C. Queue (Will skip if mode != real)
+        print(f"\n[STEP C] Queue Fine Scans for Execution")
+        if not proceed_fine_scans:
+            print("[INFO] Skipping fine scan queue submission and execution as per flag.")
+            return
+
+        submit_fine_scans_to_queue(
+            json_path,
+            scan_id,
+            out_dir,
+            params['execution_params'],
+            fine_scans_tables=fine_scans_tables
+        )
+        
+        # D. Run (Will skip if mode != real)
+        if mode == 'real':
+            print(f"\n[STEP D] Run Fine Scans")
+            run_fine_scans(True)
+        
+        print("--- Done ---")
+        return None  # Explicit return for other modes
+    
 
     else:
         segmentation_results = analyze_data_local(scan_id=scan_id, params=params)

@@ -140,11 +140,14 @@ def plot_segmentation_from_tables(segmentation_tables,
             
             
             if show_labels and "label" in row:
-                ax.text(x, y - 2, name, fontsize=9, color='red', weight='bold',
+                ax.text(x, y, name, fontsize=9, color='red', weight='bold',
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
+    print("Finished plotting. Showing the image.")
     plt.tight_layout()
     ax.set_title(title)
     plt.show()
+    plt.pause(0.1)
+    print("Image is shown.")
 
-    return fig, ax
+    # return fig, ax
