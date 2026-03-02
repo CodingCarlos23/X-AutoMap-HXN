@@ -648,6 +648,7 @@ def xrf_to_svg(array, metadata=None):
     ax.set_ylabel('Y (pixels)')
     ax.set_title(f'XRF Intensity: {element}' + (f' (Scan {scan_id})' if scan_id else ''))
     ax.set_aspect('equal')
+    ax.invert_yaxis()
 
     # Save to SVG
     buffer = io.BytesIO()
