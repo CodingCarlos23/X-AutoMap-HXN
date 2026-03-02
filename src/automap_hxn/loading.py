@@ -193,6 +193,7 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
         c_segmentations = tiled_client[params['tiled_segmentations']]
         blocking_receiver = RemoteSegmentationReceiver(c_segmentations, num_tables=len(elem_list))
         blocking_receiver.subscribe()
+        print("Subscribed to remote segmentation results...")
 
         export_xrf_tiled(tiled_client=tiled_client,
                         path_raw=params['tiled_raw'],

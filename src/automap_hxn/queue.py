@@ -2,6 +2,7 @@ from .export import export_xrf_roi_data, export_scan_params
 import os
 import time
 from pathlib import Path
+import json
 
 from bluesky_queueserver_api import BPlan
 from bluesky_queueserver_api.zmq import REManagerAPI
@@ -396,6 +397,8 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
     data_wd = export_params.get('data_wd', '/data/users/current_user')
     
     if is_real:
+        from hxntools.CompositeBroker import db
+
         queue_success = wait_for_queue_done(poll_interval=1.0, idle_timeout=60, auto_restart=True)
         
         if not queue_success:

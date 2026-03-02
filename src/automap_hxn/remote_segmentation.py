@@ -41,7 +41,6 @@ class RemoteSegmentationReceiver:
     def __init__(self, tiled_client, num_tables):
         self.client = tiled_client
         self.num_expected = self._num_left = num_tables
-        self.METADATA_UPDATES = {}
         self.results = {}
         self._lock = threading.Event()
         self._subs = []
@@ -66,7 +65,6 @@ class RemoteSegmentationReceiver:
     def get_dataset(self, update):
         print(f"New dataset created: `{update.key}`. Waiting for tables to be uploaded...")
         path_parts = tuple(update.subscription.segments)
-        self.METADATA_UPDATES[path_parts] = update
         sub = update.child().subscribe()
         sub.child_created.add_callback(self.get_table)
         sub.start_in_thread(start=0)

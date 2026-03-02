@@ -148,6 +148,9 @@ def analyze_data_local(scan_id=None,
         tiff_path = tiff_paths[element]
         print(f"Processing {tiff_path.name} ({color})")
         tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
+
+        print(f"{tiff_img.shape=}, dtype={tiff_img.dtype}, min={tiff_img.min()}, max={tiff_img.max()}")
+        print(f"{min_thresh=}, {min_area=}, detection_method={detection_method}, method_params={method_params}")
         
         # Use configurable normalization and dilation parameters
         morphology = params.get('morphology_params', {})
@@ -485,18 +488,26 @@ def analyze_data_from_arrays(element_arrays, params):
         print(f"[ANALYSIS] Processing {element} ({color})")
         try:
             img = element_array_dict[element]
-            
+
+            print(f"{img.shape=}, dtype={img.dtype}, min={img.min()}, max={img.max()}")
+            print(f"{min_thresh=}, {min_area=}, detection_method={detection_method}, method_params={method_params}")
+
+            # Use configurable normalization and dilation parameters
+            morphology = params.get('morphology_params', {})
+            kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
+            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+            img_norm, img_dilated = normalize_and_dilate(img, kernel_size=kernel_size, iterations=iterations)
             
             # Detect blobs
-            b = detect_blobs(img, 
-                             img, 
+            b = detect_blobs(img_norm, 
+                             img_dilated, 
                              min_thresh,
                              min_area, 
                              color, 
                              f"{element}_array", 
                              method=detection_method,
                              **method_params)
-            
+            print(f"{b=}")
             precomputed_blobs[color][(min_thresh, min_area)] = b
             print(f"[ANALYSIS] Found {len(b)} blobs for {element}")
         except Exception as e:
