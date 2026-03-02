@@ -64,6 +64,10 @@ class RemoteSegmentationReceiver:
         self.sub.start_in_thread()
 
     def get_dataset(self, update):
+        if update.key == "empty":
+            print("Received the 'empty' flag. No tables expected from segmentation. Unblocking main thread.")
+            self._lock.set()
+            return
         print(f"New dataset created: `{update.key}`. Waiting for tables to be uploaded...")
         path_parts = tuple(update.subscription.segments)
         self.METADATA_UPDATES[path_parts] = update
