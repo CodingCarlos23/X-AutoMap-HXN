@@ -4,20 +4,10 @@ from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans
 from .analysis import analyze_data_local
 from .export import export_xrf_tiled
 from .remote_segmentation import RemoteSegmentationReceiver
+from .plotting import plot_segmentation_from_tables
 
 import warnings
 import pandas as pd
-
-# # Create a global instance of the remote sender
-# c_reconstructions = tiled_client["tst/sandbox/eugene/synaps/reconstructions"]
-# remote_sender = RemoteSegmentationSender(c_reconstructions)
-
-# import matplotlib
-# # This is the equivalent of %matplotlib qt
-# matplotlib.use('Qt5Agg')
-# import matplotlib.pyplot as plt
-# import matplotlib.patches as patches
-# plt.ion()
 
 # Suppress DataFrame fragmentation warnings from databroker
 warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning, message='.*DataFrame is highly fragmented.*')
@@ -206,7 +196,15 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
 
         print("[ANALYSIS] Remote analysis selected, receiving data remotely...")
         fine_scans_tables = blocking_receiver.wait_for_results()
-        print("[ANALYSIS] Remote segmentation results received ...")
+        print("[ANALYSIS] Segmentation results received ...")
+
+        # Plot the results of segmentation
+        print("[PLOTTING] Plotting segmentation results...")
+        fig, ax = plot_segmentation_from_tables(
+            fine_scans_tables,
+            params=params,
+            title=f"Segmentation Results for Scan {scan_id}"
+        )
 
     else:
         segmentation_results = analyze_data_local(scan_id=scan_id, params=params)
