@@ -10,7 +10,7 @@ import pandas as pd
 from .blobs.detection import detect_blobs
 from .blobs.processing import find_union_blobs
 from .plotting import plot_analysis_results
-from .utils import is_featureless, make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict
+from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict
 from .export import create_rgb_tiff, create_all_elements_tiff, save_each_blob_as_individual_scan
 
 
@@ -323,17 +323,6 @@ def analyze_data_local(scan_id=None,
     return all_results
 
 
-def analyze_data_remote(np_array, scan_metadata):
-    """
-    Placeholder for remote analysis function.
-    In a real implementation, this would send data to a remote server
-    for analysis and return the results.
-    """
-    print("[REMOTE ANALYSIS] This is a placeholder function.")
-    # Implement remote analysis logic here
-    return np_array, scan_metadata
-
-
 def analyze_data_from_arrays(element_arrays, params):
     """
     Analyze XRF data from a 3D numpy array instead of loading TIFF files.
@@ -513,9 +502,6 @@ def analyze_data_from_arrays(element_arrays, params):
         except Exception as e:
             print(f"[ANALYSIS] ❌ Error processing {element}: {e}")
             traceback.print_exc()
-    
-    # --- 3. Union & Table Generation Loop ---
-    fine_scans_tables = {}
     
     # --- 3. Union & Table Generation Loop ---
     fine_scans_tables = {}

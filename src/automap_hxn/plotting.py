@@ -5,6 +5,8 @@ import tifffile as tiff
 import cv2
 from pathlib import Path
 
+from .utils import wait_for_element_tiffs
+
 def plot_image_with_boxes(image, formatted_unions, title="Analysis Results", save_path=None):
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.imshow(image)
@@ -83,6 +85,7 @@ def plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir,
         
         
         tiff_path = tiff_paths[first_element]
+        print(f"📂 Loading image for {gname} from {tiff_path}...")
         image = tiff.imread(str(tiff_path)).astype(np.float32)
         
         # Normalize for display
@@ -115,18 +118,10 @@ def plot_segmentation_from_tables(segmentation_tables, params, image=None, title
 
     # Normalize image
     image_norm = cv2.normalize(np.nan_to_num(image), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.imshow(image_norm)
 
-    colors = ['r', 'g', 'b', 'y', 'c', 'm']
     for i, (name, df) in enumerate(segmentation_tables.items()):
-        color = colors[i % len(colors)]
-
-        for _, row in df.iterrows():
-            size = 10* (row.get('num_x') + row.get('num_y')) / 2
-            x, y = (row['cx']+ 10)*10 - size/2, (row['cy'] + 10)*10 - size/2
-            rect = patches.Rectangle((x, y), size, size, linewidth=2, 
                                  edgecolor=color, facecolor='none')
             ax.add_patch(rect)
             
