@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
+from skimage.segmentation import clear_border
 from ..utils import normalize_and_dilate
 
 # Cellpose imports (optional - will gracefully handle if not installed)
@@ -250,7 +251,7 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     except Exception as e:
         print(f"Cellpose detection failed: {e}")
         return []
-    
+    masks = clear_border(masks) #to clear edge boxes
     # Convert masks to boxes and areas
     boxes, areas = _masks_to_boxes_and_areas(masks)
     

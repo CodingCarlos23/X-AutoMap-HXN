@@ -148,7 +148,8 @@ def load_and_queue(json_path, target_id=None, remote_seg=False, proceed_fine_sca
             E.g. instantiate it with from_uri('https://tiled.nsls2.bnl.gov') and ensure the client
             has access to the relevant datasets.
     """
-
+    import matplotlib.pyplot as plt
+    plt.close('all')
     # 1) Load segmentation parameters from JSON
     params = load_params_from_json(json_path, target_id)
     mode = params['execution_params']['mode']
