@@ -244,9 +244,9 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
             masks, flows, styles, diams = res
         else:
             masks, flows, styles = res
-        import matplotlib.pyplot as plt
-        plt.imshow(masks)
-        plt.show()
+        # import matplotlib.pyplot as plt
+        # plt.imshow(masks)
+        # plt.show()
             
     except Exception as e:
         print(f"Cellpose detection failed: {e}")

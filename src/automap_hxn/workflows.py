@@ -88,7 +88,8 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True, tiled_client =
 def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
                          step_size = 250, plot_elem = ["Cr"], mll = False, 
                          beamline_params=None, initial_scan_path=None, 
-                         remote_seg=True, followup_fine_scan=False,tiled_client=None):
+                         remote_seg=True, followup_fine_scan=False,tiled_client=None,
+                         ref_scan_id = None):
     '''
     # 1. Define the step size for the mosaic grid
     # Since you requested 25 um steps for the grid iteration:
@@ -105,6 +106,12 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     
     '''
 
+    if ref_scan_id:
+            RM.item_execute(BPlan("recover_zp_csan_pos", 
+                            ref_scan_id, 
+                            zp_move_flag = 0,
+                            smar_move_flag = 1,
+                            move_base = 1))
 
     try:
         if beamline_params:
