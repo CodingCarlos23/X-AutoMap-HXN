@@ -479,6 +479,9 @@ def analyze_data_from_arrays(element_arrays, params):
         print(f"[ANALYSIS] Processing {element} ({color})")
         try:
             img = element_array_dict[element]
+            img_min, img_max = float(img.min()), float(img.max())
+            if img_max>img_min:
+                img = (img-img_min)/(img_max-img_min)
 
             # Use configurable normalization and dilation parameters
             morphology = params.get('morphology_params', {})
@@ -487,8 +490,8 @@ def analyze_data_from_arrays(element_arrays, params):
             img_norm, img_dilated = normalize_and_dilate(img, kernel_size=kernel_size, iterations=iterations)
             
             # Detect blobs
-            b = detect_blobs(img_dilated, 
-                             img_norm, 
+            b = detect_blobs(img, 
+                             img, 
                              min_thresh,
                              min_area, 
                              color, 
