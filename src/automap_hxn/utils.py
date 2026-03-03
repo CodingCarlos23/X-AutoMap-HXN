@@ -328,3 +328,100 @@ def merge_overlapping_boxes_dict(data: dict, overlap_thresh=0.5) -> dict:
     boxes = [add_compatibility_keys(b) for b in boxes]
 
     return {f"Final Box #{i+1}": b for i, b in enumerate(boxes)}
+
+
+def write_array_slowly(container, array, *, key=None, metadata=None, dims=None, specs=None, access_tags=None):
+    """
+    EXPERIMENTAL: Write an array.
+
+    Parameters
+    ----------
+    array : array-like
+    key : str, optional
+        Key (name) for this new node. If None, the server will provide a unique key.
+    metadata : dict, optional
+        User metadata. May be nested. Must contain only basic types
+        (e.g. numbers, strings, lists, dicts) that are JSON-serializable.
+    dims : List[str], optional
+        A label for each dimension of the array.
+    specs : List[Spec], optional
+        List of names that are used to label that the data and/or metadata
+        conform to some named standard specification.
+    access_tags: List[str], optional
+        Server-specific authZ tags in list form, used to confer access to the node.
+
+    """
+    import dask.array
+    import numpy
+    from dask.array.core import normalize_chunks
+    import time
+
+    from tiled.structures.array import ArrayStructure, BuiltinDtype
+    from tiled.structures.core import StructureFamily
+    from tiled.structures.data_source import DataSource
+
+    if not (hasattr(array, "shape") and hasattr(array, "dtype")):
+        # This does not implement enough of the array-like interface.
+        # Coerce to numpy.
+        array = numpy.asarray(array)
+
+    # Determine chunks such that each chunk is not too large to upload.
+    # Any existing chunking will be taken into account.
+    # If the array is small, there will be only one chunk.
+    if hasattr(array, "chunks"):
+        chunks = normalize_chunks(
+            array.chunks,
+            limit=container._SUGGESTED_MAX_UPLOAD_SIZE,
+            dtype=array.dtype,
+            shape=array.shape,
+        )
+    else:
+        chunks = normalize_chunks(
+            tuple("auto" for _ in array.shape),
+            limit=container._SUGGESTED_MAX_UPLOAD_SIZE,
+            dtype=array.dtype,
+            shape=array.shape,
+        )
+
+    structure = ArrayStructure(
+        shape=array.shape,
+        chunks=chunks,
+        dims=dims,
+        data_type=BuiltinDtype.from_numpy_dtype(array.dtype),
+    )
+    client = container.new(
+        StructureFamily.array,
+        [
+            DataSource(structure=structure, structure_family=StructureFamily.array),
+        ],
+        key=key,
+        metadata=metadata,
+        specs=specs,
+        access_tags=access_tags,
+    )
+    chunked = any(len(dim) > 1 for dim in chunks)
+
+    time.sleep(1)  # slight delay to ensure WS callbacks have been triggered
+
+    if not chunked:
+        client.write(array)
+    else:
+        # Fan out client.write_block over each chunk using dask.
+        if isinstance(array, dask.array.Array):
+            da = array.rechunk(chunks)
+        else:
+            da = dask.array.from_array(array, chunks=chunks)
+
+        # Dask inspects the signature and passes block_id in if present.
+        # It also apparently calls it with an empty array and block_id
+        # once, so we catch that call and become a no-op.
+        def write_block(x, block_id, client):
+            if len(block_id):
+                client.write_block(x, block=block_id)
+            return x
+
+        # TODO Is there a fire-and-forget analogue such that we don't need
+        # to bother with the return type?
+        da.map_blocks(write_block, dtype=da.dtype, client=client).compute()
+    return client
+
