@@ -1,12 +1,12 @@
 {
   "execution_params": {
     "mode": "real",
-    "proceed_with_fine_scan": false
+    "proceed_with_fine_scan": true
   },
 
   "scan_params": {
     "label": "cellpose_test",
-    "scan_id": null,
+    "scan_id": 394015,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
     "mot1": "zpssx",
@@ -17,21 +17,24 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
+    "step_size": 0.25,
     "zp_move_flag": 0,
     "smar_move_flag": 0,
     "roi_positions_file": null
   },
 
   "fine_scan_params": {
-    "step_size_fine": 0.05,
+    "step_size_fine": 0.1,
     "exp_t_fine": 0.005,
-    "fine_scan_pad_ratio": 0.0
+    "fine_scan_pad_ratio": 0.3
   },
 
   "export_params": {
     "elem_list": [["Ni"]],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1"
+    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
+    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations"
   },
 
   "calibration_params": {
@@ -79,15 +82,15 @@
       "threshold_abs": 0.3
     },
     "cellpose": {
-      "diameter": 60,
+      "diameter": 30,
       "model_type": "cpsam",
-      "gpu": false,
-      "flow_threshold": 0.4,
+      "gpu": true,
+      "flow_threshold": 1,
       "cellprob_threshold": 0,
       "channels": [0, 0],
-      "min_diameter":30,
-      "max_diameter": 999999,
-      "min_size": 100
+      "min_diameter":20,
+      "max_diameter": 80,
+      "min_size": 10
     },
     "connected_components": {
       "connectivity": 8

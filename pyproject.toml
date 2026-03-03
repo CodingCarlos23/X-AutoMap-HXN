@@ -1,0 +1,38 @@
+[build-system]
+requires = ["pixi", "setuptools"]
+
+[project]
+name = "automap_hxn"
+version = "0.1.0"
+description = "HXN Beamline AutoMap Wokflow"
+requires-python = ">=3.11"
+dependencies = [ "ipython", "jupyter>=1.1.1,<2"]
+authors = [
+    { name = "BNL NSLS-II", email = "pattammattel@bnl.gov" },
+]
+license = { file = "LICENSE" }
+
+[tool.pixi.project]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+channels = ["conda-forge"]
+
+[tool.pixi.dependencies]
+python = "<3.13"
+ipython = ">=9.10.0,<10"
+opencv = "*"
+scikit-image = ">=0.26.0,<0.27"
+pyqt = ">=5.15.11,<6"
+llvmlite = "*"
+matplotlib-inline = ">=0.2.1,<0.3"
+ipympl = ">=0.10.0,<0.11"
+pims = ">=0.7,<0.8"
+doct = ">=1.1.0,<2"
+bluesky-tiled-plugins = ">=2.0.2,<3"
+
+[tool.pixi.pypi-dependencies]
+automap_hxn = {path = ".", editable=true}
+tiled = { version = ">0.2.7", extras=["client"]}
+bluesky-queueserver = ">=0.0.24,<0.0.25"
+bluesky-queueserver-api = ">=0.0.13,<0.0.14"
+cellpose = ">=4.0.8,<5"
+hxntools = ">=0.6.5,<0.7"
