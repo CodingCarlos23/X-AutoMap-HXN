@@ -367,8 +367,6 @@ def export_xrf_tiled(tiled_client, path_raw: str, path_out: str, scan_id: int, n
     # Stack all images and send as single array
     if xrf_images:
         try:
-            from .utils import write_array_slowly
-
             # Stack along first axis: (n_elements, height, width)
             stacked_array = np.stack(xrf_images, axis=0)
             
@@ -376,7 +374,7 @@ def export_xrf_tiled(tiled_client, path_raw: str, path_out: str, scan_id: int, n
             compound_key = "".join(element_names)
             
             # Send stacked array with compound key
-            result = write_array_slowly(scan_container, stacked_array, key=compound_key, access_tags=["tst_sandbox"])
+            result = scan_container.write_array(stacked_array, key=compound_key, access_tags=["tst_sandbox"])
             print(f"[REMOTE] Successfully exported stacked array for elements {element_names} as key '{compound_key}', shape: {stacked_array.shape}")
         except Exception as e:
             print(f"[REMOTE ERROR] Failed to export stacked array for scan {scan_id}: {e}")
