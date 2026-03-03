@@ -3425,6 +3425,7 @@ def load_and_queue(json_path, target_id=None,
     - 'offline': Offline mode (use existing scan)
     - 'analysis-only': Analysis-only mode (use existing scan, return results)
     """
+    plt.close('all')
     
     # 0) Clear caches
     if 'remote_handler' in globals():
@@ -3617,6 +3618,9 @@ def load_and_queue(json_path, target_id=None,
         params['execution_params'],
         fine_scans_tables=fine_scans_tables
     )
+
+    time.sleep(5)
+    plt.close('all')
     
     # D. Run (Will skip if mode != real)
     run_fine_scans(is_real)
