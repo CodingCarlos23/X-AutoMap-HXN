@@ -17,6 +17,7 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
+    "step_size": 0.25,
     "zp_move_flag": 0,
     "smar_move_flag": 0,
     "roi_positions_file": null
