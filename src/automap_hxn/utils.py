@@ -328,3 +328,31 @@ def merge_overlapping_boxes_dict(data: dict, overlap_thresh=0.5) -> dict:
     boxes = [add_compatibility_keys(b) for b in boxes]
 
     return {f"Final Box #{i+1}": b for i, b in enumerate(boxes)}
+
+
+def write_array_slowly(container, array, *, key=None, metadata=None, dims=None, specs=None, access_tags=None):
+    from tiled.structures.array import ArrayStructure
+    from tiled.structures.core import StructureFamily
+    from tiled.structures.data_source import DataSource
+
+    if not (hasattr(array, "shape") and hasattr(array, "dtype")):
+        array = np.asarray(array)
+
+    structure = ArrayStructure.from_array(array)
+    client = container.new(
+        StructureFamily.array,
+        [
+            DataSource(structure=structure, structure_family=StructureFamily.array),
+        ],
+        key=key,
+        metadata=metadata,
+        specs=specs,
+        access_tags=access_tags,
+    )
+
+    time.sleep(1)  # slight delay to ensure WS callbacks have been triggered
+
+    client.write(array)
+
+    return client
+

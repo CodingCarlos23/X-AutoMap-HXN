@@ -3,6 +3,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+import time
 
 import cv2
 import matplotlib
@@ -320,7 +321,6 @@ def export_xrf_tiled(tiled_client, path_raw: str, path_out: str, scan_id: int, n
     meta.update(append_meta_with or {})
 
     # Create a container for this scan's data in the provided parent Tiled client
-    import time
     timestamp = int(time.time())
     scan_container = tiled_client[path_out].create_container(f"automap_{scan_id}_{timestamp}", 
                                                 metadata=meta, 

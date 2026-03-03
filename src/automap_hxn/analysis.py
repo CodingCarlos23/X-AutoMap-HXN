@@ -501,7 +501,6 @@ def analyze_data_from_arrays(element_arrays, params):
                              f"{element}_array", 
                              method=detection_method,
                              **method_params)
-            print(f"{b=}")
             precomputed_blobs[color][(min_thresh, min_area)] = b
             print(f"[ANALYSIS] Found {len(b)} blobs for {element}")
         except Exception as e:
