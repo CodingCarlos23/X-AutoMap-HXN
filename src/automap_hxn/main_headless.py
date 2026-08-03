@@ -6,7 +6,7 @@ import traceback as trackback
 import numpy as np
 import tifffile as tiff
 
-from app_state import AppState
+from .app_state import AppState
 
 # Mode flag: 0 = test (coarse scan only), 1 = real (grid scan only)
 real_or_test = 1

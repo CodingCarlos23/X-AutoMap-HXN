@@ -23,7 +23,7 @@ This tool:
 
 ```bash
 pixi install
-pixi run python src/automap_hxn/main.py
+PYTHONPATH=src pixi run python -m automap_hxn.main
 ```
 
 ## GUI Workflow
