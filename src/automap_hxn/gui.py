@@ -141,7 +141,10 @@ class MainWindow(QWidget):
         super().__init__(parent)
         self.app_state = app_state
         self.setWindowTitle("X-AutoMap")
-        self.setGeometry(100, 100, 1900, 1000)
+        if parent is None:
+            # A standalone window needs an initial screen size. Embedded hosts
+            # should instead use AutoMap's natural layout size.
+            self.resize(1900, 1000)
         self._init_ui_elements()
         self._init_ui()
         self.blob_items = []
