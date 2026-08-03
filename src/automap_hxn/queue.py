@@ -25,6 +25,96 @@ def load_fine_scans_table(csv_path):
     
     return df
 
+def build_fine_scan_requests(json_path, fine_scans_table):
+    """Build Queue Server-ready fine scan requests without submitting them.
+
+    This is safe to call from a GUI preview or offline workflow.  Each returned
+    dictionary contains the user-facing scan details and the exact positional
+    arguments needed for ``fly2d_qserver_scan_export``.
+    """
+    with open(json_path, 'r') as f:
+        params = json.load(f)
+
+    if isinstance(fine_scans_table, str):
+        fine_scans_table = load_fine_scans_table(fine_scans_table)
+
+    required_columns = {'label', 'cx', 'cy', 'num_x', 'num_y'}
+    missing_columns = required_columns - set(fine_scans_table.columns)
+    if missing_columns:
+        raise ValueError(f"Fine scan table is missing columns: {sorted(missing_columns)}")
+
+    execution_params = params.get('execution_params', {})
+    scan_params = params.get('scan_params', {})
+    fine_scan_params = params.get('fine_scan_params', {})
+    export_params = params.get('export_params', {})
+
+    mode = str(execution_params.get('mode', 'simulation')).lower()
+    det_names = scan_params.get('det_names', ['fs', 'eiger2', 'xspress3'])
+    x_motor = scan_params.get('mot1', 'zpssx')
+    y_motor = scan_params.get('mot2', 'zpssy')
+    dwell = fine_scan_params.get('exp_t_fine', scan_params.get('exp_t', 0.01))
+    step_size = fine_scan_params.get('step_size_fine', 0.1)
+    padding = fine_scan_params.get('fine_scan_pad_ratio', 0.25)
+    zp_move_flag = scan_params.get('zp_move_flag', 0)
+    smar_move_flag = scan_params.get('smar_move_flag', 0)
+    ic1_count = scan_params.get('ic1_count', 6000)
+    elem_list = export_params.get('elem_list', [])
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list({elem for group in elem_list for elem in group})
+    export_norm = export_params.get('export_norm', 'sclr1_ch4')
+    data_wd = export_params.get('data_wd', '/data/users/current_user')
+
+    if step_size <= 0:
+        raise ValueError("fine_scan_params.step_size_fine must be greater than zero")
+
+    requests = []
+    for _, row in fine_scans_table.iterrows():
+        label = str(row['label'])
+        cx, cy = float(row['cx']), float(row['cy'])
+        size_x, size_y = float(row['num_x']), float(row['num_y'])
+        padded_x, padded_y = size_x * (1 + padding), size_y * (1 + padding)
+        points_x, points_y = int(padded_x / step_size), int(padded_y / step_size)
+        if points_x == 0 or points_y == 0:
+            raise ValueError(
+                f"{label} has zero scan points; check its size and the fine step size."
+            )
+
+        roi_json = json.dumps({x_motor: cx, y_motor: cy})
+        plan_args = [
+            label, det_names,
+            x_motor, -padded_x / 2, padded_x / 2, points_x,
+            y_motor, -padded_y / 2, padded_y / 2, points_y,
+            dwell, roi_json, "", zp_move_flag, smar_move_flag, ic1_count,
+            json.dumps(elem_list), export_norm, data_wd,
+        ]
+        requests.append({
+            'label': label,
+            'input_row': {
+                'label': label,
+                'cx': cx,
+                'cy': cy,
+                'num_x': size_x,
+                'num_y': size_y,
+            },
+            'center': {'x': cx, 'y': cy},
+            'requested_size': {'x': size_x, 'y': size_y},
+            'padded_size': {'x': padded_x, 'y': padded_y},
+            'relative_range': {
+                'x_start': -padded_x / 2,
+                'x_end': padded_x / 2,
+                'y_start': -padded_y / 2,
+                'y_end': padded_y / 2,
+            },
+            'motors': {'x': x_motor, 'y': y_motor},
+            'step_size': step_size,
+            'points': {'x': points_x, 'y': points_y},
+            'dwell': dwell,
+            'plan_name': 'fly2d_qserver_scan_export',
+            'plan_args': plan_args,
+        })
+
+    return mode, requests
+
 def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     """
     Performs fine scans from a fine_scans_table (DataFrame or CSV path).
@@ -47,42 +137,6 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     with open(json_path, 'r') as f:
         params = json.load(f)
     
-    # Extract parameters from nested structure
-    execution_params = params.get('execution_params', {})
-    scan_params = params.get('scan_params', {})
-    fine_scan_params = params.get('fine_scan_params', {})
-    
-    # Get mode
-    mode = str(execution_params.get('mode', 'simulation')).lower()
-    is_real = (mode == 'real')
-    is_offline = (mode == 'offline')
-    is_sim = (mode == 'simulation')
-    
-    # Extract beamline parameters from scan_params
-    dets = scan_params.get('dets', 'dets_fast')
-    # Get detector names list from config, with fallback to default
-    det_names = scan_params.get('det_names', ['fs', 'eiger2', 'xspress3'])
-    
-    x_motor = scan_params.get('mot1', 'zpssx')
-    y_motor = scan_params.get('mot2', 'zpssy')
-    exp_t = fine_scan_params.get('exp_t_fine', scan_params.get('exp_t', 0.01))
-    step_size = fine_scan_params.get('step_size_fine', 0.1)
-    fine_scan_pad_ratio = fine_scan_params.get('fine_scan_pad_ratio', 0.25)
-    
-    # Additional parameters for fly2d_qserver_scan_export
-    zp_move_flag = scan_params.get('zp_move_flag', 0)
-    smar_move_flag = scan_params.get('smar_move_flag', 0)
-    ic1_count = scan_params.get('ic1_count', 6000)
-    
-    # Export parameters
-    export_params = params.get('export_params', {})
-    elem_list = export_params.get('elem_list', [])
-    # Flatten nested list if needed
-    if elem_list and isinstance(elem_list[0], list):
-        elem_list = list(set(elem for sublist in elem_list for elem in sublist))
-    export_norm = export_params.get('export_norm', 'sclr1_ch4')
-    data_wd = export_params.get('data_wd', '/data/users/current_user')
-    
     # Determine which table to use
     if fine_scans_table is None:
         # Try to load from JSON config
@@ -98,68 +152,33 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
         print(f"[FINE_SCANS] Loading table from CSV: {fine_scans_table}")
         fine_scans_table = load_fine_scans_table(fine_scans_table)
     
+    # Build the same requests that the GUI preview displays.  This keeps the
+    # eventual Queue Server submission and its preview on one calculation path.
+    mode, requests = build_fine_scan_requests(json_path, fine_scans_table)
+    is_real = (mode == 'real')
+
     # Process each fine scan from the table
     print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table (Mode: {mode.upper()})")
     
-    for idx, row in fine_scans_table.iterrows():
+    for request in requests:
         time.sleep(0.5)
-        label = row['label']
-        cx = row['cx']
-        cy = row['cy']
-        sx = row['num_x']
-        sy = row['num_y']
-        
-        # Expand scan size by padding ratio
-        sx_padded = sx * (1 + fine_scan_pad_ratio)
-        sy_padded = sy * (1 + fine_scan_pad_ratio)
-
-        # Define relative scan range around center
-        x_start = -sx_padded / 2
-        x_end = sx_padded / 2
-        y_start = -sy_padded / 2
-        y_end = sy_padded / 2
-
-        # Step counts based on padded size
-        num_steps_x = int(sx_padded / step_size)
-        num_steps_y = int(sy_padded / step_size)
-        
-        # Validate step counts
-        if num_steps_x == 0 or num_steps_y == 0:
-            print(f"⚠️ WARNING: {label} has zero steps! sx_padded={sx_padded:.3f}, sy_padded={sy_padded:.3f}, step_size={step_size:.3f}")
-            print(f"⚠️ This likely indicates a unit mismatch or incorrect step_size_fine value.")
-            print(f"⚠️ Skipping this scan to avoid errors.")
-            continue
-
-        # ROI centered on original center
-        roi = {x_motor: cx, y_motor: cy}
-        roi_json = json.dumps(roi)
+        label = request['label']
+        cx, cy = request['center']['x'], request['center']['y']
+        sx, sy = request['requested_size']['x'], request['requested_size']['y']
+        sx_padded, sy_padded = request['padded_size']['x'], request['padded_size']['y']
+        num_steps_x, num_steps_y = request['points']['x'], request['points']['y']
+        step_size, dwell = request['step_size'], request['dwell']
 
         if is_real:
             print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
             print(f"[FINE_SCANS]   → Padded size: {sx_padded:.2f} x {sy_padded:.2f} μm, step: {step_size:.3f} μm")
-            print(f"[FINE_SCANS]   → Points: {num_steps_x} x {num_steps_y}, range: [{x_start:.2f} to {x_end:.2f}] x [{y_start:.2f} to {y_end:.2f}]")
-            RM.item_add(BPlan(
-                "fly2d_qserver_scan_export",
-                label,
-                det_names,  # Use detector names list, not string
-                x_motor,
-                x_start,
-                x_end,
-                num_steps_x,
-                y_motor,
-                y_start,
-                y_end,
-                num_steps_y,
-                exp_t,
-                roi_json,
-                "",  # scan_id (empty for fine scans)
-                zp_move_flag,
-                smar_move_flag,
-                ic1_count,
-                json.dumps(elem_list),
-                export_norm,
-                data_wd
-            ))
+            scan_range = request['relative_range']
+            print(
+                f"[FINE_SCANS]   → Points: {num_steps_x} x {num_steps_y}, range: "
+                f"[{scan_range['x_start']:.2f} to {scan_range['x_end']:.2f}] x "
+                f"[{scan_range['y_start']:.2f} to {scan_range['y_end']:.2f}]"
+            )
+            RM.item_add(BPlan(request['plan_name'], *request['plan_args']))
         else:
             print(f"[{mode.upper()}] Would queue: {label} (cx={cx:.2f}, cy={cy:.2f})")
     
@@ -454,7 +473,3 @@ def run_fine_scans(is_real):
         wait_for_queue_done()
     else:
         print("[SIM] Would check RM.status() and start queue.")
-
-
-
-

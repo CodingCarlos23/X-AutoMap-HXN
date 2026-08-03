@@ -21,6 +21,7 @@ from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
 from qtpy.QtWidgets import QStyle, QStyleOptionButton
 
 from .app_state import AppState
+from .queue import build_fine_scan_requests
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -402,7 +403,7 @@ class MainWindow(QWidget):
         union_list_layout.addWidget(union_btn)
         union_list_layout.addWidget(add_box_btn)
 
-        send_to_queue_btn = QPushButton("Send to Queue Server")
+        send_to_queue_btn = QPushButton("Preview Queue Plan")
         send_to_queue_btn.clicked.connect(self.send_to_queue_server)
         clear_queue_btn = QPushButton("Clear")
         clear_queue_btn.clicked.connect(self.clear_queue_server_list)
@@ -779,6 +780,7 @@ f"Length: {ub['length']} px<br>"
             item_text = f"Custom Box #{self.custom_box_number}"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, self.custom_box_number)
+            item.setData(Qt.UserRole + 1, new_union)
             item.setToolTip(self._format_union_tooltip(new_union, self.custom_box_number))
             self.union_list_widget.addItem(item)
             
@@ -834,6 +836,7 @@ f"Length: {ub['length']} px<br>"
         for idx, ub in union_objects.items():
             item = QListWidgetItem(f"Union Box #{idx}")
             item.setToolTip(self._format_union_tooltip(ub, idx))
+            item.setData(Qt.UserRole + 1, ub)
             self.union_list_widget.addItem(item)
 
         if self.app_state.selected_directory:
@@ -875,6 +878,7 @@ f"Length: {ub['length']} px<br>"
             if item.text() not in existing_texts:
                 new_item = QListWidgetItem(item.text())
                 new_item.setToolTip(item.toolTip())
+                new_item.setData(Qt.UserRole + 1, item.data(Qt.UserRole + 1))
                 self.queue_server_list.addItem(new_item)
 
     def get_elements_list(self):
@@ -883,12 +887,96 @@ f"Length: {ub['length']} px<br>"
         for blob in all_blobs:
             item = QListWidgetItem(blob['Box'])
             item.setToolTip(self._format_blob_tooltip(blob))
+            item.setData(Qt.UserRole + 1, self._scan_geometry_from_blob(blob))
             self.union_list_widget.addItem(item)
 
+    def _scan_geometry_from_blob(self, blob):
+        """Return a blob in the same real-space format used by union boxes."""
+        center_x, center_y = blob['center']
+        size = blob['box_size']
+        size_x = size * self.app_state.microns_per_pixel_x
+        size_y = size * self.app_state.microns_per_pixel_y
+        return {
+            'real_center': (
+                (center_x * self.app_state.microns_per_pixel_x) + self.app_state.true_origin_x,
+                (center_y * self.app_state.microns_per_pixel_y) + self.app_state.true_origin_y,
+            ),
+            'real_size': (size_x, size_y),
+            'real_area': size_x * size_y,
+        }
+
     def send_to_queue_server(self):
-        # This requires interaction with a queue server, which is out of scope for the GUI implementation.
-        QMessageBox.information(self, "Queue Server", "Sending data to queue server is not implemented in this version.")
-        pass
+        fine_scan_rows = self._staged_fine_scan_rows()
+        if not fine_scan_rows:
+            QMessageBox.information(self, "Queue Preview", "Add one or more union boxes to the list first.")
+            return
+
+        default_config = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
+        config_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select fine-scan configuration",
+            str(default_config),
+            "JSON files (*.json)",
+        )
+        if not config_path:
+            return
+
+        import pandas as pd
+        try:
+            mode, requests = build_fine_scan_requests(config_path, pd.DataFrame(fine_scan_rows))
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, "Queue Preview", f"Could not build scan requests:\n{error}")
+            return
+
+        first = requests[0]
+        safety_message = (
+            "OFFLINE DRY RUN — no scans will be submitted."
+            if mode != "real"
+            else "REAL configuration detected — this screen is still preview-only; no scans have been submitted."
+        )
+        summary = (
+            f"{safety_message}\n\n"
+            "Preview function:\n"
+            "build_fine_scan_requests(config_path, fine_scans_table)\n\n"
+            f"Planned scans: {len(requests)}\n\n"
+            f"First scan: {first['label']}\n"
+            "Box row passed to the function:\n"
+            f"{json.dumps(first['input_row'])}\n\n"
+            f"Center: X={first['center']['x']:.2f} µm, Y={first['center']['y']:.2f} µm\n"
+            f"Requested size: {first['requested_size']['x']:.2f} × {first['requested_size']['y']:.2f} µm\n"
+            f"Padded size: {first['padded_size']['x']:.2f} × {first['padded_size']['y']:.2f} µm\n"
+            f"Motors: {first['motors']['x']} / {first['motors']['y']}\n"
+            f"Points: {first['points']['x']} × {first['points']['y']}\n"
+            f"Dwell: {first['dwell']:.4f} s\n"
+            f"Plan: {first['plan_name']}\n\n"
+            "Later real-submission function:\n"
+            "headless_send_queue_fine_scan(config_path, fine_scans_table)"
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Queue Plan Preview")
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText(summary)
+        dialog.setDetailedText(json.dumps(requests, indent=2))
+        dialog.exec_()
+
+    def _staged_fine_scan_rows(self):
+        """Convert selected GUI union boxes into fine-scan table rows in microns."""
+        rows = []
+        for index in range(self.queue_server_list.count()):
+            item = self.queue_server_list.item(index)
+            union = item.data(Qt.UserRole + 1)
+            if not union:
+                continue
+            real_center = union['real_center']
+            real_size = union['real_size']
+            rows.append({
+                'label': item.text(),
+                'cx': real_center[0],
+                'cy': real_center[1],
+                'num_x': real_size[0],
+                'num_y': real_size[1],
+            })
+        return rows
 
     def clear_queue_server_list(self):
         self.queue_server_list.clear()
