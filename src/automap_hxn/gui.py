@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
+from qtpy.QtWidgets import QStyle, QStyleOptionButton
 
 from .app_state import AppState
 
@@ -93,6 +94,41 @@ class ZoomableGraphicsView(QGraphicsView):
                 self.scene().addItem(circle)
                 self.highlight_items.append(circle)
 
+
+class ChannelCheckBox(QCheckBox):
+    """Checkbox with a durable channel-colored outline and checkmark."""
+
+    def __init__(self, text, color, parent=None):
+        super().__init__(text, parent)
+        self._channel_color = QColor(color)
+        self.setStyleSheet(
+            "QCheckBox::indicator {"
+            " width: 14px; height: 14px;"
+            f" border: 2px solid {color};"
+            " background: #ffffff;"
+            "}"
+        )
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(
+            QStyle.SE_CheckBoxIndicator, option, self
+        )
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(self._channel_color, 2))
+        painter.drawLine(indicator.left() + 3, indicator.center().y(),
+                         indicator.center().x() - 1, indicator.bottom() - 3)
+        painter.drawLine(indicator.center().x() - 1, indicator.bottom() - 3,
+                         indicator.right() - 2, indicator.top() + 3)
+        painter.end()
+
+
 class MainWindow(QWidget):
     """AutoMap's embeddable Qt widget.
 
@@ -120,6 +156,7 @@ class MainWindow(QWidget):
         self.origin_x_input = QDoubleSpinBox()
         self.origin_y_input = QDoubleSpinBox()
         self.graphics_view = None
+        self.graphics_scene = None
         self.pixmap_item = None
         self.checkboxes = {}
         self.sliders = {}
@@ -164,7 +201,6 @@ class MainWindow(QWidget):
         top_grid.setColumnStretch(1, 1) # Allow column 1 to expand
         layout.addLayout(top_grid)
 
-        self.file_list_widget.itemChanged.connect(self.update_selection)
         layout.addWidget(self.file_list_widget)
         param_layout = QGridLayout()
         param_layout.addWidget(QLabel("Microns per Pixel X:"), 0, 0)
@@ -233,25 +269,36 @@ class MainWindow(QWidget):
         self.file_list_widget.clear()
         for fname in sorted(os.listdir(directory)):
             if fname.lower().endswith(('.tif', '.tiff')):
-                item = QListWidgetItem(fname)
-                item.setCheckState(Qt.Unchecked)
+                item = QListWidgetItem()
+                checkbox = ChannelCheckBox(fname, "#6b7280")
+                item.setSizeHint(checkbox.sizeHint())
                 self.file_list_widget.addItem(item)
+                self.file_list_widget.setItemWidget(item, checkbox)
+                checkbox.stateChanged.connect(
+                    lambda state, selected_item=item, selected_checkbox=checkbox:
+                    self.update_file_selection(selected_item, selected_checkbox, state)
+                )
                 self.app_state.file_paths.append(os.path.join(directory, fname))
 
-    def update_selection(self, item):
-        if self.app_state.selected_files_order is None:
-            self.app_state.selected_files_order = []
+    def update_file_selection(self, item, checkbox, state):
+        """Track TIFF selections and enforce the maximum of three files."""
+        index = self.file_list_widget.row(item)
+        selected = list(self.app_state.selected_files_order or [])
 
-        checked_indices = [i for i in range(self.file_list_widget.count()) if self.file_list_widget.item(i).checkState() == Qt.Checked]
+        # PySide6 emits the stateChanged argument as an int, while Qt.Checked
+        # may be an enum object.  The widget state is binding-independent.
+        if checkbox.isChecked():
+            if index not in selected and len(selected) >= 3:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.blockSignals(False)
+                return
+            if index not in selected:
+                selected.append(index)
+        elif index in selected:
+            selected.remove(index)
 
-        self.app_state.selected_files_order = [idx for idx in self.app_state.selected_files_order if idx in checked_indices]
-
-        for i in checked_indices:
-            if i not in self.app_state.selected_files_order:
-                if len(self.app_state.selected_files_order) < 3:
-                    self.app_state.selected_files_order.append(i)
-                else:
-                    item.setCheckState(Qt.Unchecked)
+        self.app_state.selected_files_order = selected
 
     def on_confirm_clicked(self):
         self.app_state.microns_per_pixel_x = self.float_input_micron_x.value()
@@ -307,13 +354,15 @@ class MainWindow(QWidget):
         self.norm_dilated = [normalize_and_dilate(im) for im in self.source_images]
         
         merged_rgb = cv2.merge([nd[0] for nd in self.norm_dilated])
-        scene = QGraphicsScene()
+        # Keep an owned reference: PySide6 may destroy a scene that is only a
+        # local variable, leaving the view blank once setup returns.
+        self.graphics_scene = QGraphicsScene(self)
         q_img = QImage(merged_rgb.data, merged_rgb.shape[1], merged_rgb.shape[0], merged_rgb.shape[1] * 3, QImage.Format_RGB888)
         
-        self.graphics_view = ZoomableGraphicsView(scene, self)
+        self.graphics_view = ZoomableGraphicsView(self.graphics_scene, self)
         self.graphics_view.current_qimage = q_img
         self.pixmap_item = QGraphicsPixmapItem(QPixmap.fromImage(q_img))
-        scene.addItem(self.pixmap_item)
+        self.graphics_scene.addItem(self.pixmap_item)
 
     def _create_controls_panel(self):
         controls_widget = QWidget()
@@ -379,15 +428,30 @@ class MainWindow(QWidget):
         legend_label.setStyleSheet("font-weight: bold; font-size: 12pt;")
         legend_layout.addWidget(legend_label)
         for i, color in enumerate(self.app_state.element_colors):
-            cb = QCheckBox(self.app_state.file_names[i])
+            cb = ChannelCheckBox(self.app_state.file_names[i], color)
             cb.setChecked(True)
-            cb.setStyleSheet(f"color: {color}")
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {color}; }}"
+                "QCheckBox::indicator {"
+                " width: 14px; height: 14px;"
+                f" border: 2px solid {color};"
+                " background: #ffffff;"
+                "}"
+            )
             cb.stateChanged.connect(self.update_boxes)
             self.checkboxes[color] = cb
             legend_layout.addWidget(cb)
 
+        self.union_checkbox = ChannelCheckBox("Union Boxes", "black")
         self.union_checkbox.setChecked(True)
-        self.union_checkbox.setStyleSheet("color: black")
+        self.union_checkbox.setStyleSheet(
+            "QCheckBox { color: black; }"
+            "QCheckBox::indicator {"
+            " width: 14px; height: 14px;"
+            " border: 2px solid #000000;"
+            " background: #ffffff;"
+            "}"
+        )
         self.union_checkbox.stateChanged.connect(self.update_boxes)
         legend_layout.addWidget(self.union_checkbox)
         self.checkboxes['union'] = self.union_checkbox
@@ -470,9 +534,11 @@ class MainWindow(QWidget):
         QApplication.instance().postEvent(self, ComputationFinishedEvent())
 
     def customEvent(self, event):
-        if isinstance(event, UpdateProgressEvent):
-            self.progress_bar.setValue(event.value)
-        elif isinstance(event, ComputationFinishedEvent):
+        # PySide6 wraps posted custom events as QEvent, so checking the Python
+        # subclass with isinstance is unreliable across Qt bindings.
+        if event.type() == UpdateProgressEvent.EVENT_TYPE:
+            self.progress_bar.setValue(self.app_state.current_iteration)
+        elif event.type() == ComputationFinishedEvent.EVENT_TYPE:
             self.progress_bar.hide()
             if self.app_state.selected_directory and self.app_state.precomputed_blobs:
                 output_path = Path(self.app_state.selected_directory) / "precomputed_blobs.pkl"
