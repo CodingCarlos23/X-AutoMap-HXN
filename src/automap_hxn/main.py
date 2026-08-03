@@ -1,19 +1,18 @@
 import sys
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
-from app_state import AppState
-from gui import MainWindow
+from .gui import create_automap_widget
+
+def main():
+    """Run AutoMap as a standalone application for local development."""
+    # Create the application instance
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    main_win = create_automap_widget()
+
+    main_win.show()
+    return app.exec()
+
 
 if __name__ == '__main__':
-    # Create the application instance
-    app = QApplication(sys.argv)
-
-    # Create the application state object
-    app_state = AppState()
-
-    # Create the main window, passing the state to it
-    main_win = MainWindow(app_state)
-
-    # Show the window and start the event loop
-    main_win.show()
-    sys.exit(app.exec_())
+    sys.exit(main())

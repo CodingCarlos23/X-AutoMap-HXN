@@ -10,16 +10,16 @@ import cv2
 import numpy as np
 import tifffile as tiff
 
-from PyQt5.QtWidgets import (
+from qtpy.QtWidgets import (
     QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QCheckBox, QSlider, QFileDialog, QListWidget, QListWidgetItem,
     QMessageBox, QDoubleSpinBox, QProgressBar, QGridLayout, QGraphicsEllipseItem
 )
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QColor, QPen
-from PyQt5.QtCore import Qt, QRect, QTimer, QPoint, QEvent
+from qtpy.QtGui import QPixmap, QImage, QPainter, QColor, QPen
+from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
 
-from app_state import AppState
+from .app_state import AppState
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -94,8 +94,15 @@ class ZoomableGraphicsView(QGraphicsView):
                 self.highlight_items.append(circle)
 
 class MainWindow(QWidget):
-    def __init__(self, app_state):
-        super().__init__()
+    """AutoMap's embeddable Qt widget.
+
+    The historical name is retained so existing standalone launchers keep
+    working.  Hosts should pass their parent widget and reuse their existing
+    QApplication instance rather than create another one.
+    """
+
+    def __init__(self, app_state, parent=None):
+        super().__init__(parent)
         self.app_state = app_state
         self.setWindowTitle("X-AutoMap")
         self.setGeometry(100, 100, 1900, 1000)
@@ -827,3 +834,12 @@ class ComputationFinishedEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.User + 2)
     def __init__(self):
         super().__init__(self.EVENT_TYPE)
+
+
+def create_automap_widget(parent=None, app_state=None):
+    """Create AutoMap for embedding in another Qt application's layout.
+
+    No QApplication is created here; this is safe to call from the shared HXN
+    GUI, which already owns the process-wide application instance.
+    """
+    return MainWindow(app_state or AppState(), parent=parent)
