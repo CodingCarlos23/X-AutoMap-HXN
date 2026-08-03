@@ -23,12 +23,11 @@ This tool:
 
 ```bash
 pixi install
-pixi run python -m pip install --no-deps --no-build-isolation -e .
 pixi run python -m automap_hxn.main
 ```
 
-The editable install makes `automap_hxn` importable from this checkout while
-you develop. After it has been installed once, launch the standalone GUI with:
+Pixi installs `automap_hxn` from this checkout as an editable package. After
+the environment has been installed once, launch the standalone GUI with:
 
 ```bash
 pixi run python -m automap_hxn.main
@@ -39,6 +38,40 @@ The package can also be imported by another Qt application:
 ```python
 from automap_hxn.gui import create_automap_widget
 ```
+
+## Headless QueueServer Workflow
+
+The standalone GUI performs local TIFF analysis only. The existing headless
+workflow is the path that can submit scans to the beamline QueueServer.
+
+```bash
+pixi run python scripts/remote.py
+```
+
+> **Warning:** `scripts/remote.py` is intended for an authorized beamline
+> session. It connects to Tiled and runs the mosaic/headless workflow. Its
+> current configuration, `configs/initial_scan_sim.json`, is named like a
+> simulation file but presently sets `execution_params.mode` to `real`; it can
+> submit scan plans to QueueServer. Do not run it on a development machine or
+> against a production QueueServer without reviewing the configuration.
+
+For the core `load_and_queue` workflow, behavior is controlled by
+`execution_params.mode` in the JSON configuration:
+
+- `simulation` — prepares the workflow and waits for manually supplied TIFFs;
+  it does not submit the coarse or fine scans.
+- `offline` — analyzes and exports data from an existing scan ID; it does not
+  submit scans.
+- `real` — submits coarse and fine scan plans to QueueServer.
+
+`scripts/remote.py` adds mosaic and piezo operations around that core workflow,
+so changing its JSON mode alone does not make it a safe local test command.
+
+`src/automap_hxn/main_headless.py` is currently experimental reference code,
+not a command-line launcher: its execution call is commented out. Use
+`scripts/remote.py` only when the reviewed configuration and beamline context
+are appropriate. A dedicated, safe simulation command is planned but is not
+yet provided.
 
 ## GUI Workflow
 
