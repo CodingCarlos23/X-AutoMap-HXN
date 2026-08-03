@@ -23,7 +23,21 @@ This tool:
 
 ```bash
 pixi install
-PYTHONPATH=src pixi run python -m automap_hxn.main
+pixi run python -m pip install --no-deps --no-build-isolation -e .
+pixi run python -m automap_hxn.main
+```
+
+The editable install makes `automap_hxn` importable from this checkout while
+you develop. After it has been installed once, launch the standalone GUI with:
+
+```bash
+pixi run python -m automap_hxn.main
+```
+
+The package can also be imported by another Qt application:
+
+```python
+from automap_hxn.gui import create_automap_widget
 ```
 
 ## GUI Workflow
@@ -61,4 +75,4 @@ pixi run python examples/svg_export.py
 - **cellpose** - Deep learning segmentation
 - **hxntools** - HXN beamline utilities
 - **opencv**, **scikit-image** - Image processing
-- **PyQt5** - GUI framework
+- **QtPy / PySide6** - GUI framework
