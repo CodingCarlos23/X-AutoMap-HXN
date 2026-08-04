@@ -285,28 +285,16 @@ class MainWindow(QWidget):
                 self.app_state.file_paths.append(os.path.join(directory, fname))
 
     def update_file_selection(self, item, checkbox, state):
-        """Track TIFF selections and enforce the maximum of three files."""
-        index = self.file_list_widget.row(item)
+        """Track the selected TIFFs; confirmation requires exactly three."""
         checked_indices = [
             row for row in range(self.file_list_widget.count())
             if self.file_list_widget.itemWidget(self.file_list_widget.item(row)).isChecked()
         ]
 
-        # Use the actual widget states as the authority. This prevents a stale
-        # selection list from allowing a fourth TIFF to remain selected.
-        if len(checked_indices) > 3:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(False)
-            checkbox.blockSignals(False)
-            QMessageBox.warning(
-                self,
-                "Maximum reached",
-                "Select at most three TIFF element images. Deselect one before choosing another.",
-            )
-            checked_indices.remove(index)
-
         # Preserve the user's selection order, which determines the RGB
-        # channel assignment, while removing any unchecked entries.
+        # channel assignment, while removing any unchecked entries. The
+        # existing Confirm action rejects anything other than exactly three,
+        # which avoids modifying a checkbox during its own click event.
         selected = [
             row for row in (self.app_state.selected_files_order or [])
             if row in checked_indices
