@@ -21,7 +21,12 @@ from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
 from qtpy.QtWidgets import QStyle, QStyleOptionButton
 
 from .app_state import AppState
-from .queue import build_fine_scan_requests, submit_fine_scan_requests
+from .queue import (
+    build_coarse_scan_requests,
+    build_fine_scan_requests,
+    submit_fine_scan_requests,
+    submit_queue_requests,
+)
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -178,6 +183,8 @@ class MainWindow(QWidget):
         self.x_micron_label = QLabel("X Real: 0")
         self.y_micron_label = QLabel("Y Real: 0")
         self.progress_bar = QProgressBar()
+        self.mosaic_scan_btn = None
+        self.analysis_widget = None
 
     def _init_ui(self):
         self.outer_layout = QVBoxLayout(self)
@@ -197,6 +204,10 @@ class MainWindow(QWidget):
 
         self.dir_label = QLabel("No directory selected.")
         top_grid.addWidget(self.dir_label, 0, 1, Qt.AlignLeft)
+
+        self.mosaic_scan_btn = QPushButton("Perform Mosaic Scan")
+        self.mosaic_scan_btn.clicked.connect(self.perform_mosaic_scan)
+        top_grid.addWidget(self.mosaic_scan_btn, 0, 2)
 
         load_backup_btn = QPushButton("Load Backup")
         load_backup_btn.clicked.connect(self.on_load_backup_clicked)
@@ -268,6 +279,7 @@ class MainWindow(QWidget):
         if not directory: return
         self.app_state.selected_directory = directory
         self.dir_label.setText(directory)
+        self.mosaic_scan_btn.hide()
         self.app_state.file_paths = []
         self.app_state.selected_files_order = []
         self.file_list_widget.clear()
@@ -303,6 +315,56 @@ class MainWindow(QWidget):
             if row not in selected:
                 selected.append(row)
         self.app_state.selected_files_order = selected
+        if checked_indices and self.mosaic_scan_btn is not None:
+            self.mosaic_scan_btn.hide()
+
+    def perform_mosaic_scan(self):
+        """Submit the initial coarse scan before the GUI enters image-analysis mode."""
+        config_path = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
+        try:
+            mode, requests = build_coarse_scan_requests(config_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, "Mosaic Scan", f"Could not build the initial scan:\n{error}")
+            return
+
+        if mode != "real":
+            QMessageBox.warning(
+                self,
+                "Mosaic Scan Disabled",
+                "The initial-scan configuration is not in real mode, so no plans were sent.",
+            )
+            return
+
+        scan = requests[-1]
+        confirmation = QMessageBox(self)
+        confirmation.setWindowTitle("Confirm Mosaic Scan")
+        confirmation.setIcon(QMessageBox.Warning)
+        confirmation.setText(
+            "The initial coarse scan from initial_scan_sim.json will be sent to QueueServer.\n\n"
+            f"Plan: {scan['plan_name']}\n"
+            f"Center: X={scan['center'][next(iter(scan['center']))]:.2f} µm, "
+            f"Y={list(scan['center'].values())[1]:.2f} µm\n"
+            f"Points: {scan['points']['x']} × {scan['points']['y']}\n\n"
+            "Submit and start the queue?"
+        )
+        confirmation.setDetailedText(json.dumps(requests, indent=2))
+        confirmation.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
+        confirmation.button(QMessageBox.Ok).setText("Submit and Start Queue")
+        if confirmation.exec_() != QMessageBox.Ok:
+            return
+
+        try:
+            result = submit_queue_requests(requests)
+        except Exception as error:
+            QMessageBox.critical(self, "Mosaic Scan Failed", f"No further plans were sent.\n\n{error}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Mosaic Scan Submitted",
+            f"QueueServer accepted and started {len(result['submitted'])} plan(s).\n\n"
+            "For the local simulator, receipts are written in hxn-qserver-sim/output/.",
+        )
 
     def on_confirm_clicked(self):
         self.app_state.microns_per_pixel_x = self.float_input_micron_x.value()
@@ -323,8 +385,8 @@ class MainWindow(QWidget):
 
     def _init_analysis_gui(self, from_backup=False):
         self.setup_widget.setParent(None)
-        main_widget = QWidget()
-        self.main_layout = QHBoxLayout(main_widget)
+        self.analysis_widget = QWidget()
+        self.main_layout = QHBoxLayout(self.analysis_widget)
         
         left_panel = QVBoxLayout()
         self._create_image_view_panel()
@@ -333,7 +395,7 @@ class MainWindow(QWidget):
         self.main_layout.addLayout(left_panel)
 
         self._create_controls_panel()
-        self.outer_layout.addWidget(main_widget)
+        self.outer_layout.addWidget(self.analysis_widget)
         
         self.progress_bar.setParent(None)
         self.outer_layout.addWidget(self.progress_bar)
@@ -343,6 +405,25 @@ class MainWindow(QWidget):
             self.update_boxes()
         else:
             QTimer.singleShot(100, self._start_blob_computation)
+
+    def return_to_selection(self):
+        """Discard the current analysis screen and rebuild the TIFF selector."""
+        if self.analysis_widget is not None:
+            self.outer_layout.removeWidget(self.analysis_widget)
+            self.analysis_widget.deleteLater()
+            self.analysis_widget = None
+        self.outer_layout.removeWidget(self.progress_bar)
+        self.progress_bar.deleteLater()
+        self.setup_widget.deleteLater()
+        if self.graphics_scene is not None:
+            self.graphics_scene.deleteLater()
+
+        # Keep the same AppState instance for embedded hosts, but reset it to
+        # the original selection-screen defaults before rebuilding the widgets.
+        self.app_state.__init__()
+        self._init_ui_elements()
+        self.setup_widget = self._create_setup_screen()
+        self.outer_layout.addWidget(self.setup_widget)
 
 
     def _create_image_view_panel(self):
@@ -375,10 +456,13 @@ class MainWindow(QWidget):
         # Exit/Reset
         exit_btn = QPushButton("Exit")
         exit_btn.clicked.connect(self.close)
+        return_btn = QPushButton("Return to Selection")
+        return_btn.clicked.connect(self.return_to_selection)
         reset_btn = QPushButton("Reset View")
         reset_btn.clicked.connect(lambda: self.graphics_view.resetTransform())
         
         button_layout = QHBoxLayout()
+        button_layout.addWidget(return_btn)
         button_layout.addWidget(reset_btn)
         button_layout.addWidget(exit_btn)
         controls_layout.addLayout(button_layout)

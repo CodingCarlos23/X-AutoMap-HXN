@@ -116,8 +116,63 @@ def build_fine_scan_requests(json_path, fine_scans_table):
     return mode, requests
 
 
-def submit_fine_scan_requests(requests, *, auto_open_environment=True):
-    """Submit pre-built fine-scan requests and start a clean QueueServer queue.
+def build_coarse_scan_requests(json_path):
+    """Build the initial coarse scan defined by an AutoMap JSON configuration."""
+    with open(json_path, "r") as file:
+        params = json.load(file)
+
+    execution_params = params.get("execution_params", {})
+    scan_params = params.get("scan_params", {})
+    export_params = params.get("export_params", {})
+    mode = str(execution_params.get("mode", "simulation")).lower()
+
+    x_motor = scan_params.get("mot1", "zpssx")
+    y_motor = scan_params.get("mot2", "zpssy")
+    x_start, x_end = float(scan_params.get("mot1_s", 0)), float(scan_params.get("mot1_e", 0))
+    y_start, y_end = float(scan_params.get("mot2_s", 0)), float(scan_params.get("mot2_e", 0))
+    step_size = scan_params.get("step_size_coarse", scan_params.get("step_size", 0.25))
+    if step_size <= 0:
+        raise ValueError("scan_params.step_size must be greater than zero")
+
+    x_points = int(abs(x_end - x_start) / step_size)
+    y_points = int(abs(y_end - y_start) / step_size)
+    if x_points == 0 or y_points == 0:
+        raise ValueError("Initial coarse scan has zero points; check its range and step size.")
+
+    elem_list = export_params.get("elem_list", [])
+    if elem_list and isinstance(elem_list[0], list):
+        elem_list = list({element for group in elem_list for element in group})
+    center = {x_motor: (x_start + x_end) / 2, y_motor: (y_start + y_end) / 2}
+    plan_args = [
+        scan_params.get("label", "initial_coarse_scan"),
+        scan_params.get("det_names", ["fs", "eiger2", "xspress3"]),
+        x_motor, x_start, x_end, x_points,
+        y_motor, y_start, y_end, y_points,
+        scan_params.get("exp_t_coarse", scan_params.get("exp_t", 0.01)),
+        json.dumps(center), scan_params.get("scan_id") or "",
+        scan_params.get("zp_move_flag", 0), scan_params.get("smar_move_flag", 0),
+        scan_params.get("ic1_count", 6000), json.dumps(elem_list),
+        export_params.get("export_norm", "sclr1_ch4"),
+        export_params.get("data_wd", "."),
+    ]
+    return mode, [
+        {
+            "label": "Reset piezos",
+            "plan_name": "piezos_to_zero",
+            "plan_args": [],
+        },
+        {
+            "label": scan_params.get("label", "Initial coarse scan"),
+            "plan_name": "fly2d_qserver_scan_export",
+            "plan_args": plan_args,
+            "center": center,
+            "points": {"x": x_points, "y": y_points},
+        },
+    ]
+
+
+def submit_queue_requests(requests, *, auto_open_environment=True):
+    """Submit pre-built queue requests and start a clean QueueServer queue.
 
     This is intentionally separate from request construction so the GUI can show
     the exact plans before a user confirms submission. The function only starts
@@ -175,6 +230,11 @@ def submit_fine_scan_requests(requests, *, auto_open_environment=True):
         "queue_start_response": response,
         "status": RM.status(),
     }
+
+
+def submit_fine_scan_requests(requests, *, auto_open_environment=True):
+    """Backward-compatible name for submitting GUI-generated fine scans."""
+    return submit_queue_requests(requests, auto_open_environment=auto_open_environment)
 
 def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     """
