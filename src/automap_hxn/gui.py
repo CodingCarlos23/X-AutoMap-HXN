@@ -155,6 +155,11 @@ class MainWindow(QWidget):
         self._init_ui()
         self.blob_items = []
         self.union_box_items = []
+        # A blob calculation continues in a background thread.  Keep a
+        # generation number so events/results from a discarded analysis view
+        # cannot update the next one.
+        self._analysis_generation = 0
+        self._analysis_lock = threading.Lock()
         self.source_images = []
         self.norm_dilated = []
 
@@ -384,6 +389,10 @@ class MainWindow(QWidget):
         self._init_analysis_gui()
 
     def _init_analysis_gui(self, from_backup=False):
+        with self._analysis_lock:
+            self._analysis_generation += 1
+            generation = self._analysis_generation
+
         self.setup_widget.setParent(None)
         self.analysis_widget = QWidget()
         self.main_layout = QHBoxLayout(self.analysis_widget)
@@ -404,10 +413,20 @@ class MainWindow(QWidget):
             self.progress_bar.hide()
             self.update_boxes()
         else:
-            QTimer.singleShot(100, self._start_blob_computation)
+            QTimer.singleShot(
+                100, lambda: self._start_blob_computation(generation)
+            )
 
     def return_to_selection(self):
         """Discard the current analysis screen and rebuild the TIFF selector."""
+        # The scene owns its graphics items.  Clear Python references before
+        # destroying that scene, otherwise the next analysis run tries to
+        # remove wrappers for C++ items that Qt has already deleted.
+        with self._analysis_lock:
+            self._analysis_generation += 1
+            self.blob_items.clear()
+            self.union_box_items.clear()
+
         if self.analysis_widget is not None:
             self.outer_layout.removeWidget(self.analysis_widget)
             self.analysis_widget.deleteLater()
@@ -417,6 +436,9 @@ class MainWindow(QWidget):
         self.setup_widget.deleteLater()
         if self.graphics_scene is not None:
             self.graphics_scene.deleteLater()
+        self.graphics_scene = None
+        self.graphics_view = None
+        self.pixmap_item = None
 
         # Keep the same AppState instance for embedded hosts, but reset it to
         # the original selection-screen defaults before rebuilding the widgets.
@@ -587,9 +609,16 @@ class MainWindow(QWidget):
         controls_widget.setLayout(controls_layout)
         self.main_layout.addWidget(controls_widget)
 
-    def _start_blob_computation(self):
-        self.app_state.precomputed_blobs = {color: {} for color in self.app_state.element_colors}
-        self.app_state.current_iteration = 0
+    def _start_blob_computation(self, expected_generation=None):
+        with self._analysis_lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._analysis_generation
+            ):
+                return
+            generation = self._analysis_generation
+            self.app_state.precomputed_blobs = {color: {} for color in self.app_state.element_colors}
+            self.app_state.current_iteration = 0
         
         thresholds_range = list(range(0, 256, 10))
         area_range = list(range(10, 501, 10))
@@ -600,33 +629,55 @@ class MainWindow(QWidget):
         self.progress_bar.setFormat("Computing blobs... %p%")
         self.progress_bar.show()
 
-        threading.Thread(target=self._blob_computation_thread, args=(thresholds_range, area_range), daemon=True).start()
+        threading.Thread(
+            target=self._blob_computation_thread,
+            args=(
+                generation,
+                thresholds_range,
+                area_range,
+                list(self.app_state.element_colors),
+                list(self.app_state.file_names),
+                list(self.source_images),
+                [nd[1] for nd in self.norm_dilated],
+            ),
+            daemon=True,
+        ).start()
 
-    def _blob_computation_thread(self, thresholds_range, area_range):
-        dilated_imgs = [nd[1] for nd in self.norm_dilated]
-        img_r, img_g, img_b = self.source_images
+    def _blob_computation_thread(
+        self, generation, thresholds_range, area_range, colors, file_names,
+        source_images, dilated_imgs,
+    ):
         
-        for i, color in enumerate(self.app_state.element_colors):
+        for i, color in enumerate(colors):
             for t_val in thresholds_range:
                 for a_val in area_range:
                     blobs = self._detect_blobs(
                         dilated_imgs[i],
-                        [img_r, img_g, img_b][i],
+                        source_images[i],
                         t_val, a_val, color,
-                        self.app_state.file_names[i]
+                        file_names[i],
                     )
-                    self.app_state.precomputed_blobs[color][(t_val, a_val)] = blobs
-                    self.app_state.current_iteration += 1
-                    QApplication.instance().postEvent(self, UpdateProgressEvent(self.app_state.current_iteration))
+                    with self._analysis_lock:
+                        if generation != self._analysis_generation:
+                            return
+                        self.app_state.precomputed_blobs[color][(t_val, a_val)] = blobs
+                        self.app_state.current_iteration += 1
+                        iteration = self.app_state.current_iteration
+                    QApplication.instance().postEvent(
+                        self, UpdateProgressEvent(iteration, generation)
+                    )
         
-        QApplication.instance().postEvent(self, ComputationFinishedEvent())
+        QApplication.instance().postEvent(self, ComputationFinishedEvent(generation))
 
     def customEvent(self, event):
         # PySide6 wraps posted custom events as QEvent, so checking the Python
         # subclass with isinstance is unreliable across Qt bindings.
         if event.type() == UpdateProgressEvent.EVENT_TYPE:
-            self.progress_bar.setValue(self.app_state.current_iteration)
+            if event.generation == self._analysis_generation:
+                self.progress_bar.setValue(event.value)
         elif event.type() == ComputationFinishedEvent.EVENT_TYPE:
+            if event.generation != self._analysis_generation:
+                return
             self.progress_bar.hide()
             if self.app_state.selected_directory and self.app_state.precomputed_blobs:
                 output_path = Path(self.app_state.selected_directory) / "precomputed_blobs.pkl"
@@ -1097,14 +1148,16 @@ f"Length: {ub['length']} px<br>"
 
 class UpdateProgressEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.User + 1)
-    def __init__(self, value):
+    def __init__(self, value, generation):
         super().__init__(self.EVENT_TYPE)
         self.value = value
+        self.generation = generation
 
 class ComputationFinishedEvent(QEvent):
     EVENT_TYPE = QEvent.Type(QEvent.User + 2)
-    def __init__(self):
+    def __init__(self, generation):
         super().__init__(self.EVENT_TYPE)
+        self.generation = generation
 
 
 def create_automap_widget(parent=None, app_state=None):
