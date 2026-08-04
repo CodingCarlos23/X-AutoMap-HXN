@@ -115,6 +115,67 @@ def build_fine_scan_requests(json_path, fine_scans_table):
 
     return mode, requests
 
+
+def submit_fine_scan_requests(requests, *, auto_open_environment=True):
+    """Submit pre-built fine-scan requests and start a clean QueueServer queue.
+
+    This is intentionally separate from request construction so the GUI can show
+    the exact plans before a user confirms submission. The function only starts
+    a queue that was empty before submission; it will not unexpectedly run
+    pre-existing QueueServer items.
+    """
+    if not requests:
+        raise ValueError("No fine-scan requests were supplied.")
+
+    status_before = RM.status()
+    existing_items = status_before.get("items_in_queue", 0)
+    if existing_items:
+        raise RuntimeError(
+            f"QueueServer already contains {existing_items} item(s). "
+            "Clear or run that queue before submitting these GUI plans."
+        )
+
+    if not status_before.get("worker_environment_exists", False):
+        if not auto_open_environment:
+            raise RuntimeError("QueueServer worker environment is closed.")
+        response = RM.environment_open()
+        if not response.get("success", False):
+            raise RuntimeError(f"Could not open QueueServer worker: {response.get('msg', '')}")
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            status_before = RM.status()
+            if (
+                status_before.get("worker_environment_state") == "idle"
+                and status_before.get("re_state") == "idle"
+            ):
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("QueueServer worker did not become ready within 15 seconds.")
+
+    submitted = []
+    for request in requests:
+        response = RM.item_add(BPlan(request["plan_name"], *request["plan_args"]))
+        if not response.get("success", False):
+            raise RuntimeError(
+                f"QueueServer rejected '{request['label']}': {response.get('msg', '')}"
+            )
+        submitted.append({
+            "label": request["label"],
+            "item_uid": response.get("item", {}).get("item_uid"),
+        })
+
+    response = RM.queue_start()
+    if not response.get("success", False):
+        raise RuntimeError(f"QueueServer did not start the queue: {response.get('msg', '')}")
+
+    return {
+        "submitted": submitted,
+        "queue_start_response": response,
+        "status": RM.status(),
+    }
+
 def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     """
     Performs fine scans from a fine_scans_table (DataFrame or CSV path).

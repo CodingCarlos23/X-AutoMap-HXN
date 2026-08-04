@@ -21,7 +21,7 @@ from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
 from qtpy.QtWidgets import QStyle, QStyleOptionButton
 
 from .app_state import AppState
-from .queue import build_fine_scan_requests
+from .queue import build_fine_scan_requests, submit_fine_scan_requests
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -287,21 +287,33 @@ class MainWindow(QWidget):
     def update_file_selection(self, item, checkbox, state):
         """Track TIFF selections and enforce the maximum of three files."""
         index = self.file_list_widget.row(item)
-        selected = list(self.app_state.selected_files_order or [])
+        checked_indices = [
+            row for row in range(self.file_list_widget.count())
+            if self.file_list_widget.itemWidget(self.file_list_widget.item(row)).isChecked()
+        ]
 
-        # PySide6 emits the stateChanged argument as an int, while Qt.Checked
-        # may be an enum object.  The widget state is binding-independent.
-        if checkbox.isChecked():
-            if index not in selected and len(selected) >= 3:
-                checkbox.blockSignals(True)
-                checkbox.setChecked(False)
-                checkbox.blockSignals(False)
-                return
-            if index not in selected:
-                selected.append(index)
-        elif index in selected:
-            selected.remove(index)
+        # Use the actual widget states as the authority. This prevents a stale
+        # selection list from allowing a fourth TIFF to remain selected.
+        if len(checked_indices) > 3:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+            QMessageBox.warning(
+                self,
+                "Maximum reached",
+                "Select at most three TIFF element images. Deselect one before choosing another.",
+            )
+            checked_indices.remove(index)
 
+        # Preserve the user's selection order, which determines the RGB
+        # channel assignment, while removing any unchecked entries.
+        selected = [
+            row for row in (self.app_state.selected_files_order or [])
+            if row in checked_indices
+        ]
+        for row in checked_indices:
+            if row not in selected:
+                selected.append(row)
         self.app_state.selected_files_order = selected
 
     def on_confirm_clicked(self):
@@ -403,7 +415,7 @@ class MainWindow(QWidget):
         union_list_layout.addWidget(union_btn)
         union_list_layout.addWidget(add_box_btn)
 
-        send_to_queue_btn = QPushButton("Preview Queue Plan")
+        send_to_queue_btn = QPushButton("Queue Selected Plans")
         send_to_queue_btn.clicked.connect(self.send_to_queue_server)
         clear_queue_btn = QPushButton("Clear")
         clear_queue_btn.clicked.connect(self.clear_queue_server_list)
@@ -928,15 +940,21 @@ f"Length: {ub['length']} px<br>"
             QMessageBox.warning(self, "Queue Preview", f"Could not build scan requests:\n{error}")
             return
 
+        if mode != "real":
+            QMessageBox.warning(
+                self,
+                "Queue submission disabled",
+                "This configuration is not in real mode, so no plans were sent.\n\n"
+                "For the local HXN QueueServer simulator, use a configuration with "
+                "execution_params.mode set to 'real'.",
+            )
+            return
+
         first = requests[0]
-        safety_message = (
-            "OFFLINE DRY RUN — no scans will be submitted."
-            if mode != "real"
-            else "REAL configuration detected — this screen is still preview-only; no scans have been submitted."
-        )
         summary = (
-            f"{safety_message}\n\n"
-            "Preview function:\n"
+            "The following plans will be sent to the configured local QueueServer.\n"
+            "The queue will start immediately after all plans are accepted.\n\n"
+            "Request builder:\n"
             "build_fine_scan_requests(config_path, fine_scans_table)\n\n"
             f"Planned scans: {len(requests)}\n\n"
             f"First scan: {first['label']}\n"
@@ -949,15 +967,39 @@ f"Length: {ub['length']} px<br>"
             f"Points: {first['points']['x']} × {first['points']['y']}\n"
             f"Dwell: {first['dwell']:.4f} s\n"
             f"Plan: {first['plan_name']}\n\n"
-            "Later real-submission function:\n"
-            "headless_send_queue_fine_scan(config_path, fine_scans_table)"
+            "Submit all staged boxes to QueueServer?"
         )
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("Queue Plan Preview")
-        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Confirm Queue Submission")
+        dialog.setIcon(QMessageBox.Warning)
         dialog.setText(summary)
         dialog.setDetailedText(json.dumps(requests, indent=2))
-        dialog.exec_()
+        dialog.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
+        dialog.button(QMessageBox.Ok).setText("Submit and Start Queue")
+        dialog.button(QMessageBox.Cancel).setText("Cancel")
+        if dialog.exec_() != QMessageBox.Ok:
+            return
+
+        try:
+            result = submit_fine_scan_requests(requests)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Queue submission failed",
+                f"No further plans were sent.\n\n{error}",
+            )
+            return
+
+        submitted_labels = "\n".join(f"• {item['label']}" for item in result["submitted"])
+        status = result["status"]
+        QMessageBox.information(
+            self,
+            "Plans submitted",
+            f"QueueServer accepted and started {len(result['submitted'])} plan(s):\n"
+            f"{submitted_labels}\n\n"
+            f"Queue state: {status.get('manager_state', 'unknown')}\n"
+            "For the local simulator, receipt files are written in hxn-qserver-sim/output/.",
+        )
 
     def _staged_fine_scan_rows(self):
         """Convert selected GUI union boxes into fine-scan table rows in microns."""
