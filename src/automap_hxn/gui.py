@@ -387,7 +387,7 @@ class MainWindow(QWidget):
         self.app_state.true_origin_x = self.origin_x_input.value()
         self.app_state.true_origin_y = self.origin_y_input.value()
         
-        if len(self.app_state.selected_files_order) != 3:
+        if len(self.app_state.selected_files_order or []) != 3:
             QMessageBox.warning(self, "Invalid Selection", "Please select exactly 3 TIFF files.")
             return
         
