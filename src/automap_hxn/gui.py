@@ -325,7 +325,17 @@ class MainWindow(QWidget):
 
     def perform_mosaic_scan(self):
         """Submit the initial coarse scan before the GUI enters image-analysis mode."""
-        config_path = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
+        default_config = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
+        config_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select mosaic-scan configuration",
+            str(default_config),
+            "JSON files (*.json)",
+        )
+        if not config_path:
+            return
+
+        config_path = Path(config_path)
         try:
             mode, requests = build_coarse_scan_requests(config_path)
         except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -345,7 +355,7 @@ class MainWindow(QWidget):
         confirmation.setWindowTitle("Confirm Mosaic Scan")
         confirmation.setIcon(QMessageBox.Warning)
         confirmation.setText(
-            "The initial coarse scan from initial_scan_sim.json will be sent to QueueServer.\n\n"
+            f"The initial coarse scan from {config_path.name} will be sent to QueueServer.\n\n"
             f"Plan: {scan['plan_name']}\n"
             f"Center: X={scan['center'][next(iter(scan['center']))]:.2f} µm, "
             f"Y={list(scan['center'].values())[1]:.2f} µm\n"
