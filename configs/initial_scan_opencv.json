@@ -5,7 +5,7 @@
   },
 
   "scan_params": {
-    "label": "cellpose_test",
+    "label": "opencv_test",
     "scan_id": 394015,
     "dets": "dets_fast",
     "det_names": ["fs", "eiger2", "xspress3"],
@@ -16,7 +16,6 @@
     "mot2_s": -12.5,
     "mot2_e": 12.5,
     "exp_t": 0.005,
-    "step_size": 0.25,
     "step_size": 0.25,
     "zp_move_flag": 0,
     "smar_move_flag": 0,
@@ -38,8 +37,8 @@
   },
 
   "calibration_params": {
-    "microns_per_pixel_x": 0.250,
-    "microns_per_pixel_y": 0.250,
+    "microns_per_pixel_x": 0.25,
+    "microns_per_pixel_y": 0.25,
     "true_origin_x": 10,
     "true_origin_y": 20
   },
@@ -50,9 +49,9 @@
   },
 
   "segmentation_params": {
-    "min_threshold_intensity": 25,
-    "min_threshold_area": 9,
-    "blob_detection_method": "cellpose",
+    "min_threshold_intensity": 100,
+    "min_threshold_area": 200,
+    "blob_detection_method": "simple",
     "overlap_thresh": 0.5
   },
 
@@ -65,8 +64,8 @@
   "detection_methods": {
     "simple": {
       "max_threshold": 255,
-      "max_area": 1600,
-      "threshold_step": 2,
+      "max_area": 50000,
+      "threshold_step": 5,
       "filter_by_color": false,
       "filter_by_circularity": false
     },
@@ -80,22 +79,6 @@
     "watershed": {
       "min_distance": 10,
       "threshold_abs": 0.3
-    },
-    "cellpose": {
-      "diameter": 30,
-      "model_type": "cpsam",
-      "gpu": false,
-      "flow_threshold": 1,
-      "cellprob_threshold": 0,
-      "gui_cellprob_threshold_values": [0.0],
-      "channels": [0, 0],
-      "resample": false,
-      "tile_overlap": 0.05,
-      "bsize": 256,
-      "min_diameter":20,
-      "max_diameter": 80,
-      "min_size": 10,
-      "gui_min_size_values": [10]
     },
     "connected_components": {
       "connectivity": 8

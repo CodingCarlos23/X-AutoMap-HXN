@@ -3,6 +3,7 @@ import re
 import json
 import pickle
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from .queue import (
     submit_fine_scan_requests,
     submit_queue_requests,
 )
+from .blobs.detection import CELLPOSE_AVAILABLE, CELLPOSE_IMPORT_ERROR, detect_blobs
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -190,6 +192,11 @@ class MainWindow(QWidget):
         self.progress_bar = QProgressBar()
         self.mosaic_scan_btn = None
         self.analysis_widget = None
+        self.detection_config_path = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_opencv.json"
+        self.detection_method = "simple"
+        self.detection_settings = {}
+        self.cellpose_cellprob_values = []
+        self.cellpose_min_size_values = []
 
     def _init_ui(self):
         self.outer_layout = QVBoxLayout(self)
@@ -217,7 +224,7 @@ class MainWindow(QWidget):
         load_backup_btn = QPushButton("Load Backup")
         load_backup_btn.clicked.connect(self.on_load_backup_clicked)
         top_grid.addWidget(load_backup_btn, 1, 0)
-        
+
         top_grid.setColumnStretch(1, 1) # Allow column 1 to expand
         layout.addLayout(top_grid)
 
@@ -248,6 +255,77 @@ class MainWindow(QWidget):
         layout.addLayout(confirm_layout)
 
         return widget
+
+    def _load_detection_config(self):
+        """Load the GUI's blob-detector selection and method-specific settings."""
+        try:
+            with self.detection_config_path.open() as stream:
+                params = json.load(stream)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Could not read {self.detection_config_path.name}: {error}") from error
+
+        segmentation = params.get("segmentation_params", {})
+        method = segmentation.get("blob_detection_method", "simple").lower()
+        methods = params.get("detection_methods", {})
+        if method not in {"simple", "cellpose"}:
+            raise ValueError(
+                "The GUI currently supports 'simple' (OpenCV) and 'cellpose' "
+                f"detection methods, not {method!r}."
+            )
+        if method == "cellpose" and not CELLPOSE_AVAILABLE:
+            model_name = methods.get("cellpose", {}).get("model_type", "Cellpose")
+            detail = f"\n\nDetails: {CELLPOSE_IMPORT_ERROR}" if CELLPOSE_IMPORT_ERROR else ""
+            raise ValueError(
+                f"Model '{model_name}' cannot be loaded because the Cellpose library "
+                "was not found in the environment running this GUI.\n\n"
+                "Install or repair the project's segmentation dependencies, or select the OpenCV configuration."
+                f"{detail}"
+            )
+
+        if method == "cellpose":
+            cellpose_settings = methods.get("cellpose", {})
+            cellprob_default = float(cellpose_settings.get("cellprob_threshold", 0.0))
+            min_size_default = int(cellpose_settings.get("min_size", segmentation.get("min_threshold_area", 10)))
+            self.cellpose_cellprob_values = list(
+                cellpose_settings.get(
+                    "gui_cellprob_threshold_values",
+                    [cellprob_default - 1.0, cellprob_default, cellprob_default + 1.0],
+                )
+            )
+            self.cellpose_min_size_values = list(
+                cellpose_settings.get(
+                    "gui_min_size_values",
+                    [max(0, min_size_default // 2), min_size_default, min_size_default * 2],
+                )
+            )
+            if not self.cellpose_cellprob_values or not self.cellpose_min_size_values:
+                raise ValueError(
+                    "Cellpose GUI settings must provide at least one "
+                    "gui_cellprob_threshold_values and one gui_min_size_values."
+                )
+            # The GUI's existing threshold/area state stores the two Cellpose
+            # parameters exposed as interactive sliders. Threshold is scaled
+            # by ten because QSlider operates on integers.
+            initial_cellprob = min(
+                self.cellpose_cellprob_values,
+                key=lambda value: abs(value - cellprob_default),
+            )
+            initial_min_size = min(
+                self.cellpose_min_size_values,
+                key=lambda value: abs(value - min_size_default),
+            )
+            min_threshold = int(round(initial_cellprob * 10))
+            min_area = initial_min_size
+        else:
+            min_threshold = segmentation.get("min_threshold_intensity", 100)
+            min_area = segmentation.get("min_threshold_area", 200)
+
+        self.detection_method = method
+        self.detection_settings = {
+            "min_threshold": min_threshold,
+            "min_area": min_area,
+            **methods.get(method, {}),
+        }
 
     def on_load_backup_clicked(self):
         tiff_paths, _ = QFileDialog.getOpenFileNames(self, "Select 3 TIFF files", "", "TIFF Files (*.tif *.tiff)")
@@ -390,12 +468,34 @@ class MainWindow(QWidget):
         if len(self.app_state.selected_files_order or []) != 3:
             QMessageBox.warning(self, "Invalid Selection", "Please select exactly 3 TIFF files.")
             return
+
+        config_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select detection configuration",
+            str(self.detection_config_path),
+            "JSON files (*.json)",
+        )
+        if not config_path:
+            return
+        self.detection_config_path = Path(config_path)
+
+        try:
+            self._load_detection_config()
+        except ValueError as error:
+            QMessageBox.warning(self, "Detection Configuration", str(error))
+            return
         
         self.app_state.img_paths = [self.app_state.file_paths[i] for i in self.app_state.selected_files_order]
         self.app_state.file_names = [os.path.basename(p) for p in self.app_state.img_paths]
         self.app_state.element_colors = ['red', 'green', 'blue']
-        self.app_state.thresholds = {color: 100 for color in self.app_state.element_colors}
-        self.app_state.area_thresholds = {color: 200 for color in self.app_state.element_colors}
+        self.app_state.thresholds = {
+            color: self.detection_settings["min_threshold"]
+            for color in self.app_state.element_colors
+        }
+        self.app_state.area_thresholds = {
+            color: self.detection_settings["min_area"]
+            for color in self.app_state.element_colors
+        }
         self._init_analysis_gui()
 
     def _init_analysis_gui(self, from_backup=False):
@@ -583,13 +683,28 @@ class MainWindow(QWidget):
         for color in self.app_state.element_colors:
             i = self.app_state.element_colors.index(color)
             vbox = QVBoxLayout()
-            label = QLabel(f"{self.app_state.file_names[i]}_threshold: {self.app_state.thresholds[color]}")
+            if self.detection_method == "cellpose":
+                label = QLabel(
+                    f"{self.app_state.file_names[i]}_cellprob threshold: "
+                    f"{self.app_state.thresholds[color] / 10:.1f}"
+                )
+            else:
+                label = QLabel(f"{self.app_state.file_names[i]}_threshold: {self.app_state.thresholds[color]}")
             slider = QSlider(Qt.Horizontal)
-            slider.setRange(0, 255)
-            slider.setTickInterval(10)
-            slider.setValue(self.app_state.thresholds[color])
+            if self.detection_method == "cellpose":
+                slider.setRange(0, len(self.cellpose_cellprob_values) - 1)
+                slider.setValue(min(
+                    range(len(self.cellpose_cellprob_values)),
+                    key=lambda index: abs(self.cellpose_cellprob_values[index] - self.app_state.thresholds[color] / 10),
+                ))
+            else:
+                slider.setRange(0, 255)
+                slider.setValue(self.app_state.thresholds[color])
+            slider.setTickInterval(1 if self.detection_method == "cellpose" else 10)
             slider.setTickPosition(QSlider.TicksBelow)
             slider.valueChanged.connect(lambda val, c=color: self.on_slider_change(val, c))
+            if self.detection_method == "cellpose":
+                slider.setToolTip("Choose one of the precomputed Cellpose cellprob_threshold values.")
             self.sliders[color] = slider
             self.slider_labels[color] = label
             vbox.addWidget(label)
@@ -602,13 +717,25 @@ class MainWindow(QWidget):
         for color in self.app_state.element_colors:
             i = self.app_state.element_colors.index(color)
             vbox = QVBoxLayout()
-            label = QLabel(f"{self.app_state.file_names[i]}_min_area: {self.app_state.area_thresholds[color]}")
+            if self.detection_method == "cellpose":
+                label = QLabel(f"{self.app_state.file_names[i]}_min size: {self.app_state.area_thresholds[color]}")
+            else:
+                label = QLabel(f"{self.app_state.file_names[i]}_min_area: {self.app_state.area_thresholds[color]}")
             slider = QSlider(Qt.Horizontal)
-            slider.setRange(10, 400)
-            slider.setTickInterval(10)
-            slider.setValue(self.app_state.area_thresholds[color])
+            if self.detection_method == "cellpose":
+                slider.setRange(0, len(self.cellpose_min_size_values) - 1)
+                slider.setValue(min(
+                    range(len(self.cellpose_min_size_values)),
+                    key=lambda index: abs(self.cellpose_min_size_values[index] - self.app_state.area_thresholds[color]),
+                ))
+            else:
+                slider.setRange(10, 400)
+                slider.setValue(self.app_state.area_thresholds[color])
+            slider.setTickInterval(1 if self.detection_method == "cellpose" else 10)
             slider.setTickPosition(QSlider.TicksBelow)
             slider.valueChanged.connect(lambda val, c=color: self.on_area_slider_change(val, c))
+            if self.detection_method == "cellpose":
+                slider.setToolTip("Choose one of the precomputed Cellpose min_size values.")
             self.area_sliders[color] = slider
             self.area_slider_labels[color] = label
             vbox.addWidget(label)
@@ -630,13 +757,20 @@ class MainWindow(QWidget):
             self.app_state.precomputed_blobs = {color: {} for color in self.app_state.element_colors}
             self.app_state.current_iteration = 0
         
-        thresholds_range = list(range(0, 256, 10))
-        area_range = list(range(10, 501, 10))
+        if self.detection_method == "cellpose":
+            thresholds_range = [int(round(value * 10)) for value in self.cellpose_cellprob_values]
+            area_range = self.cellpose_min_size_values
+        else:
+            thresholds_range = list(range(0, 256, 10))
+            area_range = list(range(10, 501, 10))
         total_iterations = len(self.app_state.element_colors) * len(thresholds_range) * len(area_range)
         
         self.progress_bar.setRange(0, total_iterations)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Computing blobs... %p%")
+        if self.detection_method == "cellpose":
+            self.progress_bar.setFormat("Cellpose: %v of %m model runs complete")
+        else:
+            self.progress_bar.setFormat("Computing blobs... %p%")
         self.progress_bar.show()
 
         threading.Thread(
@@ -657,22 +791,58 @@ class MainWindow(QWidget):
         self, generation, thresholds_range, area_range, colors, file_names,
         source_images, dilated_imgs,
     ):
+        total_runs = len(colors) * len(thresholds_range) * len(area_range)
         
         for i, color in enumerate(colors):
             for t_val in thresholds_range:
                 for a_val in area_range:
-                    blobs = self._detect_blobs(
-                        dilated_imgs[i],
-                        source_images[i],
-                        t_val, a_val, color,
-                        file_names[i],
-                    )
+                    with self._analysis_lock:
+                        run_number = self.app_state.current_iteration + 1
+                    heartbeat_done = threading.Event()
+                    if self.detection_method == "cellpose":
+                        print(
+                            f"[GUI] Cellpose starting run {run_number}/{total_runs}: "
+                            f"{file_names[i]} ({color}); cellprob_threshold={t_val / 10:.1f}, "
+                            f"min_size={a_val}."
+                        )
+
+                        def report_elapsed(
+                            run_number=run_number,
+                            total_runs=total_runs,
+                            heartbeat_done=heartbeat_done,
+                        ):
+                            started = time.monotonic()
+                            while not heartbeat_done.wait(15):
+                                elapsed = int(time.monotonic() - started)
+                                print(
+                                    f"[GUI] Cellpose run {run_number}/{total_runs} is still running "
+                                    f"({elapsed}s elapsed)."
+                                )
+
+                        threading.Thread(target=report_elapsed, daemon=True).start()
+                    try:
+                        blobs = self._detect_blobs(
+                            dilated_imgs[i],
+                            source_images[i],
+                            t_val, a_val, color,
+                            file_names[i],
+                        )
+                    finally:
+                        heartbeat_done.set()
+                    if self.detection_method == "cellpose":
+                        print(
+                            f"[GUI] Cellpose found {len(blobs)} boxes in "
+                            f"{file_names[i]} ({color}); "
+                            f"cellprob_threshold={t_val / 10:.1f}, min_size={a_val}."
+                        )
                     with self._analysis_lock:
                         if generation != self._analysis_generation:
                             return
                         self.app_state.precomputed_blobs[color][(t_val, a_val)] = blobs
                         self.app_state.current_iteration += 1
                         iteration = self.app_state.current_iteration
+                    if self.detection_method == "cellpose":
+                        print(f"[GUI] Cellpose progress: {iteration}/{total_runs} model runs complete.")
                     QApplication.instance().postEvent(
                         self, UpdateProgressEvent(iteration, generation)
                     )
@@ -697,15 +867,29 @@ class MainWindow(QWidget):
 
 
     def _detect_blobs(self, img_norm, img_orig, min_thresh, min_area, color, file_name):
+        if self.detection_method == "cellpose":
+            cellpose_params = {
+                key: value for key, value in self.detection_settings.items()
+                if key not in {"min_threshold", "min_area", "gui_cellprob_threshold_values", "gui_min_size_values"}
+            }
+            cellpose_params["cellprob_threshold"] = min_thresh / 10
+            cellpose_params["min_size"] = min_area
+            # The shared detector owns the Cellpose model cache and uses the
+            # original image, without the GUI's OpenCV dilation, for inference.
+            return detect_blobs(
+                img_orig, img_orig, min_thresh, min_area, color, file_name,
+                method="cellpose", **cellpose_params,
+            )
+
         params = cv2.SimpleBlobDetector_Params()
         params.minThreshold = min_thresh
-        params.maxThreshold = 255
+        params.maxThreshold = self.detection_settings.get("max_threshold", 255)
         params.filterByArea = True
         params.minArea = min_area
-        params.maxArea = 50000
-        params.thresholdStep = 5
-        params.filterByColor = False
-        params.filterByCircularity = False
+        params.maxArea = self.detection_settings.get("max_area", 50000)
+        params.thresholdStep = self.detection_settings.get("threshold_step", 5)
+        params.filterByColor = self.detection_settings.get("filter_by_color", False)
+        params.filterByCircularity = self.detection_settings.get("filter_by_circularity", False)
         params.filterByInertia = False
         params.filterByConvexity = False
         params.minRepeatability = 1
@@ -849,6 +1033,14 @@ f"Length: {ub['length']} px<br>"
         )
 
     def on_slider_change(self, value, color):
+        if self.detection_method == "cellpose":
+            cellprob_threshold = self.cellpose_cellprob_values[value]
+            self.app_state.thresholds[color] = int(round(cellprob_threshold * 10))
+            self.slider_labels[color].setText(
+                f"{self.checkboxes[color].text()}_cellprob threshold: {cellprob_threshold:.1f}"
+            )
+            self.update_boxes()
+            return
         snapped = round(value / 10) * 10
         if self.app_state.thresholds[color] != snapped:
             self.app_state.thresholds[color] = snapped
@@ -859,6 +1051,14 @@ f"Length: {ub['length']} px<br>"
             self.update_boxes()
 
     def on_area_slider_change(self, value, color):
+        if self.detection_method == "cellpose":
+            min_size = self.cellpose_min_size_values[value]
+            self.app_state.area_thresholds[color] = min_size
+            self.area_slider_labels[color].setText(
+                f"{self.checkboxes[color].text()}_min size: {min_size}"
+            )
+            self.update_boxes()
+            return
         snapped = round(value / 10) * 10
         if self.app_state.area_thresholds[color] != snapped:
             self.app_state.area_thresholds[color] = snapped
@@ -1056,7 +1256,7 @@ f"Length: {ub['length']} px<br>"
             QMessageBox.information(self, "Queue Preview", "Add one or more union boxes to the list first.")
             return
 
-        default_config = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
+        default_config = self.detection_config_path
         config_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select fine-scan configuration",

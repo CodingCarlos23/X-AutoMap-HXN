@@ -5,15 +5,17 @@ from skimage.feature import peak_local_max
 from skimage.segmentation import clear_border
 from ..utils import normalize_and_dilate
 
-# Cellpose imports (optional - will gracefully handle if not installed)
+# Cellpose imports (optional - gracefully handle missing or incompatible ML dependencies)
 try:
     from cellpose import models
     from PIL import Image
     CELLPOSE_AVAILABLE = True
-except ImportError:
+    CELLPOSE_IMPORT_ERROR = None
+except Exception as error:
     CELLPOSE_AVAILABLE = False
     models = None
     Image = None
+    CELLPOSE_IMPORT_ERROR = f"{type(error).__name__}: {error}"
 
 # Cache for Cellpose models to avoid reloading on every detection call
 # Key: (model_type, gpu), Value: CellposeModel instance
@@ -226,7 +228,12 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
             diameter=diameter_guess,
             flow_threshold=flow_threshold,
             cellprob_threshold=cellprob_threshold,
-            min_size=cellpose_min_size
+            min_size=cellpose_min_size,
+            batch_size=kwargs.get('batch_size', 8),
+            resample=kwargs.get('resample', True),
+            tile_overlap=kwargs.get('tile_overlap', 0.1),
+            bsize=kwargs.get('bsize', 256),
+            augment=kwargs.get('augment', False),
         )
 
         
