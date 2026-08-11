@@ -23,3 +23,4 @@ torchvision = "0.22.*"
 
 [pypi-dependencies]
 automap_hxn = { path = ".", editable = true }
+ultralytics = ">=8.4,<9"

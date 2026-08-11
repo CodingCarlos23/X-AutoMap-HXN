@@ -1,5 +1,9 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import cv2
+import tifffile
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
 from skimage.segmentation import clear_border
@@ -20,6 +24,21 @@ except Exception as error:
 # Cache for Cellpose models to avoid reloading on every detection call
 # Key: (model_type, gpu), Value: CellposeModel instance
 _CELLPOSE_MODEL_CACHE = {}
+
+# Ultralytics is optional so the rest of the application can run without the
+# YOLO runtime and its model weights.
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+    YOLO_IMPORT_ERROR = None
+except Exception as error:
+    YOLO_AVAILABLE = False
+    YOLO_IMPORT_ERROR = f"{type(error).__name__}: {error}"
+    YOLO = None
+
+# Key: model filename/path, Value: Ultralytics YOLO instance.
+_YOLO_MODEL_CACHE = {}
+_YOLO_EXPORT_DIR = Path(__file__).resolve().parents[3] / "yolo_exports"
 
 
 def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, 
@@ -50,6 +69,7 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         - 'connected_components': Connected components labeling - Fast, good for well-separated objects
         - 'watershed': Watershed segmentation - Good for touching/overlapping objects
         - 'cellpose': Cellpose deep learning segmentation - Best for cells and complex biological objects
+        - 'yolo': Ultralytics YOLO instance segmentation - Returns masks and boxes
     include_method_info : bool
         If True, includes 'method' key in output for compatibility (default: False)
     **kwargs : dict
@@ -106,7 +126,8 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         'hough': _detect_blobs_hough_circles,
         'connected_components': _detect_blobs_connected_components,
         'watershed': _detect_blobs_watershed,
-        'cellpose': _detect_blobs_cellpose
+        'cellpose': _detect_blobs_cellpose,
+        'yolo': _detect_blobs_yolo,
     }
     
     if method not in method_map:
@@ -115,11 +136,13 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
     # Special check for Cellpose availability
     if method == 'cellpose' and not CELLPOSE_AVAILABLE:
         raise ImportError(f"Cellpose not available. Install with: pip install cellpose[gui]")
+    if method == 'yolo' and not YOLO_AVAILABLE:
+        raise ImportError("Ultralytics YOLO is not available. Install with: pip install ultralytics")
     
     # Apply morphological preprocessing (normalize and dilate)
     # EXCEPTION: Skip for cellpose - deep learning models need raw/original images
     # Morphological dilation can destroy fine details that cellpose was trained to recognize
-    if method == 'cellpose': #TODO not clean fix later
+    if method in {'cellpose', 'yolo'}: #TODO not clean fix later
         # Use original images for cellpose (no morphological preprocessing)
         processed_norm = img_norm
         processed_dilated = img_orig
@@ -130,6 +153,8 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
                                                                  iterations=1)
     
     # Detect blobs using the selected method
+    if method == 'yolo':
+        kwargs = {**kwargs, 'output_name': file_name}
     detections = method_map[method](processed_dilated, processed_norm, min_thresh, min_area, **kwargs)
     
     # Convert detections to standard format
@@ -167,6 +192,191 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
             blobs.append(blob_dict)
     
     return blobs
+
+
+def _detect_blobs_yolo(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Run YOLO instance segmentation and return square scan boxes for its masks."""
+    if not YOLO_AVAILABLE:
+        raise ImportError("Ultralytics YOLO is not available. Install with: pip install ultralytics")
+
+    model_name = kwargs.get('model', 'yolo26s-seg.pt')
+    if model_name not in _YOLO_MODEL_CACHE:
+        print(f"Loading YOLO segmentation model: {model_name}...")
+        _YOLO_MODEL_CACHE[model_name] = YOLO(model_name)
+    model = _YOLO_MODEL_CACHE[model_name]
+
+    image = np.asarray(img_norm)
+    if image.ndim == 2:
+        image = np.repeat(image[..., np.newaxis], 3, axis=2)
+    elif image.ndim == 3 and image.shape[2] == 1:
+        image = np.repeat(image, 3, axis=2)
+    elif image.ndim == 3 and image.shape[2] >= 3:
+        image = image[..., :3]
+    else:
+        raise ValueError(f"YOLO expects a 2D or RGB image, received shape {image.shape}")
+
+    image = image.astype(np.float32, copy=False)
+    image_min, image_max = float(np.nanmin(image)), float(np.nanmax(image))
+    if image_max <= image_min:
+        return []
+    image = ((image - image_min) / (image_max - image_min) * 255).clip(0, 255).astype(np.uint8)
+
+    predict_kwargs = {'verbose': False}
+    if 'conf' in kwargs:
+        predict_kwargs['conf'] = float(kwargs['conf'])
+    if 'imgsz' in kwargs:
+        predict_kwargs['imgsz'] = kwargs['imgsz']
+    tile_size = int(kwargs.get('tile_size', max(image.shape[:2])))
+    tile_overlap = int(kwargs.get('tile_overlap', 0))
+    max_box_fraction = float(kwargs.get('max_box_fraction', 0.25))
+    if tile_size <= 0:
+        tile_size = max(image.shape[:2])
+    if not 0 <= tile_overlap < tile_size:
+        raise ValueError("YOLO tile_overlap must be non-negative and smaller than tile_size")
+    if not 0 < max_box_fraction <= 1:
+        raise ValueError("YOLO max_box_fraction must be greater than 0 and no larger than 1")
+    max_box_size = min(image.shape[:2]) * max_box_fraction
+
+    x_offsets = _yolo_tile_offsets(image.shape[1], tile_size, tile_overlap)
+    y_offsets = _yolo_tile_offsets(image.shape[0], tile_size, tile_overlap)
+    candidates = []
+    for y_offset in y_offsets:
+        for x_offset in x_offsets:
+            tile = image[y_offset:y_offset + tile_size, x_offset:x_offset + tile_size]
+            try:
+                results = model(tile, **predict_kwargs)
+            except Exception as error:
+                print(f"YOLO detection failed: {error}")
+                return []
+            for result in results:
+                candidates.extend(_yolo_result_records(
+                    result, x_offset, y_offset, min_area,
+                    max_box_size,
+                ))
+
+    export_records = []
+    for record in sorted(candidates, key=lambda item: item['confidence'] or 0, reverse=True):
+        if not any(_yolo_boxes_overlap(record['box'], existing['box']) for existing in export_records):
+            export_records.append(record)
+
+    detections = [
+        {
+            'center': (record['box']['x'] + record['box']['size'] // 2,
+                       record['box']['y'] + record['box']['size'] // 2),
+            'radius': record['box']['size'] // 2,
+        }
+        for record in export_records
+    ]
+
+    if kwargs.get('export_masks', True):
+        _export_yolo_results(image, kwargs.get('output_name', 'yolo_image'), export_records)
+    return detections
+
+
+def _yolo_tile_offsets(length, tile_size, overlap):
+    """Return tile starts that cover an image edge-to-edge."""
+    if length <= tile_size:
+        return [0]
+    stride = tile_size - overlap
+    offsets = list(range(0, length - tile_size + 1, stride))
+    final_offset = length - tile_size
+    if offsets[-1] != final_offset:
+        offsets.append(final_offset)
+    return offsets
+
+
+def _yolo_result_records(
+    result, x_offset, y_offset, min_area, max_box_size,
+):
+    """Convert one tiled YOLO result into global-coordinate mask records."""
+    if result.masks is None or result.masks.xy is None:
+        return []
+    confidences = result.boxes.conf.cpu().numpy() if result.boxes is not None else []
+    class_ids = result.boxes.cls.cpu().numpy().astype(int) if result.boxes is not None else []
+    records = []
+    for index, polygon in enumerate(result.masks.xy):
+        polygon = np.asarray(polygon)
+        if polygon.size == 0 or cv2.contourArea(polygon.astype(np.float32)) < min_area:
+            continue
+        polygon = polygon.astype(np.int32)
+        polygon[:, 0] += x_offset
+        polygon[:, 1] += y_offset
+        x1, y1 = (int(value) for value in np.floor(polygon.min(axis=0)))
+        x2, y2 = (int(value) for value in np.ceil(polygon.max(axis=0)))
+        width, height = x2 - x1, y2 - y1
+        if width <= 0 or height <= 0:
+            continue
+        radius = int(np.ceil(max(width, height) / 2))
+        if radius * 2 > max_box_size:
+            continue
+        class_id = int(class_ids[index]) if index < len(class_ids) else None
+        class_name = result.names.get(class_id, str(class_id)) if class_id is not None else None
+        records.append({
+            'polygon': polygon,
+            'confidence': float(confidences[index]) if index < len(confidences) else None,
+            'class_id': class_id,
+            'class_name': class_name,
+            # The raw mask bounds are useful for inspecting YOLO's result.
+            'yolo_box': {
+                'x': x1, 'y': y1,
+                'top_left': {'x': x1, 'y': y1},
+                'width': width, 'height': height,
+            },
+            # This square box is what the GUI displays and the fine-scan queue uses.
+            'box': {
+                'x': x1, 'y': y1,
+                'top_left': {'x': x1, 'y': y1},
+                'size': radius * 2,
+            },
+        })
+    return records
+
+
+def _yolo_boxes_overlap(first, second, threshold=0.5):
+    """Identify duplicate tile-edge predictions using square-box IoU."""
+    left = max(first['x'], second['x'])
+    top = max(first['y'], second['y'])
+    right = min(first['x'] + first['size'], second['x'] + second['size'])
+    bottom = min(first['y'] + first['size'], second['y'] + second['size'])
+    intersection = max(0, right - left) * max(0, bottom - top)
+    if not intersection:
+        return False
+    first_area, second_area = first['size'] ** 2, second['size'] ** 2
+    return intersection / (first_area + second_area - intersection) >= threshold
+
+
+def _export_yolo_results(image, output_name, records):
+    """Save YOLO input, masks, overlays, and metadata outside version control."""
+    _YOLO_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stem = Path(output_name).stem
+    mask_image = np.zeros(image.shape[:2], dtype=np.uint16)
+    overlay = image.copy()
+    metadata = []
+
+    for label, record in enumerate(records, start=1):
+        polygon = record.pop('polygon')
+        cv2.fillPoly(mask_image, [polygon], label)
+        color = ((37 * label) % 256, (97 * label) % 256, (173 * label) % 256)
+        cv2.fillPoly(overlay, [polygon], color)
+        cv2.polylines(overlay, [polygon], isClosed=True, color=(255, 255, 255), thickness=1)
+        x, y, size = record['box']['x'], record['box']['y'], record['box']['size']
+        cv2.rectangle(overlay, (x, y), (x + size, y + size), color=(255, 255, 255), thickness=1)
+        if record['confidence'] is not None:
+            cv2.putText(overlay, f"{record['confidence']:.2f}", (x, max(0, y - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+        metadata.append(record)
+
+    # A binary 0/255 image is easily visible in ordinary TIFF viewers.  The
+    # labeled image is retained separately when per-instance IDs are needed.
+    mask_preview = (mask_image > 0).astype(np.uint8) * 255
+    tifffile.imwrite(_YOLO_EXPORT_DIR / f"{stem}_yolo_input.tiff", image)
+    tifffile.imwrite(_YOLO_EXPORT_DIR / f"{stem}_yolo_masks.tiff", mask_preview)
+    tifffile.imwrite(_YOLO_EXPORT_DIR / f"{stem}_yolo_instance_labels.tiff", mask_image)
+    cv2.imwrite(
+        str(_YOLO_EXPORT_DIR / f"{stem}_yolo_overlay.png"),
+        cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+    )
+    with (_YOLO_EXPORT_DIR / f"{stem}_yolo_detections.json").open('w') as stream:
+        json.dump(metadata, stream, indent=2)
 
 
 def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
@@ -398,11 +608,19 @@ def detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, color, file_
                        method='cellpose', include_method_info=include_method_info, **kwargs)
 
 
+def detect_blobs_yolo(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for Ultralytics YOLO instance segmentation."""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='yolo', include_method_info=include_method_info, **kwargs)
+
+
 def get_available_detection_methods():
     """Returns list of available detection methods"""
     methods = ['simple', 'contours', 'hough', 'connected_components', 'watershed']
     if CELLPOSE_AVAILABLE:
         methods.append('cellpose')
+    if YOLO_AVAILABLE:
+        methods.append('yolo')
     return methods
 
 

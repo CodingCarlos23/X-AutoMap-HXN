@@ -28,7 +28,13 @@ from .queue import (
     submit_fine_scan_requests,
     submit_queue_requests,
 )
-from .blobs.detection import CELLPOSE_AVAILABLE, CELLPOSE_IMPORT_ERROR, detect_blobs
+from .blobs.detection import (
+    CELLPOSE_AVAILABLE,
+    CELLPOSE_IMPORT_ERROR,
+    YOLO_AVAILABLE,
+    YOLO_IMPORT_ERROR,
+    detect_blobs,
+)
 
 # TODO: look up these functions and import them from submodules
 from automap_hxn.utils import (
@@ -269,10 +275,10 @@ class MainWindow(QWidget):
         segmentation = params.get("segmentation_params", {})
         method = segmentation.get("blob_detection_method", "simple").lower()
         methods = params.get("detection_methods", {})
-        if method not in {"simple", "cellpose", "connected_components", "watershed"}:
+        if method not in {"simple", "cellpose", "connected_components", "watershed", "yolo"}:
             raise ValueError(
                 "The GUI currently supports 'simple' (OpenCV), 'cellpose', "
-                "'connected_components', and 'watershed' "
+                "'connected_components', 'watershed', and 'yolo' "
                 f"detection methods, not {method!r}."
             )
         if method == "cellpose" and not CELLPOSE_AVAILABLE:
@@ -282,6 +288,15 @@ class MainWindow(QWidget):
                 f"Model '{model_name}' cannot be loaded because the Cellpose library "
                 "was not found in the environment running this GUI.\n\n"
                 "Install or repair the project's segmentation dependencies, or select the OpenCV configuration."
+                f"{detail}"
+            )
+        if method == "yolo" and not YOLO_AVAILABLE:
+            model_name = methods.get("yolo", {}).get("model", "yolo26s-seg.pt")
+            detail = f"\n\nDetails: {YOLO_IMPORT_ERROR}" if YOLO_IMPORT_ERROR else ""
+            raise ValueError(
+                f"Model '{model_name}' cannot be loaded because the Ultralytics library "
+                "was not found in the environment running this GUI.\n\n"
+                "Install or repair the project's segmentation dependencies, or select another configuration."
                 f"{detail}"
             )
 
@@ -319,6 +334,9 @@ class MainWindow(QWidget):
             )
             min_threshold = int(round(initial_cellprob * 10))
             min_area = initial_min_size
+        elif method == "yolo":
+            min_threshold = 0
+            min_area = 0
         else:
             min_threshold = segmentation.get("min_threshold_intensity", 100)
             min_area = segmentation.get("min_threshold_area", 200)
@@ -703,6 +721,14 @@ class MainWindow(QWidget):
         legend_layout.addStretch()
         controls_layout.addLayout(legend_layout)
 
+        if self.detection_method == "yolo":
+            controls_layout.addWidget(
+                QLabel("YOLO26s instance segmentation: default settings (one cached inference per element).")
+            )
+            controls_widget.setLayout(controls_layout)
+            self.main_layout.addWidget(controls_widget)
+            return
+
         # Sliders
         slider_layout = QHBoxLayout()
         for color in self.app_state.element_colors:
@@ -801,6 +827,9 @@ class MainWindow(QWidget):
         if self.detection_method == "cellpose":
             thresholds_range = [int(round(value * 10)) for value in self.cellpose_cellprob_values]
             area_range = self.cellpose_min_size_values
+        elif self.detection_method == "yolo":
+            thresholds_range = [0]
+            area_range = [0]
         elif self.detection_method in {"connected_components", "watershed"}:
             thresholds_range = self.fixed_threshold_values
             area_range = self.fixed_min_area_values
@@ -813,6 +842,8 @@ class MainWindow(QWidget):
         self.progress_bar.setValue(0)
         if self.detection_method == "cellpose":
             self.progress_bar.setFormat("Cellpose: %v of %m model runs complete")
+        elif self.detection_method == "yolo":
+            self.progress_bar.setFormat("YOLO: %v of %m inference runs complete")
         else:
             self.progress_bar.setFormat("Computing blobs... %p%")
         self.progress_bar.show()
@@ -923,6 +954,16 @@ class MainWindow(QWidget):
             return detect_blobs(
                 img_orig, img_orig, min_thresh, min_area, color, file_name,
                 method="cellpose", **cellpose_params,
+            )
+
+        if self.detection_method == "yolo":
+            yolo_params = {
+                key: value for key, value in self.detection_settings.items()
+                if key not in {"min_threshold", "min_area"}
+            }
+            return detect_blobs(
+                img_orig, img_orig, min_thresh, min_area, color, file_name,
+                method="yolo", **yolo_params,
             )
 
         if self.detection_method in {"connected_components", "watershed"}:

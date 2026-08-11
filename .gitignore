@@ -151,6 +151,10 @@ cython_debug/
 .pixi
 *.egg-info
 
+# Automatically downloaded YOLO weights
+yolo26s-seg.pt
+yolo_exports/
+
 # Ignore sensitive files
 secret_config.yaml
 
