@@ -197,6 +197,8 @@ class MainWindow(QWidget):
         self.detection_settings = {}
         self.cellpose_cellprob_values = []
         self.cellpose_min_size_values = []
+        self.fixed_threshold_values = []
+        self.fixed_min_area_values = []
 
     def _init_ui(self):
         self.outer_layout = QVBoxLayout(self)
@@ -267,9 +269,10 @@ class MainWindow(QWidget):
         segmentation = params.get("segmentation_params", {})
         method = segmentation.get("blob_detection_method", "simple").lower()
         methods = params.get("detection_methods", {})
-        if method not in {"simple", "cellpose"}:
+        if method not in {"simple", "cellpose", "connected_components", "watershed"}:
             raise ValueError(
-                "The GUI currently supports 'simple' (OpenCV) and 'cellpose' "
+                "The GUI currently supports 'simple' (OpenCV), 'cellpose', "
+                "'connected_components', and 'watershed' "
                 f"detection methods, not {method!r}."
             )
         if method == "cellpose" and not CELLPOSE_AVAILABLE:
@@ -319,6 +322,28 @@ class MainWindow(QWidget):
         else:
             min_threshold = segmentation.get("min_threshold_intensity", 100)
             min_area = segmentation.get("min_threshold_area", 200)
+
+        if method in {"connected_components", "watershed"}:
+            method_settings = methods.get(method, {})
+            self.fixed_threshold_values = list(
+                method_settings.get("gui_threshold_values", [min_threshold])
+            )
+            self.fixed_min_area_values = list(
+                method_settings.get("gui_min_area_values", [min_area])
+            )
+            if not self.fixed_threshold_values or not self.fixed_min_area_values:
+                raise ValueError(
+                    f"{method} GUI settings must provide at least one "
+                    "gui_threshold_values and one gui_min_area_values."
+                )
+            min_threshold = min(
+                self.fixed_threshold_values,
+                key=lambda value: abs(value - min_threshold),
+            )
+            min_area = min(
+                self.fixed_min_area_values,
+                key=lambda value: abs(value - min_area),
+            )
 
         self.detection_method = method
         self.detection_settings = {
@@ -697,6 +722,12 @@ class MainWindow(QWidget):
                     range(len(self.cellpose_cellprob_values)),
                     key=lambda index: abs(self.cellpose_cellprob_values[index] - self.app_state.thresholds[color] / 10),
                 ))
+            elif self.detection_method in {"connected_components", "watershed"}:
+                slider.setRange(0, len(self.fixed_threshold_values) - 1)
+                slider.setValue(min(
+                    range(len(self.fixed_threshold_values)),
+                    key=lambda index: abs(self.fixed_threshold_values[index] - self.app_state.thresholds[color]),
+                ))
             else:
                 slider.setRange(0, 255)
                 slider.setValue(self.app_state.thresholds[color])
@@ -705,6 +736,8 @@ class MainWindow(QWidget):
             slider.valueChanged.connect(lambda val, c=color: self.on_slider_change(val, c))
             if self.detection_method == "cellpose":
                 slider.setToolTip("Choose one of the precomputed Cellpose cellprob_threshold values.")
+            elif self.detection_method in {"connected_components", "watershed"}:
+                slider.setToolTip("Choose one of the configured threshold values.")
             self.sliders[color] = slider
             self.slider_labels[color] = label
             vbox.addWidget(label)
@@ -728,6 +761,12 @@ class MainWindow(QWidget):
                     range(len(self.cellpose_min_size_values)),
                     key=lambda index: abs(self.cellpose_min_size_values[index] - self.app_state.area_thresholds[color]),
                 ))
+            elif self.detection_method in {"connected_components", "watershed"}:
+                slider.setRange(0, len(self.fixed_min_area_values) - 1)
+                slider.setValue(min(
+                    range(len(self.fixed_min_area_values)),
+                    key=lambda index: abs(self.fixed_min_area_values[index] - self.app_state.area_thresholds[color]),
+                ))
             else:
                 slider.setRange(10, 400)
                 slider.setValue(self.app_state.area_thresholds[color])
@@ -736,6 +775,8 @@ class MainWindow(QWidget):
             slider.valueChanged.connect(lambda val, c=color: self.on_area_slider_change(val, c))
             if self.detection_method == "cellpose":
                 slider.setToolTip("Choose one of the precomputed Cellpose min_size values.")
+            elif self.detection_method in {"connected_components", "watershed"}:
+                slider.setToolTip("Choose one of the configured minimum-area values.")
             self.area_sliders[color] = slider
             self.area_slider_labels[color] = label
             vbox.addWidget(label)
@@ -760,6 +801,9 @@ class MainWindow(QWidget):
         if self.detection_method == "cellpose":
             thresholds_range = [int(round(value * 10)) for value in self.cellpose_cellprob_values]
             area_range = self.cellpose_min_size_values
+        elif self.detection_method in {"connected_components", "watershed"}:
+            thresholds_range = self.fixed_threshold_values
+            area_range = self.fixed_min_area_values
         else:
             thresholds_range = list(range(0, 256, 10))
             area_range = list(range(10, 501, 10))
@@ -879,6 +923,18 @@ class MainWindow(QWidget):
             return detect_blobs(
                 img_orig, img_orig, min_thresh, min_area, color, file_name,
                 method="cellpose", **cellpose_params,
+            )
+
+        if self.detection_method in {"connected_components", "watershed"}:
+            method_params = {
+                key: value for key, value in self.detection_settings.items()
+                if key not in {
+                    "min_threshold", "min_area", "gui_threshold_values", "gui_min_area_values",
+                }
+            }
+            return detect_blobs(
+                img_norm, img_orig, min_thresh, min_area, color, file_name,
+                method=self.detection_method, **method_params,
             )
 
         params = cv2.SimpleBlobDetector_Params()
@@ -1041,6 +1097,14 @@ f"Length: {ub['length']} px<br>"
             )
             self.update_boxes()
             return
+        if self.detection_method in {"connected_components", "watershed"}:
+            threshold = self.fixed_threshold_values[value]
+            self.app_state.thresholds[color] = threshold
+            self.slider_labels[color].setText(
+                f"{self.checkboxes[color].text()}_threshold: {threshold}"
+            )
+            self.update_boxes()
+            return
         snapped = round(value / 10) * 10
         if self.app_state.thresholds[color] != snapped:
             self.app_state.thresholds[color] = snapped
@@ -1056,6 +1120,14 @@ f"Length: {ub['length']} px<br>"
             self.app_state.area_thresholds[color] = min_size
             self.area_slider_labels[color].setText(
                 f"{self.checkboxes[color].text()}_min size: {min_size}"
+            )
+            self.update_boxes()
+            return
+        if self.detection_method in {"connected_components", "watershed"}:
+            min_area = self.fixed_min_area_values[value]
+            self.app_state.area_thresholds[color] = min_area
+            self.area_slider_labels[color].setText(
+                f"{self.checkboxes[color].text()}_min_area: {min_area}"
             )
             self.update_boxes()
             return
