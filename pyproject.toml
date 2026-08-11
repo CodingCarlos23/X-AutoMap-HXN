@@ -31,7 +31,7 @@ authors = [
 license = { file = "LICENSE" }
 
 [project.optional-dependencies]
-segmentation = ["cellpose>=4.0.8,<5", "ultralytics>=8.4,<9"]
+segmentation = ["cellpose>=4.0.8,<5", "ultralytics>=8.4,<9", "stardist>=0.9.2,<1", "tensorflow>=2.19,<2.20"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

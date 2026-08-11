@@ -40,6 +40,21 @@ except Exception as error:
 _YOLO_MODEL_CACHE = {}
 _YOLO_EXPORT_DIR = Path(__file__).resolve().parents[3] / "yolo_exports"
 
+# StarDist and TensorFlow are optional so the other detection modes remain
+# usable when its runtime is not installed.
+try:
+    from stardist.models import StarDist2D
+    STARDIST_AVAILABLE = True
+    STARDIST_IMPORT_ERROR = None
+except Exception as error:
+    STARDIST_AVAILABLE = False
+    STARDIST_IMPORT_ERROR = f"{type(error).__name__}: {error}"
+    StarDist2D = None
+
+# Key: pretrained model name, Value: StarDist2D instance.
+_STARDIST_MODEL_CACHE = {}
+_STARDIST_EXPORT_DIR = Path(__file__).resolve().parents[3] / "StarDist"
+
 
 def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, 
                  file_name, method='simple', 
@@ -70,6 +85,7 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         - 'watershed': Watershed segmentation - Good for touching/overlapping objects
         - 'cellpose': Cellpose deep learning segmentation - Best for cells and complex biological objects
         - 'yolo': Ultralytics YOLO instance segmentation - Returns masks and boxes
+        - 'stardist': StarDist instance segmentation - Best for compact, roughly round objects
     include_method_info : bool
         If True, includes 'method' key in output for compatibility (default: False)
     **kwargs : dict
@@ -128,6 +144,7 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         'watershed': _detect_blobs_watershed,
         'cellpose': _detect_blobs_cellpose,
         'yolo': _detect_blobs_yolo,
+        'stardist': _detect_blobs_stardist,
     }
     
     if method not in method_map:
@@ -138,11 +155,13 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         raise ImportError(f"Cellpose not available. Install with: pip install cellpose[gui]")
     if method == 'yolo' and not YOLO_AVAILABLE:
         raise ImportError("Ultralytics YOLO is not available. Install with: pip install ultralytics")
+    if method == 'stardist' and not STARDIST_AVAILABLE:
+        raise ImportError("StarDist is not available. Install the project's segmentation dependencies.")
     
     # Apply morphological preprocessing (normalize and dilate)
     # EXCEPTION: Skip for cellpose - deep learning models need raw/original images
     # Morphological dilation can destroy fine details that cellpose was trained to recognize
-    if method in {'cellpose', 'yolo'}: #TODO not clean fix later
+    if method in {'cellpose', 'yolo', 'stardist'}: #TODO not clean fix later
         # Use original images for cellpose (no morphological preprocessing)
         processed_norm = img_norm
         processed_dilated = img_orig
@@ -153,7 +172,7 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
                                                                  iterations=1)
     
     # Detect blobs using the selected method
-    if method == 'yolo':
+    if method in {'yolo', 'stardist'}:
         kwargs = {**kwargs, 'output_name': file_name}
     detections = method_map[method](processed_dilated, processed_norm, min_thresh, min_area, **kwargs)
     
@@ -271,6 +290,124 @@ def _detect_blobs_yolo(img_norm, img_orig, min_thresh, min_area, **kwargs):
     if kwargs.get('export_masks', True):
         _export_yolo_results(image, kwargs.get('output_name', 'yolo_image'), export_records)
     return detections
+
+
+def _detect_blobs_stardist(img_norm, img_orig, min_thresh, min_area, **kwargs):
+    """Run a pretrained StarDist 2D model and convert its instance labels to boxes."""
+    if not STARDIST_AVAILABLE:
+        raise ImportError("StarDist is not available. Install the project's segmentation dependencies.")
+
+    image = np.asarray(img_orig)
+    if image.ndim == 3:
+        image = image[..., 0]
+    if image.ndim != 2:
+        raise ValueError(f"StarDist expects a 2D image, received shape {image.shape}")
+    image = image.astype(np.float32, copy=False)
+    image_min, image_max = float(np.nanmin(image)), float(np.nanmax(image))
+    if image_max <= image_min:
+        return []
+    image = (image - image_min) / (image_max - image_min)
+
+    model_name = kwargs.get('model_name', '2D_versatile_fluo')
+    if model_name not in _STARDIST_MODEL_CACHE:
+        print(f"Loading StarDist model: {model_name}...")
+        _STARDIST_MODEL_CACHE[model_name] = StarDist2D.from_pretrained(model_name)
+    model = _STARDIST_MODEL_CACHE[model_name]
+
+    try:
+        labels, details = model.predict_instances(
+            image,
+            prob_thresh=float(kwargs.get('prob_thresh', 0.5)),
+            nms_thresh=float(kwargs.get('nms_thresh', 0.4)),
+        )
+    except Exception as error:
+        print(f"StarDist detection failed: {error}")
+        return []
+
+    detections = []
+    export_records = []
+    minimum_size = max(float(min_area), float(kwargs.get('min_size', 0)))
+    for label_id in np.unique(labels):
+        if label_id == 0:
+            continue
+        mask = labels == label_id
+        area = int(mask.sum())
+        if area < minimum_size:
+            continue
+        y_coords, x_coords = np.where(mask)
+        x1, x2 = int(x_coords.min()), int(x_coords.max()) + 1
+        y1, y2 = int(y_coords.min()), int(y_coords.max()) + 1
+        center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+        radius = int(np.ceil(max(x2 - x1, y2 - y1) / 2))
+        instance_index = int(label_id) - 1
+        probabilities = details.get('prob', []) if details else []
+        detections.append({
+            'center': (center_x, center_y),
+            'radius': radius,
+        })
+        export_records.append({
+            'label_id': int(label_id),
+            'area': area,
+            'probability': (
+                float(probabilities[instance_index])
+                if instance_index < len(probabilities) else None
+            ),
+            'stardist_box': {
+                'x': x1, 'y': y1,
+                'top_left': {'x': x1, 'y': y1},
+                'width': x2 - x1, 'height': y2 - y1,
+            },
+            'box': {
+                'x': center_x - radius, 'y': center_y - radius,
+                'top_left': {'x': center_x - radius, 'y': center_y - radius},
+                'size': radius * 2,
+            },
+        })
+    if kwargs.get('export_masks', True):
+        _export_stardist_results(
+            (image * 255).clip(0, 255).astype(np.uint8),
+            kwargs.get('output_name', 'stardist_image'), labels, export_records,
+        )
+    return detections
+
+
+def _export_stardist_results(image, output_name, labels, records):
+    """Save inspectable StarDist inputs, masks, overlays, and metadata."""
+    _STARDIST_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stem = Path(output_name).stem
+    labels = labels.astype(np.uint16, copy=False)
+    mask_preview = (labels > 0).astype(np.uint8) * 255
+    overlay = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    for record in records:
+        label_id = record['label_id']
+        mask = (labels == label_id).astype(np.uint8)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        color = ((37 * label_id) % 256, (97 * label_id) % 256, (173 * label_id) % 256)
+        cv2.drawContours(overlay, contours, -1, color, thickness=cv2.FILLED)
+        cv2.drawContours(overlay, contours, -1, (255, 255, 255), thickness=1)
+        box = record['box']
+        cv2.rectangle(
+            overlay, (box['x'], box['y']),
+            (box['x'] + box['size'], box['y'] + box['size']),
+            color=(255, 255, 255), thickness=1,
+        )
+        if record['probability'] is not None:
+            cv2.putText(
+                overlay, f"{record['probability']:.2f}",
+                (box['x'], max(0, box['y'] - 3)), cv2.FONT_HERSHEY_SIMPLEX,
+                0.35, (255, 255, 255), 1,
+            )
+
+    tifffile.imwrite(_STARDIST_EXPORT_DIR / f"{stem}_stardist_input.tiff", image)
+    tifffile.imwrite(_STARDIST_EXPORT_DIR / f"{stem}_stardist_masks.tiff", mask_preview)
+    tifffile.imwrite(_STARDIST_EXPORT_DIR / f"{stem}_stardist_instance_labels.tiff", labels)
+    cv2.imwrite(
+        str(_STARDIST_EXPORT_DIR / f"{stem}_stardist_overlay.png"),
+        cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+    )
+    with (_STARDIST_EXPORT_DIR / f"{stem}_stardist_detections.json").open('w') as stream:
+        json.dump(records, stream, indent=2)
 
 
 def _yolo_tile_offsets(length, tile_size, overlap):
@@ -614,6 +751,12 @@ def detect_blobs_yolo(img_norm, img_orig, min_thresh, min_area, color, file_name
                        method='yolo', include_method_info=include_method_info, **kwargs)
 
 
+def detect_blobs_stardist(img_norm, img_orig, min_thresh, min_area, color, file_name, include_method_info=False, **kwargs):
+    """Convenient wrapper for StarDist instance segmentation."""
+    return detect_blobs(img_norm, img_orig, min_thresh, min_area, color, file_name,
+                       method='stardist', include_method_info=include_method_info, **kwargs)
+
+
 def get_available_detection_methods():
     """Returns list of available detection methods"""
     methods = ['simple', 'contours', 'hough', 'connected_components', 'watershed']
@@ -621,6 +764,8 @@ def get_available_detection_methods():
         methods.append('cellpose')
     if YOLO_AVAILABLE:
         methods.append('yolo')
+    if STARDIST_AVAILABLE:
+        methods.append('stardist')
     return methods
 
 

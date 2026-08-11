@@ -33,6 +33,8 @@ from .blobs.detection import (
     CELLPOSE_IMPORT_ERROR,
     YOLO_AVAILABLE,
     YOLO_IMPORT_ERROR,
+    STARDIST_AVAILABLE,
+    STARDIST_IMPORT_ERROR,
     detect_blobs,
 )
 
@@ -275,10 +277,10 @@ class MainWindow(QWidget):
         segmentation = params.get("segmentation_params", {})
         method = segmentation.get("blob_detection_method", "simple").lower()
         methods = params.get("detection_methods", {})
-        if method not in {"simple", "cellpose", "connected_components", "watershed", "yolo"}:
+        if method not in {"simple", "cellpose", "connected_components", "watershed", "yolo", "stardist"}:
             raise ValueError(
                 "The GUI currently supports 'simple' (OpenCV), 'cellpose', "
-                "'connected_components', 'watershed', and 'yolo' "
+                "'connected_components', 'watershed', 'yolo', and 'stardist' "
                 f"detection methods, not {method!r}."
             )
         if method == "cellpose" and not CELLPOSE_AVAILABLE:
@@ -295,6 +297,15 @@ class MainWindow(QWidget):
             detail = f"\n\nDetails: {YOLO_IMPORT_ERROR}" if YOLO_IMPORT_ERROR else ""
             raise ValueError(
                 f"Model '{model_name}' cannot be loaded because the Ultralytics library "
+                "was not found in the environment running this GUI.\n\n"
+                "Install or repair the project's segmentation dependencies, or select another configuration."
+                f"{detail}"
+            )
+        if method == "stardist" and not STARDIST_AVAILABLE:
+            model_name = methods.get("stardist", {}).get("model_name", "2D_versatile_fluo")
+            detail = f"\n\nDetails: {STARDIST_IMPORT_ERROR}" if STARDIST_IMPORT_ERROR else ""
+            raise ValueError(
+                f"Model '{model_name}' cannot be loaded because the StarDist library "
                 "was not found in the environment running this GUI.\n\n"
                 "Install or repair the project's segmentation dependencies, or select another configuration."
                 f"{detail}"
@@ -334,7 +345,7 @@ class MainWindow(QWidget):
             )
             min_threshold = int(round(initial_cellprob * 10))
             min_area = initial_min_size
-        elif method == "yolo":
+        elif method in {"yolo", "stardist"}:
             min_threshold = 0
             min_area = 0
         else:
@@ -721,9 +732,13 @@ class MainWindow(QWidget):
         legend_layout.addStretch()
         controls_layout.addLayout(legend_layout)
 
-        if self.detection_method == "yolo":
+        if self.detection_method in {"yolo", "stardist"}:
             controls_layout.addWidget(
-                QLabel("YOLO26s instance segmentation: default settings (one cached inference per element).")
+                QLabel(
+                    "YOLO26s instance segmentation: default settings (one cached inference per element)."
+                    if self.detection_method == "yolo"
+                    else "StarDist instance segmentation: default settings (one cached inference per element)."
+                )
             )
             controls_widget.setLayout(controls_layout)
             self.main_layout.addWidget(controls_widget)
@@ -827,7 +842,7 @@ class MainWindow(QWidget):
         if self.detection_method == "cellpose":
             thresholds_range = [int(round(value * 10)) for value in self.cellpose_cellprob_values]
             area_range = self.cellpose_min_size_values
-        elif self.detection_method == "yolo":
+        elif self.detection_method in {"yolo", "stardist"}:
             thresholds_range = [0]
             area_range = [0]
         elif self.detection_method in {"connected_components", "watershed"}:
@@ -844,6 +859,8 @@ class MainWindow(QWidget):
             self.progress_bar.setFormat("Cellpose: %v of %m model runs complete")
         elif self.detection_method == "yolo":
             self.progress_bar.setFormat("YOLO: %v of %m inference runs complete")
+        elif self.detection_method == "stardist":
+            self.progress_bar.setFormat("StarDist: %v of %m inference runs complete")
         else:
             self.progress_bar.setFormat("Computing blobs... %p%")
         self.progress_bar.show()
@@ -964,6 +981,16 @@ class MainWindow(QWidget):
             return detect_blobs(
                 img_orig, img_orig, min_thresh, min_area, color, file_name,
                 method="yolo", **yolo_params,
+            )
+
+        if self.detection_method == "stardist":
+            stardist_params = {
+                key: value for key, value in self.detection_settings.items()
+                if key not in {"min_threshold", "min_area"}
+            }
+            return detect_blobs(
+                img_orig, img_orig, min_thresh, min_area, color, file_name,
+                method="stardist", **stardist_params,
             )
 
         if self.detection_method in {"connected_components", "watershed"}:

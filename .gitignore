@@ -154,6 +154,7 @@ cython_debug/
 # Automatically downloaded YOLO weights
 yolo26s-seg.pt
 yolo_exports/
+StarDist/
 
 # Ignore sensitive files
 secret_config.yaml
