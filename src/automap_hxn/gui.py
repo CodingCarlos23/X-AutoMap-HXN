@@ -400,6 +400,9 @@ class MainWindow(QWidget):
         self.json_maker_tab = self._create_json_maker_tab()
         self.tab_widget.addTab(self.json_maker_tab, "JSON Maker")
 
+        self.single_run_tab = self._create_single_run_tab()
+        self.tab_widget.addTab(self.single_run_tab, "Single Run")
+
     def _create_json_maker_tab(self):
         """Create the tab for authoring initial-scan JSON configurations."""
         widget = QWidget()
@@ -638,6 +641,176 @@ class MainWindow(QWidget):
             f"Saved {os.path.basename(output_path)} with "
             f"blob_detection_method='{active_method}'.",
         )
+
+    def _create_single_run_tab(self):
+        """Create simplified tab: select JSON → select TIFFs → analyze."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(QLabel(
+            "Single Run: Load a configuration JSON and matching TIFF files for immediate analysis."
+        ))
+
+        self.single_run_config_label = QLabel("No configuration loaded.")
+        self.single_run_config_label.setWordWrap(True)
+        layout.addWidget(self.single_run_config_label)
+
+        select_config_btn = QPushButton("Select Configuration JSON")
+        select_config_btn.clicked.connect(self.on_single_run_select_config)
+        layout.addWidget(select_config_btn)
+
+        self.single_run_tiff_list = QListWidget()
+        layout.addWidget(QLabel("TIFF files (will be prompted after config selection):"))
+        layout.addWidget(self.single_run_tiff_list)
+
+        self.single_run_load_btn = QPushButton("Load and Analyze")
+        self.single_run_load_btn.setEnabled(False)
+        self.single_run_load_btn.clicked.connect(self.on_single_run_load_and_analyze)
+        layout.addWidget(self.single_run_load_btn)
+
+        layout.addStretch()
+
+        # State for this tab
+        self.single_run_config_path = None
+        self.single_run_config = None
+        self.single_run_tiff_paths = []
+
+        return widget
+
+    def on_single_run_select_config(self):
+        """Load a JSON config and prompt for the required TIFF files."""
+        config_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Configuration JSON",
+            str(Path(__file__).resolve().parents[2] / "configs"),
+            "JSON files (*.json)",
+        )
+        if not config_path:
+            return
+
+        config_path = Path(config_path)
+        try:
+            with config_path.open() as f:
+                config = json.load(f)
+        except (OSError, json.JSONDecodeError) as error:
+            QMessageBox.warning(
+                self, "Invalid Configuration",
+                f"Could not read {config_path.name}:\n{error}"
+            )
+            return
+
+        # Extract required info
+        elem_list_nested = config.get("export_params", {}).get("elem_list", [])
+        if not elem_list_nested:
+            QMessageBox.warning(
+                self, "Invalid Configuration",
+                f"{config_path.name} has no elem_list in export_params."
+            )
+            return
+
+        # Flatten to unique elements (these define the TIFFs needed)
+        if isinstance(elem_list_nested[0], str):
+            elem_list_nested = [elem_list_nested]
+        all_elements = []
+        for group in elem_list_nested:
+            all_elements.extend(group)
+        unique_elements = list(dict.fromkeys(all_elements))  # preserve order
+
+        if not unique_elements or len(unique_elements) > 3:
+            QMessageBox.warning(
+                self, "Invalid Configuration",
+                f"elem_list must have 1-3 unique elements, got {len(unique_elements)}: {unique_elements}"
+            )
+            return
+
+        method = config.get("segmentation_params", {}).get("blob_detection_method", "simple")
+
+        self.single_run_config_path = config_path
+        self.single_run_config = config
+
+        self.single_run_config_label.setText(
+            f"Loaded: {config_path.name}\n"
+            f"Detection method: {method}\n"
+            f"Elements: {', '.join(unique_elements)} ({len(unique_elements)} TIFFs required)"
+        )
+
+        # Now prompt for TIFF files in order
+        tiff_paths = []
+        for i, element in enumerate(unique_elements):
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Select TIFF for element {i+1}/{len(unique_elements)}: {element}",
+                "",
+                "TIFF Files (*.tif *.tiff)",
+            )
+            if not path:
+                QMessageBox.information(
+                    self, "Selection Cancelled",
+                    "TIFF selection cancelled. Please select the configuration again."
+                )
+                self.single_run_config_label.setText("No configuration loaded.")
+                self.single_run_tiff_list.clear()
+                self.single_run_load_btn.setEnabled(False)
+                return
+            tiff_paths.append(path)
+
+        # Show selected TIFFs
+        self.single_run_tiff_list.clear()
+        for element, path in zip(unique_elements, tiff_paths):
+            self.single_run_tiff_list.addItem(f"{element}: {os.path.basename(path)}")
+
+        self.single_run_tiff_paths = tiff_paths
+        self.single_run_load_btn.setEnabled(True)
+
+    def on_single_run_load_and_analyze(self):
+        """Load the selected TIFFs with the config and launch analysis view."""
+        if not self.single_run_config or not self.single_run_tiff_paths:
+            return
+
+        config = self.single_run_config
+
+        # Load detection config like the normal path does
+        self.detection_config_path = self.single_run_config_path
+        try:
+            self._load_detection_config()
+        except ValueError as error:
+            QMessageBox.warning(self, "Detection Configuration", str(error))
+            return
+
+        # Extract calibration params
+        calib = config.get("calibration_params", {})
+        self.app_state.microns_per_pixel_x = calib.get("microns_per_pixel_x", 1.0)
+        self.app_state.microns_per_pixel_y = calib.get("microns_per_pixel_y", 1.0)
+        self.app_state.true_origin_x = calib.get("true_origin_x", 0.0)
+        self.app_state.true_origin_y = calib.get("true_origin_y", 0.0)
+
+        # Set up app_state for analysis view
+        self.app_state.img_paths = self.single_run_tiff_paths
+        self.app_state.file_names = [os.path.basename(p) for p in self.single_run_tiff_paths]
+
+        # Map to RGB channels (up to 3)
+        color_map = ['red', 'green', 'blue']
+        self.app_state.element_colors = color_map[:len(self.single_run_tiff_paths)]
+        self.app_state.thresholds = {
+            color: self.detection_settings["min_threshold"]
+            for color in self.app_state.element_colors
+        }
+        self.app_state.area_thresholds = {
+            color: self.detection_settings["min_area"]
+            for color in self.app_state.element_colors
+        }
+
+        # Launch analysis
+        try:
+            self._init_analysis_gui()
+        except Exception as error:
+            QMessageBox.critical(
+                self, "Analysis Failed",
+                f"Could not initialize analysis view:\n{error}"
+            )
+            return
+
+        # Switch to AutoMap tab to show the analysis view
+        self.tab_widget.setCurrentIndex(0)
 
     def _create_setup_screen(self):
         widget = QWidget()
@@ -1039,14 +1212,21 @@ class MainWindow(QWidget):
 
 
     def _create_image_view_panel(self):
-        img_r, img_g, img_b = [tiff.imread(p).astype(np.float32) for p in self.app_state.img_paths]
-        shapes = [img.shape for img in (img_r, img_g, img_b)]
+        # Load 1-3 TIFFs; pad missing channels with zeros of the same shape.
+        loaded_images = [tiff.imread(p).astype(np.float32) for p in self.app_state.img_paths]
+        shapes = [img.shape for img in loaded_images]
         self.app_state.target_shape = Counter(shapes).most_common(1)[0][0]
-        
-        img_r = resize_if_needed(img_r, self.app_state.file_names[0], self.app_state.target_shape)
-        img_g = resize_if_needed(img_g, self.app_state.file_names[1], self.app_state.target_shape)
-        img_b = resize_if_needed(img_b, self.app_state.file_names[2], self.app_state.target_shape)
-        
+
+        # Resize loaded images to target shape
+        for i, img in enumerate(loaded_images):
+            fname = self.app_state.file_names[i] if i < len(self.app_state.file_names) else f"image_{i}"
+            loaded_images[i] = resize_if_needed(img, fname, self.app_state.target_shape)
+
+        # Pad to 3 channels (RGB) with zeros
+        while len(loaded_images) < 3:
+            loaded_images.append(np.zeros(self.app_state.target_shape, dtype=np.float32))
+
+        img_r, img_g, img_b = loaded_images[:3]
         self.source_images = [img_r, img_g, img_b]
         self.norm_dilated = [normalize_and_dilate(im) for im in self.source_images]
         
