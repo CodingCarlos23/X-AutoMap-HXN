@@ -15,7 +15,9 @@ from qtpy.QtWidgets import (
     QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QCheckBox, QSlider, QFileDialog, QListWidget, QListWidgetItem,
-    QMessageBox, QDoubleSpinBox, QProgressBar, QGridLayout, QGraphicsEllipseItem
+    QMessageBox, QDoubleSpinBox, QProgressBar, QGridLayout, QGraphicsEllipseItem,
+    QTabWidget, QComboBox, QLineEdit, QSpinBox, QScrollArea, QStackedWidget,
+    QGroupBox, QFormLayout, QSizePolicy
 )
 from qtpy.QtGui import QPixmap, QImage, QPainter, QColor, QPen
 from qtpy.QtCore import Qt, QRect, QTimer, QPoint, QEvent
@@ -43,6 +45,179 @@ from automap_hxn.utils import (
     resize_if_needed, normalize_and_dilate,
     make_json_serializable
 )
+
+
+# Default detection_methods blocks used by the JSON Maker tab. Values mirror
+# the reference configs in configs/initial_scan_*.json.
+JSON_MAKER_UNIVERSAL = "universal"
+
+DETECTION_METHOD_BLOCKS = {
+    "simple": {
+        "max_threshold": 255,
+        "max_area": 50000,
+        "threshold_step": 5,
+        "filter_by_color": False,
+        "filter_by_circularity": False,
+    },
+    "hough": {
+        "max_radius": 40,
+        "dp": 1,
+        "min_dist": 20,
+        "param1": 50,
+        "param2": 30,
+    },
+    "watershed": {
+        "min_distance": 10,
+        "threshold_abs": 0.3,
+        "gui_threshold_values": list(range(0, 251, 25)),
+        "gui_min_area_values": list(range(25, 501, 25)),
+    },
+    "cellpose": {
+        "diameter": 30,
+        "model_type": "cpsam",
+        "gpu": False,
+        "flow_threshold": 1.0,
+        "cellprob_threshold": 0.0,
+        "gui_cellprob_threshold_values": [0.0],
+        "channels": [0, 0],
+        "resample": False,
+        "tile_overlap": 0.05,
+        "bsize": 256,
+        "min_diameter": 20,
+        "max_diameter": 80,
+        "min_size": 10,
+        "gui_min_size_values": [10],
+    },
+    "connected_components": {
+        "connectivity": 8,
+        "gui_threshold_values": [100],
+        "gui_min_area_values": [200],
+    },
+    "contours": {
+        "mode": "external",
+        "method": "simple",
+    },
+    "yolo": {
+        "model": "yolo26s-seg.pt",
+        "conf": 0.0001,
+        "imgsz": 640,
+        "tile_size": 640,
+        "tile_overlap": 128,
+        "max_box_fraction": 0.15,
+    },
+    "stardist": {
+        "model_name": "2D_versatile_fluo",
+        "prob_thresh": 0.5,
+        "nms_thresh": 0.4,
+        "min_size": 0,
+    },
+}
+
+# Methods selectable in the JSON Maker dropdown; must stay in sync with the
+# supported set enforced by MainWindow._load_detection_config.
+JSON_MAKER_METHODS = [
+    "simple", "cellpose", "connected_components", "watershed", "yolo", "stardist",
+]
+
+# Display names for the dropdowns; the JSON always uses the plain method key.
+JSON_MAKER_METHOD_LABELS = {"simple": "simple (OpenCV)"}
+
+# Per-method starting thresholds for segmentation_params. YOLO and StarDist
+# ignore these in the GUI, so they stay at zero.
+JSON_MAKER_SEGMENTATION_THRESHOLDS = {
+    "simple": (100, 200),
+    "cellpose": (25, 9),
+    "connected_components": (100, 200),
+    "watershed": (100, 200),
+    "yolo": (0, 0),
+    "stardist": (0, 0),
+}
+
+# Common (non-detection) sections of an initial-scan config. The JSON Maker
+# form is generated from this schema; widget types are inferred from each
+# default's Python type (bool -> checkbox, int/float -> spinbox, list -> JSON
+# text field, str/None -> text field).
+JSON_MAKER_COMMON_SECTIONS = {
+    "execution_params": {"mode": "real", "proceed_with_fine_scan": True},
+    "scan_params": {
+        "label": "universal_test", "scan_id": 394015,
+        "dets": "dets_fast", "det_names": ["fs", "eiger2", "xspress3"],
+        "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
+        "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
+        "exp_t": 0.005, "step_size": 0.25, "zp_move_flag": 0,
+        "smar_move_flag": 0, "roi_positions_file": None,
+    },
+    "fine_scan_params": {
+        "step_size_fine": 0.1, "exp_t_fine": 0.005, "fine_scan_pad_ratio": 0.3,
+    },
+    "export_params": {
+        "elem_list": [["Ni"]], "export_norm": "sclr1_ch4",
+        "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
+        "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+        "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
+    },
+    "calibration_params": {
+        "microns_per_pixel_x": 0.25, "microns_per_pixel_y": 0.25,
+        "true_origin_x": 10, "true_origin_y": 20,
+    },
+    "analysis_params": {"analysis": True, "execute": True},
+    "segmentation_params": {
+        "min_threshold_intensity": 100, "min_threshold_area": 200,
+        "overlap_thresh": 0.5,
+    },
+    "morphology_params": {
+        "normalize_kernel_size": [3, 3], "dilate_iterations": 2,
+        "blur_kernel": [3, 3],
+    },
+}
+
+JSON_MAKER_MODES = ["real", "simulation", "offline", "analysis-only"]
+
+# Known model choices for the JSON Maker's model dropdowns, keyed by
+# (detection method, field name). Fields listed here render as a dropdown
+# with an "Other..." entry that reveals a free-text input.
+JSON_MAKER_MODEL_OPTIONS = {
+    ("cellpose", "model_type"): ["cpsam", "cyto3", "cyto2", "cyto", "nuclei"],
+    ("yolo", "model"): [
+        "yolo26n-seg.pt", "yolo26s-seg.pt", "yolo26m-seg.pt",
+        "yolo26l-seg.pt", "yolo26x-seg.pt",
+    ],
+    ("stardist", "model_name"): [
+        "2D_versatile_fluo", "2D_versatile_he", "2D_paper_dsb2018",
+    ],
+}
+
+
+class ModelSelectField(QWidget):
+    """Dropdown of known model names with an 'Other...' free-text fallback."""
+
+    OTHER = "Other..."
+
+    def __init__(self, options, default, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.combo = QComboBox()
+        self.combo.addItems(list(options))
+        self.combo.addItem(self.OTHER)
+        self.custom_input = QLineEdit()
+        self.custom_input.setPlaceholderText("custom model name")
+        layout.addWidget(self.combo, 1)
+        layout.addWidget(self.custom_input, 1)
+        if default in options:
+            self.combo.setCurrentText(default)
+        else:
+            self.combo.setCurrentText(self.OTHER)
+            self.custom_input.setText(str(default))
+        self.custom_input.setVisible(self.combo.currentText() == self.OTHER)
+        self.combo.currentTextChanged.connect(
+            lambda text: self.custom_input.setVisible(text == self.OTHER)
+        )
+
+    def value(self):
+        if self.combo.currentText() == self.OTHER:
+            return self.custom_input.text().strip()
+        return self.combo.currentText()
 
 
 
@@ -157,6 +332,9 @@ class MainWindow(QWidget):
         super().__init__(parent)
         self.app_state = app_state
         self.setWindowTitle("X-AutoMap")
+        # Claim available space when embedded in a host layout; the default
+        # Preferred policy loses vertical room to Expanding siblings.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if parent is None:
             # A standalone window needs an initial screen size. Embedded hosts
             # should instead use AutoMap's natural layout size.
@@ -209,9 +387,257 @@ class MainWindow(QWidget):
         self.fixed_min_area_values = []
 
     def _init_ui(self):
-        self.outer_layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        self.tab_widget = QTabWidget()
+        root_layout.addWidget(self.tab_widget)
+
+        self.automap_tab = QWidget()
+        self.outer_layout = QVBoxLayout(self.automap_tab)
         self.setup_widget = self._create_setup_screen()
         self.outer_layout.addWidget(self.setup_widget)
+        self.tab_widget.addTab(self.automap_tab, "AutoMap")
+
+        self.json_maker_tab = self._create_json_maker_tab()
+        self.tab_widget.addTab(self.json_maker_tab, "JSON Maker")
+
+    def _create_json_maker_tab(self):
+        """Create the tab for authoring initial-scan JSON configurations."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(QLabel("JSON Maker"))
+
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Detection Method:"))
+        self.json_maker_method_combo = QComboBox()
+        self.json_maker_method_combo.addItem("Universal (all methods)", JSON_MAKER_UNIVERSAL)
+        for method in JSON_MAKER_METHODS:
+            self.json_maker_method_combo.addItem(
+                JSON_MAKER_METHOD_LABELS.get(method, method), method
+            )
+        self.json_maker_method_combo.setCurrentIndex(0)
+        self.json_maker_method_combo.currentIndexChanged.connect(self._on_json_maker_method_changed)
+        method_row.addWidget(self.json_maker_method_combo, 1)
+
+        self.json_maker_active_label = QLabel("Active model:")
+        method_row.addWidget(self.json_maker_active_label)
+        self.json_maker_active_combo = QComboBox()
+        for method in JSON_MAKER_METHODS:
+            self.json_maker_active_combo.addItem(
+                JSON_MAKER_METHOD_LABELS.get(method, method), method
+            )
+        self.json_maker_active_combo.currentIndexChanged.connect(self._on_json_maker_method_changed)
+        method_row.addWidget(self.json_maker_active_combo, 1)
+        layout.addLayout(method_row)
+
+        self.json_maker_hint = QLabel(
+            "Universal writes every detection_methods block, so the file can be "
+            "switched to another model later by editing blob_detection_method. "
+            "The 'Active model' picks which method starts selected, and its "
+            "settings are edited below."
+        )
+        self.json_maker_hint.setWordWrap(True)
+        layout.addWidget(self.json_maker_hint)
+
+        # --- Scrollable form generated from the config schema ---
+        self.json_maker_fields = {}
+        form_container = QWidget()
+        form_layout = QVBoxLayout(form_container)
+        form_layout.setSpacing(12)
+        for section, fields in JSON_MAKER_COMMON_SECTIONS.items():
+            group = QGroupBox(section)
+            group_form = QFormLayout(group)
+            group_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            self.json_maker_fields[section] = {}
+            for key, default in fields.items():
+                field_widget = self._make_json_maker_field(key, default)
+                group_form.addRow(key, field_widget)
+                self.json_maker_fields[section][key] = (field_widget, default)
+            form_layout.addWidget(group)
+
+        # Method-specific settings: one stacked page per detection method.
+        self.json_maker_method_group = QGroupBox("detection_methods: simple")
+        method_group_layout = QVBoxLayout(self.json_maker_method_group)
+        self.json_maker_method_stack = QStackedWidget()
+        self.json_maker_method_fields = {}
+        for method in JSON_MAKER_METHODS:
+            page = QWidget()
+            page_form = QFormLayout(page)
+            page_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            self.json_maker_method_fields[method] = {}
+            for key, default in DETECTION_METHOD_BLOCKS[method].items():
+                field_widget = self._make_json_maker_field(
+                    key, default, options=JSON_MAKER_MODEL_OPTIONS.get((method, key))
+                )
+                page_form.addRow(key, field_widget)
+                self.json_maker_method_fields[method][key] = (field_widget, default)
+            self.json_maker_method_stack.addWidget(page)
+        method_group_layout.addWidget(self.json_maker_method_stack)
+        form_layout.addWidget(self.json_maker_method_group)
+        form_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(form_container)
+        layout.addWidget(scroll, 1)
+
+        create_btn = QPushButton("Create JSON Configuration")
+        create_btn.clicked.connect(self.on_create_json_clicked)
+        layout.addWidget(create_btn)
+
+        self._on_json_maker_method_changed()
+        return widget
+
+    def _make_json_maker_field(self, key, default, options=None):
+        """Build an input widget for one config value based on its default's type."""
+        if options:
+            return ModelSelectField(options, default)
+        if key == "mode":
+            combo = QComboBox()
+            combo.addItems(JSON_MAKER_MODES)
+            combo.setCurrentText(default)
+            return combo
+        if isinstance(default, bool):
+            checkbox = QCheckBox()
+            checkbox.setChecked(default)
+            return checkbox
+        if isinstance(default, int):
+            spin = QSpinBox()
+            spin.setRange(-1_000_000_000, 1_000_000_000)
+            spin.setValue(default)
+            return spin
+        if isinstance(default, float):
+            spin = QDoubleSpinBox()
+            spin.setDecimals(6)
+            spin.setRange(-1e9, 1e9)
+            spin.setValue(default)
+            return spin
+        # str, list, and None all edit as text; lists round-trip through JSON.
+        line = QLineEdit()
+        if isinstance(default, list):
+            line.setText(json.dumps(default))
+        elif default is not None:
+            line.setText(str(default))
+        else:
+            line.setPlaceholderText("null")
+        return line
+
+    @staticmethod
+    def _read_json_maker_field(name, field_widget, default):
+        """Read one config value back from its input widget."""
+        if isinstance(field_widget, ModelSelectField):
+            value = field_widget.value()
+            if not value:
+                raise ValueError(
+                    f"'{name}' is set to '{ModelSelectField.OTHER}' but no custom model name was entered."
+                )
+            return value
+        if isinstance(field_widget, QComboBox):
+            return field_widget.currentText()
+        if isinstance(field_widget, QCheckBox):
+            return field_widget.isChecked()
+        if isinstance(field_widget, (QSpinBox, QDoubleSpinBox)):
+            return field_widget.value()
+        text = field_widget.text().strip()
+        if isinstance(default, list):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"'{name}' must be valid JSON, e.g. {json.dumps(default)} ({error})."
+                ) from error
+            if not isinstance(value, list):
+                raise ValueError(f"'{name}' must be a JSON list, e.g. {json.dumps(default)}.")
+            return value
+        if default is None and not text:
+            return None
+        return text
+
+    def _json_maker_selection(self):
+        """Return (dropdown selection, active blob_detection_method)."""
+        selection = self.json_maker_method_combo.currentData()
+        if selection == JSON_MAKER_UNIVERSAL:
+            return selection, self.json_maker_active_combo.currentData()
+        return selection, selection
+
+    def _on_json_maker_method_changed(self, *_args):
+        """Sync the form with the dropdown: method panel, thresholds, and label."""
+        selection, active_method = self._json_maker_selection()
+        is_universal = selection == JSON_MAKER_UNIVERSAL
+        self.json_maker_active_label.setVisible(is_universal)
+        self.json_maker_active_combo.setVisible(is_universal)
+
+        self.json_maker_method_stack.setCurrentIndex(JSON_MAKER_METHODS.index(active_method))
+        self.json_maker_method_group.setTitle(f"detection_methods: {active_method}")
+
+        min_threshold, min_area = JSON_MAKER_SEGMENTATION_THRESHOLDS[active_method]
+        self.json_maker_fields["segmentation_params"]["min_threshold_intensity"][0].setValue(min_threshold)
+        self.json_maker_fields["segmentation_params"]["min_threshold_area"][0].setValue(min_area)
+        label = "universal_test" if is_universal else f"{active_method}_test"
+        self.json_maker_fields["scan_params"]["label"][0].setText(label)
+
+    def _build_json_maker_config(self, selection, active_method):
+        """Assemble a config dict from the form for the chosen method selection."""
+        config = {}
+        for section, fields in self.json_maker_fields.items():
+            config[section] = {
+                key: self._read_json_maker_field(f"{section}.{key}", field_widget, default)
+                for key, (field_widget, default) in fields.items()
+            }
+        config["segmentation_params"]["blob_detection_method"] = active_method
+
+        if selection == JSON_MAKER_UNIVERSAL:
+            # All editable method pages, plus the GUI-unsupported extras at
+            # their defaults so the file matches the older universal configs.
+            method_names = list(JSON_MAKER_METHODS) + ["hough", "contours"]
+        else:
+            method_names = [selection]
+        detection_methods = {}
+        for method in method_names:
+            if method in self.json_maker_method_fields:
+                detection_methods[method] = {
+                    key: self._read_json_maker_field(f"{method}.{key}", field_widget, default)
+                    for key, (field_widget, default) in self.json_maker_method_fields[method].items()
+                }
+            else:
+                detection_methods[method] = dict(DETECTION_METHOD_BLOCKS[method])
+        config["detection_methods"] = detection_methods
+        return config
+
+    def on_create_json_clicked(self):
+        """Write a new initial-scan JSON from the form values."""
+        selection, active_method = self._json_maker_selection()
+        try:
+            config = self._build_json_maker_config(selection, active_method)
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid Value", str(error))
+            return
+
+        configs_dir = Path(__file__).resolve().parents[2] / "configs"
+        default_name = f"initial_scan_{selection}.json"
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save JSON Configuration",
+            str(configs_dir / default_name),
+            "JSON files (*.json)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".json"):
+            output_path += ".json"
+
+        try:
+            with open(output_path, "w") as stream:
+                json.dump(config, stream, indent=2)
+                stream.write("\n")
+        except OSError as error:
+            QMessageBox.critical(self, "Error Saving File", f"Could not write JSON: {error}")
+            return
+        QMessageBox.information(
+            self,
+            "JSON Created",
+            f"Saved {os.path.basename(output_path)} with "
+            f"blob_detection_method='{active_method}'.",
+        )
 
     def _create_setup_screen(self):
         widget = QWidget()
