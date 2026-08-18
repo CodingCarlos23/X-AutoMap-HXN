@@ -440,10 +440,6 @@ class MainWindow(QWidget):
 
     def _init_ui_elements(self):
         self.file_list_widget = QListWidget()
-        self.float_input_micron_x = QDoubleSpinBox()
-        self.float_input_micron_y = QDoubleSpinBox()
-        self.origin_x_input = QDoubleSpinBox()
-        self.origin_y_input = QDoubleSpinBox()
         self.graphics_view = None
         self.graphics_scene = None
         self.pixmap_item = None
@@ -1507,6 +1503,24 @@ class MainWindow(QWidget):
             if best:
                 self._setup_element_files[elem] = os.path.join(directory, best)
         self._refresh_element_mapping()
+        self._sync_file_list_checkboxes()
+
+    def _sync_file_list_checkboxes(self):
+        """Check list items whose paths were auto-matched; uncheck the rest."""
+        matched_paths = {
+            os.path.normpath(p)
+            for p in self._setup_element_files.values() if p
+        }
+        self.app_state.selected_files_order = []
+        for row in range(self.file_list_widget.count()):
+            item = self.file_list_widget.item(row)
+            cb = self.file_list_widget.itemWidget(item)
+            path = os.path.normpath(self.app_state.file_paths[row])
+            cb.blockSignals(True)
+            cb.setChecked(path in matched_paths)
+            cb.blockSignals(False)
+            if path in matched_paths:
+                self.app_state.selected_files_order.append(row)
 
     def on_load_backup_clicked(self):
         if not getattr(self, '_setup_config', None):
