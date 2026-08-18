@@ -1086,6 +1086,27 @@ class MainWindow(QWidget):
 
         return widget
 
+    @staticmethod
+    def _try_auto_install(*pip_packages):
+        """Attempt to pip-install one or more packages into the running interpreter.
+
+        Returns (success: bool, message: str).
+        Runs synchronously — caller should notify the user before calling.
+        """
+        import subprocess, sys
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", *pip_packages],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                return True, f"Installed {', '.join(pip_packages)} successfully."
+            return False, result.stderr.strip() or result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            return False, "Installation timed out after 5 minutes."
+        except Exception as error:
+            return False, str(error)
+
     def _load_detection_config(self):
         """Load the GUI's blob-detector selection and method-specific settings."""
         try:
@@ -1105,31 +1126,92 @@ class MainWindow(QWidget):
             )
         if method == "cellpose" and not CELLPOSE_AVAILABLE:
             model_name = methods.get("cellpose", {}).get("model_type", "Cellpose")
-            detail = f"\n\nDetails: {CELLPOSE_IMPORT_ERROR}" if CELLPOSE_IMPORT_ERROR else ""
-            raise ValueError(
-                f"Model '{model_name}' cannot be loaded because the Cellpose library "
-                "was not found in the environment running this GUI.\n\n"
-                "Install or repair the project's segmentation dependencies, or select the OpenCV configuration."
-                f"{detail}"
+            QMessageBox.information(
+                self, "Installing Cellpose",
+                "Cellpose is not installed in this environment.\n\n"
+                "Attempting automatic installation — this may take a minute..."
             )
+            ok, msg = self._try_auto_install("cellpose")
+            if ok:
+                try:
+                    from cellpose import models as _cp_models
+                    import automap_hxn.blobs.detection as _det
+                    _det.models = _cp_models
+                    _det.CELLPOSE_AVAILABLE = True
+                    _det.CELLPOSE_IMPORT_ERROR = None
+                except Exception as re_err:
+                    raise ValueError(
+                        f"Cellpose was installed but could not be imported: {re_err}\n\n"
+                        "Try restarting the application."
+                    )
+            else:
+                raise ValueError(
+                    f"Model '{model_name}' is not available — Cellpose is not installed.\n\n"
+                    f"Attempted automatic installation but it failed:\n{msg}\n\n"
+                    "Select another configuration or install Cellpose manually."
+                )
         if method == "yolo" and not YOLO_AVAILABLE:
             model_name = methods.get("yolo", {}).get("model", "yolo26s-seg.pt")
-            detail = f"\n\nDetails: {YOLO_IMPORT_ERROR}" if YOLO_IMPORT_ERROR else ""
-            raise ValueError(
-                f"Model '{model_name}' cannot be loaded because the Ultralytics library "
-                "was not found in the environment running this GUI.\n\n"
-                "Install or repair the project's segmentation dependencies, or select another configuration."
-                f"{detail}"
+            QMessageBox.information(
+                self, "Installing Ultralytics (YOLO)",
+                "The Ultralytics library is not installed in this environment.\n\n"
+                "Attempting automatic installation — this may take a minute..."
             )
+            ok, msg = self._try_auto_install("ultralytics")
+            if ok:
+                try:
+                    from ultralytics import YOLO as _YOLO
+                    import automap_hxn.blobs.detection as _det
+                    _det.YOLO = _YOLO
+                    _det.YOLO_AVAILABLE = True
+                    _det.YOLO_IMPORT_ERROR = None
+                except Exception as re_err:
+                    raise ValueError(
+                        f"Ultralytics was installed but could not be imported: {re_err}\n\n"
+                        "Try restarting the application."
+                    )
+            else:
+                raise ValueError(
+                    f"Model '{model_name}' is not available — Ultralytics is not installed.\n\n"
+                    f"Attempted automatic installation but it failed:\n{msg}\n\n"
+                    "Select another configuration or install Ultralytics manually."
+                )
         if method == "stardist" and not STARDIST_AVAILABLE:
             model_name = methods.get("stardist", {}).get("model_name", "2D_versatile_fluo")
-            detail = f"\n\nDetails: {STARDIST_IMPORT_ERROR}" if STARDIST_IMPORT_ERROR else ""
-            raise ValueError(
-                f"Model '{model_name}' cannot be loaded because the StarDist library "
-                "was not found in the environment running this GUI.\n\n"
-                "Install or repair the project's segmentation dependencies, or select another configuration."
-                f"{detail}"
+            QMessageBox.information(
+                self, "Installing StarDist",
+                "StarDist is not installed in this environment.\n\n"
+                "Attempting automatic installation — this should only take a moment..."
             )
+            ok, msg = self._try_auto_install("stardist")
+            if ok:
+                try:
+                    from stardist.models import StarDist2D as _SD
+                    import automap_hxn.blobs.detection as _det
+                    _det.StarDist2D = _SD
+                    _det.STARDIST_AVAILABLE = True
+                    _det.STARDIST_IMPORT_ERROR = None
+                except Exception as re_err:
+                    # StarDist installed but can't load — likely TensorFlow missing
+                    raise ValueError(
+                        f"StarDist installed but could not be imported: {re_err}\n\n"
+                        "StarDist requires TensorFlow 2.19 which is not installed "
+                        "in this environment.\n\n"
+                        "To fix, run the following in the hxn-gui environment:\n\n"
+                        "    pip install \"tensorflow>=2.19,<2.20\"\n\n"
+                        "Then restart the application. This is the version used by "
+                        "the AutoMap standalone environment.\n\n"
+                        "Alternatively, select another detection model (simple, YOLO, "
+                        "watershed) which are already available."
+                    )
+            else:
+                raise ValueError(
+                    f"Model '{model_name}' is not available — StarDist is not installed.\n\n"
+                    f"Attempted automatic installation but it failed:\n{msg}\n\n"
+                    "To install manually, run:\n\n"
+                    "    pip install stardist \"tensorflow>=2.19,<2.20\"\n\n"
+                    "Or select another detection model."
+                )
 
         if method == "cellpose":
             cellpose_settings = methods.get("cellpose", {})
