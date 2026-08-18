@@ -186,3 +186,10 @@ cellpose_limitations_test/
 *.jpeg
 *.svg
 output/
+
+# Claude Code directory (tasks, memory, etc.)
+.claude/
+CLAUDE.md
+
+# Generated test configs from the JSON Maker tab
+configs/Generated JSONS/

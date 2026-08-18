@@ -53,11 +53,14 @@ JSON_MAKER_UNIVERSAL = "universal"
 
 DETECTION_METHOD_BLOCKS = {
     "simple": {
-        "max_threshold": 255,
+        # max_threshold is derived automatically at create time: it matches
+        # the largest gui_threshold_values entry.
         "max_area": 50000,
         "threshold_step": 5,
         "filter_by_color": False,
         "filter_by_circularity": False,
+        "gui_threshold_values": [0, 10, 100],
+        "gui_min_area_values": [200],
     },
     "hough": {
         "max_radius": 40,
@@ -69,8 +72,8 @@ DETECTION_METHOD_BLOCKS = {
     "watershed": {
         "min_distance": 10,
         "threshold_abs": 0.3,
-        "gui_threshold_values": list(range(0, 251, 25)),
-        "gui_min_area_values": list(range(25, 501, 25)),
+        "gui_threshold_values": [0, 10, 100],
+        "gui_min_area_values": [200],
     },
     "cellpose": {
         "diameter": 30,
@@ -90,7 +93,7 @@ DETECTION_METHOD_BLOCKS = {
     },
     "connected_components": {
         "connectivity": 8,
-        "gui_threshold_values": [100],
+        "gui_threshold_values": [0, 10, 100],
         "gui_min_area_values": [200],
     },
     "contours": {
@@ -140,7 +143,7 @@ JSON_MAKER_SEGMENTATION_THRESHOLDS = {
 JSON_MAKER_COMMON_SECTIONS = {
     "execution_params": {"mode": "real", "proceed_with_fine_scan": True},
     "scan_params": {
-        "label": "universal_test", "scan_id": 394015,
+        "label": "universal_test", "scan_id": None,
         "dets": "dets_fast", "det_names": ["fs", "eiger2", "xspress3"],
         "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
         "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
@@ -151,14 +154,14 @@ JSON_MAKER_COMMON_SECTIONS = {
         "step_size_fine": 0.1, "exp_t_fine": 0.005, "fine_scan_pad_ratio": 0.3,
     },
     "export_params": {
-        "elem_list": [["Ni"]], "export_norm": "sclr1_ch4",
+        "elem_list": [["Ca", "Fe", "S"]], "export_norm": "sclr1_ch4",
         "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
         "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
         "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
     },
     "calibration_params": {
-        "microns_per_pixel_x": 0.25, "microns_per_pixel_y": 0.25,
-        "true_origin_x": 10, "true_origin_y": 20,
+        "microns_per_pixel_x": 1.5, "microns_per_pixel_y": 1.5,
+        "true_origin_x": 10, "true_origin_y": 10,
     },
     "analysis_params": {"analysis": True, "execute": True},
     "segmentation_params": {
@@ -219,6 +222,90 @@ class ModelSelectField(QWidget):
             return self.custom_input.text().strip()
         return self.combo.currentText()
 
+
+class SweepValuesField(QWidget):
+    """Editor for gui_*_values sweep lists: explicit custom values or an
+    auto-generated min/max/step range. Either way value() returns the plain
+    list that the analysis sliders and compute sweep consume."""
+
+    CUSTOM = "Custom set"
+    RANGE = "Range"
+
+    def __init__(self, default, parent=None):
+        super().__init__(parent)
+        self._is_float = any(isinstance(v, float) for v in default)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([self.CUSTOM, self.RANGE])
+        layout.addWidget(self.mode_combo)
+
+        # Custom mode: one JSON list field, e.g. [100] or [50, 80, 100]
+        self.custom_input = QLineEdit()
+        self.custom_input.setText(json.dumps(default))
+        self.custom_input.setPlaceholderText("e.g. [100] or [50, 80, 100]")
+        layout.addWidget(self.custom_input, 1)
+
+        # Range mode: min / max / step spinboxes
+        def _spin(value):
+            spin = QDoubleSpinBox() if self._is_float else QSpinBox()
+            if self._is_float:
+                spin.setDecimals(3)
+                spin.setRange(-1e6, 1e6)
+            else:
+                spin.setRange(-1_000_000, 1_000_000)
+            spin.setValue(value)
+            return spin
+
+        first = default[0] if default else 0
+        last = default[-1] if default else 0
+        self.min_spin = _spin(first)
+        self.max_spin = _spin(last)
+        self.step_spin = _spin(1.0 if self._is_float else 10)
+        self.range_widgets = QWidget()
+        range_layout = QHBoxLayout(self.range_widgets)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(14)  # gap BETWEEN the min/max/step pairs
+        for text, spin in (("min", self.min_spin), ("max", self.max_spin), ("step", self.step_spin)):
+            pair = QHBoxLayout()
+            pair.setContentsMargins(0, 0, 0, 0)
+            pair.setSpacing(4)  # keep each label tight against its own spinbox
+            pair.addWidget(QLabel(text))
+            pair.addWidget(spin, 1)
+            range_layout.addLayout(pair, 1)
+        layout.addWidget(self.range_widgets, 1)
+
+        self.range_widgets.setVisible(False)
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+
+    def _on_mode_changed(self, mode):
+        self.custom_input.setVisible(mode == self.CUSTOM)
+        self.range_widgets.setVisible(mode == self.RANGE)
+
+    def value(self):
+        if self.mode_combo.currentText() == self.RANGE:
+            start, stop = self.min_spin.value(), self.max_spin.value()
+            step = self.step_spin.value()
+            if step <= 0:
+                raise ValueError("Range step must be greater than zero.")
+            if stop < start:
+                raise ValueError("Range max must not be less than min.")
+            values, current = [], start
+            while current <= stop + (1e-9 if self._is_float else 0):
+                values.append(round(current, 6) if self._is_float else int(round(current)))
+                current += step
+            return values
+        text = self.custom_input.text().strip()
+        try:
+            values = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Custom values must be a JSON list, e.g. [100] ({error}).")
+        if not isinstance(values, list) or not values:
+            raise ValueError("Custom values must be a non-empty JSON list, e.g. [100].")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+            raise ValueError("Custom values must contain only numbers.")
+        return sorted(values)
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -378,6 +465,7 @@ class MainWindow(QWidget):
         self.progress_bar = QProgressBar()
         self.mosaic_scan_btn = None
         self.analysis_widget = None
+        self.analysis_widgets = []  # every stacked analysis box, oldest first
         self.detection_config_path = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_opencv.json"
         self.detection_method = "simple"
         self.detection_settings = {}
@@ -385,6 +473,13 @@ class MainWindow(QWidget):
         self.cellpose_min_size_values = []
         self.fixed_threshold_values = []
         self.fixed_min_area_values = []
+        self.simple_uses_fixed_values = False
+
+    def _uses_fixed_values(self):
+        """True when sliders and the compute sweep use configured value lists."""
+        if self.detection_method in {"connected_components", "watershed"}:
+            return True
+        return self.detection_method == "simple" and self.simple_uses_fixed_values
 
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
@@ -406,11 +501,40 @@ class MainWindow(QWidget):
     def _create_json_maker_tab(self):
         """Create the tab for authoring initial-scan JSON configurations."""
         widget = QWidget()
+        # Tab-wide GroupBox styling: reserve space above the frame for the
+        # title so it never overlaps the first row, even when this GUI is
+        # embedded as a widget inside another Qt application (e.g. HXN GUI).
+        widget.setStyleSheet(
+            "QGroupBox {"
+            "  font-weight: bold;"
+            "  margin-top: 18px;"
+            "  padding-top: 12px;"
+            "}"
+            "QGroupBox::title {"
+            "  subcontrol-origin: margin;"
+            "  subcontrol-position: top left;"
+            "  left: 8px;"
+            "  top: 2px;"
+            "}"
+        )
         layout = QVBoxLayout(widget)
-        layout.addWidget(QLabel("JSON Maker"))
+        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
 
+        # === HEADER SECTION ===
+        header_label = QLabel("<b>JSON Configuration Builder</b>")
+        header_label.setStyleSheet("font-size: 14px; padding: 5px;")
+        layout.addWidget(header_label)
+
+        # === MODEL SELECTION SECTION ===
+        model_group = QGroupBox("Detection Method Configuration")
+        model_layout = QVBoxLayout(model_group)
+        model_layout.setSpacing(8)
+        model_layout.setContentsMargins(10, 24, 10, 10)  # left, top, right, bottom - extra top padding
+
+        # First row: Detection method dropdown
         method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Detection Method:"))
+        method_row.addWidget(QLabel("Configuration Type:"))
         self.json_maker_method_combo = QComboBox()
         self.json_maker_method_combo.addItem("Universal (all methods)", JSON_MAKER_UNIVERSAL)
         for method in JSON_MAKER_METHODS:
@@ -420,80 +544,282 @@ class MainWindow(QWidget):
         self.json_maker_method_combo.setCurrentIndex(0)
         self.json_maker_method_combo.currentIndexChanged.connect(self._on_json_maker_method_changed)
         method_row.addWidget(self.json_maker_method_combo, 1)
+        method_row.addStretch()
+        model_layout.addLayout(method_row)
 
-        self.json_maker_active_label = QLabel("Active model:")
-        method_row.addWidget(self.json_maker_active_label)
+        # Second row: Active model (only for Universal)
+        active_row = QHBoxLayout()
+        self.json_maker_active_label = QLabel("Default Active Model:")
+        active_row.addWidget(self.json_maker_active_label)
         self.json_maker_active_combo = QComboBox()
         for method in JSON_MAKER_METHODS:
             self.json_maker_active_combo.addItem(
                 JSON_MAKER_METHOD_LABELS.get(method, method), method
             )
         self.json_maker_active_combo.currentIndexChanged.connect(self._on_json_maker_method_changed)
-        method_row.addWidget(self.json_maker_active_combo, 1)
-        layout.addLayout(method_row)
+        active_row.addWidget(self.json_maker_active_combo, 1)
+        active_row.addStretch()
+        model_layout.addLayout(active_row)
 
+        # Hint text with better spacing
         self.json_maker_hint = QLabel(
-            "Universal writes every detection_methods block, so the file can be "
-            "switched to another model later by editing blob_detection_method. "
-            "The 'Active model' picks which method starts selected, and its "
-            "settings are edited below."
+            "ℹ️ Universal creates a config with all detection methods. "
+            "Model-specific creates a config for only one method."
         )
         self.json_maker_hint.setWordWrap(True)
-        layout.addWidget(self.json_maker_hint)
+        self.json_maker_hint.setStyleSheet("color: #666; padding: 5px; font-size: 11px;")
+        model_layout.addWidget(self.json_maker_hint)
 
-        # --- Scrollable form generated from the config schema ---
+        layout.addWidget(model_group)
+
+        # === TABBED CONFIGURATION SECTIONS ===
         self.json_maker_fields = {}
-        form_container = QWidget()
-        form_layout = QVBoxLayout(form_container)
-        form_layout.setSpacing(12)
-        for section, fields in JSON_MAKER_COMMON_SECTIONS.items():
-            group = QGroupBox(section)
-            group_form = QFormLayout(group)
-            group_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-            self.json_maker_fields[section] = {}
-            for key, default in fields.items():
-                field_widget = self._make_json_maker_field(key, default)
-                group_form.addRow(key, field_widget)
-                self.json_maker_fields[section][key] = (field_widget, default)
-            form_layout.addWidget(group)
+        config_tabs = QTabWidget()
+        config_tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #ccc; }")
 
-        # Method-specific settings: one stacked page per detection method.
-        self.json_maker_method_group = QGroupBox("detection_methods: simple")
-        method_group_layout = QVBoxLayout(self.json_maker_method_group)
-        self.json_maker_method_stack = QStackedWidget()
+        # Tab 1: Core Settings
+        core_tab = self._create_json_maker_core_tab()
+        config_tabs.addTab(core_tab, "Core Settings")
+
+        # Tab 2: Scan Parameters
+        scan_tab = self._create_json_maker_scan_tab()
+        config_tabs.addTab(scan_tab, "Scan Parameters")
+
+        # Tab 3: Export & Calibration
+        export_tab = self._create_json_maker_export_tab()
+        config_tabs.addTab(export_tab, "Export & Calibration")
+
+        # Tab 4: Advanced
+        advanced_tab = self._create_json_maker_advanced_tab()
+        config_tabs.addTab(advanced_tab, "Advanced")
+
+        layout.addWidget(config_tabs, 1)
+
+        # === BOTTOM BUTTON ===
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        create_btn = QPushButton("💾 Create JSON Configuration")
+        create_btn.setStyleSheet("padding: 8px 16px; font-weight: bold;")
+        create_btn.clicked.connect(self.on_create_json_clicked)
+        button_layout.addWidget(create_btn)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+
+        self._on_json_maker_method_changed()
+        return widget
+
+    def _create_json_maker_core_tab(self):
+        """Create Core Settings tab: detection method params, segmentation params."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Segmentation parameters
+        seg_group = QGroupBox("segmentation_params")
+        seg_form = QFormLayout(seg_group)
+        seg_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        seg_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["segmentation_params"] = {}
+        # blob_detection_method comes from the dropdown; the min thresholds
+        # are derived from the gui_*_values lists at create time (smallest
+        # entry), so only the remaining keys are edited directly.
+        derived_seg_keys = {
+            "blob_detection_method", "min_threshold_intensity", "min_threshold_area",
+        }
+        for key, default in JSON_MAKER_COMMON_SECTIONS["segmentation_params"].items():
+            if key not in derived_seg_keys:
+                field_widget = self._make_json_maker_field(key, default)
+                seg_form.addRow(key, field_widget)
+                self.json_maker_fields["segmentation_params"][key] = (field_widget, default)
+        seg_note = QLabel(
+            "min_threshold_intensity / min_threshold_area are set automatically "
+            "from the smallest values in the model's slider lists below."
+        )
+        seg_note.setWordWrap(True)
+        seg_note.setStyleSheet("color: #666; font-size: 11px;")
+        seg_form.addRow(seg_note)
+        layout.addWidget(seg_group)
+
+        # Method-specific settings: one group box per method. In Universal
+        # mode every box is shown (all blocks are written to the JSON and the
+        # user may hand-switch models later); in model-specific mode only the
+        # selected method's box is visible.
+        self.json_maker_method_groups = {}
         self.json_maker_method_fields = {}
         for method in JSON_MAKER_METHODS:
-            page = QWidget()
-            page_form = QFormLayout(page)
-            page_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            group = QGroupBox(f"detection_methods: {method}")
+            group_form = QFormLayout(group)
+            group_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            group_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
             self.json_maker_method_fields[method] = {}
             for key, default in DETECTION_METHOD_BLOCKS[method].items():
                 field_widget = self._make_json_maker_field(
                     key, default, options=JSON_MAKER_MODEL_OPTIONS.get((method, key))
                 )
-                page_form.addRow(key, field_widget)
+                group_form.addRow(key, field_widget)
                 self.json_maker_method_fields[method][key] = (field_widget, default)
-            self.json_maker_method_stack.addWidget(page)
-        method_group_layout.addWidget(self.json_maker_method_stack)
-        form_layout.addWidget(self.json_maker_method_group)
-        form_layout.addStretch()
+            self.json_maker_method_groups[method] = group
+            layout.addWidget(group)
 
+        layout.addStretch()
+        scroll.setWidget(container)
+
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(scroll)
+        return wrapper
+
+    def _create_json_maker_scan_tab(self):
+        """Create Scan Parameters tab: scan_params and fine_scan_params."""
+        widget = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setWidget(form_container)
-        layout.addWidget(scroll, 1)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        create_btn = QPushButton("Create JSON Configuration")
-        create_btn.clicked.connect(self.on_create_json_clicked)
-        layout.addWidget(create_btn)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
 
-        self._on_json_maker_method_changed()
+        # Scan params
+        scan_group = QGroupBox("scan_params")
+        scan_form = QFormLayout(scan_group)
+        scan_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        scan_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["scan_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["scan_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            scan_form.addRow(key, field_widget)
+            self.json_maker_fields["scan_params"][key] = (field_widget, default)
+        layout.addWidget(scan_group)
+
+        # Fine scan params
+        fine_group = QGroupBox("fine_scan_params")
+        fine_form = QFormLayout(fine_group)
+        fine_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        fine_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["fine_scan_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["fine_scan_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            fine_form.addRow(key, field_widget)
+            self.json_maker_fields["fine_scan_params"][key] = (field_widget, default)
+        layout.addWidget(fine_group)
+
+        layout.addStretch()
+        scroll.setWidget(container)
+
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(scroll)
+        return wrapper
+
+    def _create_json_maker_export_tab(self):
+        """Create Export & Calibration tab: export_params and calibration_params."""
+        widget = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Export params
+        export_group = QGroupBox("export_params")
+        export_form = QFormLayout(export_group)
+        export_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        export_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["export_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["export_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            export_form.addRow(key, field_widget)
+            self.json_maker_fields["export_params"][key] = (field_widget, default)
+        layout.addWidget(export_group)
+
+        # Calibration params
+        calib_group = QGroupBox("calibration_params")
+        calib_form = QFormLayout(calib_group)
+        calib_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        calib_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["calibration_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["calibration_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            calib_form.addRow(key, field_widget)
+            self.json_maker_fields["calibration_params"][key] = (field_widget, default)
+        layout.addWidget(calib_group)
+
+        layout.addStretch()
+        scroll.setWidget(container)
+
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(scroll)
+        return wrapper
+
+    def _create_json_maker_advanced_tab(self):
+        """Create Advanced tab: execution_params, morphology_params, analysis_params."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Execution params
+        exec_group = QGroupBox("execution_params")
+        exec_form = QFormLayout(exec_group)
+        exec_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        exec_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["execution_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["execution_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            exec_form.addRow(key, field_widget)
+            self.json_maker_fields["execution_params"][key] = (field_widget, default)
+        layout.addWidget(exec_group)
+
+        # Morphology params
+        morph_group = QGroupBox("morphology_params")
+        morph_form = QFormLayout(morph_group)
+        morph_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        morph_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["morphology_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["morphology_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            morph_form.addRow(key, field_widget)
+            self.json_maker_fields["morphology_params"][key] = (field_widget, default)
+        layout.addWidget(morph_group)
+
+        # Analysis params
+        analysis_group = QGroupBox("analysis_params")
+        analysis_form = QFormLayout(analysis_group)
+        analysis_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        analysis_form.setContentsMargins(10, 22, 10, 10)  # Add top padding for GroupBox title
+        self.json_maker_fields["analysis_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["analysis_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            analysis_form.addRow(key, field_widget)
+            self.json_maker_fields["analysis_params"][key] = (field_widget, default)
+        layout.addWidget(analysis_group)
+
+        layout.addStretch()
         return widget
 
     def _make_json_maker_field(self, key, default, options=None):
         """Build an input widget for one config value based on its default's type."""
         if options:
             return ModelSelectField(options, default)
+        if key in {
+            "gui_threshold_values", "gui_min_area_values",
+            "gui_cellprob_threshold_values", "gui_min_size_values",
+        }:
+            return SweepValuesField(default)
         if key == "mode":
             combo = QComboBox()
             combo.addItems(JSON_MAKER_MODES)
@@ -534,6 +860,11 @@ class MainWindow(QWidget):
                     f"'{name}' is set to '{ModelSelectField.OTHER}' but no custom model name was entered."
                 )
             return value
+        if isinstance(field_widget, SweepValuesField):
+            try:
+                return field_widget.value()
+            except ValueError as error:
+                raise ValueError(f"'{name}': {error}") from error
         if isinstance(field_widget, QComboBox):
             return field_widget.currentText()
         if isinstance(field_widget, QCheckBox):
@@ -569,12 +900,15 @@ class MainWindow(QWidget):
         self.json_maker_active_label.setVisible(is_universal)
         self.json_maker_active_combo.setVisible(is_universal)
 
-        self.json_maker_method_stack.setCurrentIndex(JSON_MAKER_METHODS.index(active_method))
-        self.json_maker_method_group.setTitle(f"detection_methods: {active_method}")
+        # Universal: show every method's parameter box (all blocks are written
+        # to the JSON). Model-specific: show only the selected method's box.
+        for method, group in self.json_maker_method_groups.items():
+            group.setVisible(is_universal or method == active_method)
+            if method == active_method:
+                group.setTitle(f"detection_methods: {method}  (active)")
+            else:
+                group.setTitle(f"detection_methods: {method}")
 
-        min_threshold, min_area = JSON_MAKER_SEGMENTATION_THRESHOLDS[active_method]
-        self.json_maker_fields["segmentation_params"]["min_threshold_intensity"][0].setValue(min_threshold)
-        self.json_maker_fields["segmentation_params"]["min_threshold_area"][0].setValue(min_area)
         label = "universal_test" if is_universal else f"{active_method}_test"
         self.json_maker_fields["scan_params"]["label"][0].setText(label)
 
@@ -586,6 +920,10 @@ class MainWindow(QWidget):
                 key: self._read_json_maker_field(f"{section}.{key}", field_widget, default)
                 for key, (field_widget, default) in fields.items()
             }
+
+        # Ensure segmentation_params exists and add blob_detection_method
+        if "segmentation_params" not in config:
+            config["segmentation_params"] = {}
         config["segmentation_params"]["blob_detection_method"] = active_method
 
         if selection == JSON_MAKER_UNIVERSAL:
@@ -604,6 +942,38 @@ class MainWindow(QWidget):
             else:
                 detection_methods[method] = dict(DETECTION_METHOD_BLOCKS[method])
         config["detection_methods"] = detection_methods
+
+        # simple: max_threshold auto-matches the largest slider threshold, and
+        # the min-area slider values must fit under the max_area blob filter.
+        if "simple" in detection_methods:
+            simple_block = detection_methods["simple"]
+            threshold_values = simple_block.get("gui_threshold_values", [100])
+            simple_block["max_threshold"] = max(threshold_values)
+            area_values = simple_block.get("gui_min_area_values", [200])
+            max_area = simple_block.get("max_area", 50000)
+            oversized = [a for a in area_values if a > max_area]
+            if oversized:
+                raise ValueError(
+                    f"simple.gui_min_area_values contains {oversized}, which "
+                    f"exceed max_area={max_area}. Raise max_area or remove "
+                    "those values — blobs larger than max_area are rejected."
+                )
+
+        # The segmentation minimums are derived from the ACTIVE method's
+        # slider lists: smallest entry of each (headless uses these directly).
+        seg = config["segmentation_params"]
+        active_block = detection_methods.get(active_method, {})
+        if active_method in {"simple", "watershed", "connected_components"}:
+            seg["min_threshold_intensity"] = min(active_block.get("gui_threshold_values", [100]))
+            seg["min_threshold_area"] = min(active_block.get("gui_min_area_values", [200]))
+        elif active_method == "cellpose":
+            seg["min_threshold_intensity"] = int(round(
+                min(active_block.get("gui_cellprob_threshold_values", [0.0])) * 10
+            ))
+            seg["min_threshold_area"] = min(active_block.get("gui_min_size_values", [10]))
+        else:  # yolo / stardist ignore these thresholds
+            seg["min_threshold_intensity"] = 0
+            seg["min_threshold_area"] = 0
         return config
 
     def on_create_json_clicked(self):
@@ -951,12 +1321,13 @@ class MainWindow(QWidget):
             min_threshold = segmentation.get("min_threshold_intensity", 100)
             min_area = segmentation.get("min_threshold_area", 200)
 
+        self.simple_uses_fixed_values = False
         if method in {"connected_components", "watershed"}:
             method_settings = methods.get(method, {})
-            self.fixed_threshold_values = list(
+            self.fixed_threshold_values = sorted(
                 method_settings.get("gui_threshold_values", [min_threshold])
             )
-            self.fixed_min_area_values = list(
+            self.fixed_min_area_values = sorted(
                 method_settings.get("gui_min_area_values", [min_area])
             )
             if not self.fixed_threshold_values or not self.fixed_min_area_values:
@@ -964,14 +1335,23 @@ class MainWindow(QWidget):
                     f"{method} GUI settings must provide at least one "
                     "gui_threshold_values and one gui_min_area_values."
                 )
-            min_threshold = min(
-                self.fixed_threshold_values,
-                key=lambda value: abs(value - min_threshold),
-            )
-            min_area = min(
-                self.fixed_min_area_values,
-                key=lambda value: abs(value - min_area),
-            )
+            # Sliders start on the middle value of each sorted list.
+            min_threshold = self.fixed_threshold_values[len(self.fixed_threshold_values) // 2]
+            min_area = self.fixed_min_area_values[len(self.fixed_min_area_values) // 2]
+        elif method == "simple":
+            # Optional for simple: configs may pin the sweep to explicit value
+            # lists (a single value each = one detection run). Configs without
+            # them keep the legacy full sweep.
+            method_settings = methods.get(method, {})
+            threshold_values = method_settings.get("gui_threshold_values")
+            min_area_values = method_settings.get("gui_min_area_values")
+            if threshold_values or min_area_values:
+                self.simple_uses_fixed_values = True
+                self.fixed_threshold_values = sorted(threshold_values or [min_threshold])
+                self.fixed_min_area_values = sorted(min_area_values or [min_area])
+                # Sliders start on the middle value of each sorted list.
+                min_threshold = self.fixed_threshold_values[len(self.fixed_threshold_values) // 2]
+                min_area = self.fixed_min_area_values[len(self.fixed_min_area_values) // 2]
 
         self.detection_method = method
         self.detection_settings = {
@@ -1158,6 +1538,7 @@ class MainWindow(QWidget):
 
         self.setup_widget.setParent(None)
         self.analysis_widget = QWidget()
+        self.analysis_widgets.append(self.analysis_widget)
         self.main_layout = QHBoxLayout(self.analysis_widget)
         
         left_panel = QVBoxLayout()
@@ -1180,6 +1561,30 @@ class MainWindow(QWidget):
                 100, lambda: self._start_blob_computation(generation)
             )
 
+    def _exit_analysis_box(self, box):
+        """Close one stacked analysis box. The last box returns to selection."""
+        remaining = [w for w in self.analysis_widgets if w is not box]
+        if not remaining:
+            self.return_to_selection()
+            return
+
+        if box in self.analysis_widgets:
+            self.analysis_widgets.remove(box)
+        if self.analysis_widget is box:
+            # The live detection state (scene, sliders, blob items) belongs to
+            # the box being removed; stop in-flight computation and drop the
+            # dead references so older boxes cannot act on deleted Qt items.
+            with self._analysis_lock:
+                self._analysis_generation += 1
+                self.blob_items.clear()
+                self.union_box_items.clear()
+            self.graphics_scene = None
+            self.graphics_view = None
+            self.pixmap_item = None
+            self.analysis_widget = remaining[-1]
+        self.outer_layout.removeWidget(box)
+        box.deleteLater()
+
     def return_to_selection(self):
         """Discard the current analysis screen and rebuild the TIFF selector."""
         # The scene owns its graphics items.  Clear Python references before
@@ -1190,10 +1595,11 @@ class MainWindow(QWidget):
             self.blob_items.clear()
             self.union_box_items.clear()
 
-        if self.analysis_widget is not None:
-            self.outer_layout.removeWidget(self.analysis_widget)
-            self.analysis_widget.deleteLater()
-            self.analysis_widget = None
+        for box in self.analysis_widgets:
+            self.outer_layout.removeWidget(box)
+            box.deleteLater()
+        self.analysis_widgets = []
+        self.analysis_widget = None
         self.outer_layout.removeWidget(self.progress_bar)
         self.progress_bar.deleteLater()
         self.setup_widget.deleteLater()
@@ -1245,13 +1651,18 @@ class MainWindow(QWidget):
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
 
-        # Exit/Reset
+        # Exit closes only the analysis box it belongs to; when it is the last
+        # box it behaves like Return to Selection. Never closes the window,
+        # which would lock out embedded hosts (e.g. the HXN GUI).
+        current_box = self.analysis_widget
         exit_btn = QPushButton("Exit")
-        exit_btn.clicked.connect(self.close)
+        exit_btn.clicked.connect(lambda _=False, box=current_box: self._exit_analysis_box(box))
         return_btn = QPushButton("Return to Selection")
         return_btn.clicked.connect(self.return_to_selection)
         reset_btn = QPushButton("Reset View")
-        reset_btn.clicked.connect(lambda: self.graphics_view.resetTransform())
+        reset_btn.clicked.connect(
+            lambda: self.graphics_view.resetTransform() if self.graphics_view else None
+        )
         
         button_layout = QHBoxLayout()
         button_layout.addWidget(return_btn)
@@ -1369,7 +1780,7 @@ class MainWindow(QWidget):
                     range(len(self.cellpose_cellprob_values)),
                     key=lambda index: abs(self.cellpose_cellprob_values[index] - self.app_state.thresholds[color] / 10),
                 ))
-            elif self.detection_method in {"connected_components", "watershed"}:
+            elif self._uses_fixed_values():
                 slider.setRange(0, len(self.fixed_threshold_values) - 1)
                 slider.setValue(min(
                     range(len(self.fixed_threshold_values)),
@@ -1383,7 +1794,7 @@ class MainWindow(QWidget):
             slider.valueChanged.connect(lambda val, c=color: self.on_slider_change(val, c))
             if self.detection_method == "cellpose":
                 slider.setToolTip("Choose one of the precomputed Cellpose cellprob_threshold values.")
-            elif self.detection_method in {"connected_components", "watershed"}:
+            elif self._uses_fixed_values():
                 slider.setToolTip("Choose one of the configured threshold values.")
             self.sliders[color] = slider
             self.slider_labels[color] = label
@@ -1408,7 +1819,7 @@ class MainWindow(QWidget):
                     range(len(self.cellpose_min_size_values)),
                     key=lambda index: abs(self.cellpose_min_size_values[index] - self.app_state.area_thresholds[color]),
                 ))
-            elif self.detection_method in {"connected_components", "watershed"}:
+            elif self._uses_fixed_values():
                 slider.setRange(0, len(self.fixed_min_area_values) - 1)
                 slider.setValue(min(
                     range(len(self.fixed_min_area_values)),
@@ -1422,7 +1833,7 @@ class MainWindow(QWidget):
             slider.valueChanged.connect(lambda val, c=color: self.on_area_slider_change(val, c))
             if self.detection_method == "cellpose":
                 slider.setToolTip("Choose one of the precomputed Cellpose min_size values.")
-            elif self.detection_method in {"connected_components", "watershed"}:
+            elif self._uses_fixed_values():
                 slider.setToolTip("Choose one of the configured minimum-area values.")
             self.area_sliders[color] = slider
             self.area_slider_labels[color] = label
@@ -1451,11 +1862,15 @@ class MainWindow(QWidget):
         elif self.detection_method in {"yolo", "stardist"}:
             thresholds_range = [0]
             area_range = [0]
-        elif self.detection_method in {"connected_components", "watershed"}:
+        elif self._uses_fixed_values():
             thresholds_range = self.fixed_threshold_values
             area_range = self.fixed_min_area_values
         else:
-            thresholds_range = list(range(0, 256, 10))
+            # Legacy full sweep for simple configs without gui_*_values lists.
+            # Clamp to max_threshold: SimpleBlobDetector rejects
+            # minThreshold > maxThreshold.
+            max_t = int(self.detection_settings.get("max_threshold", 255))
+            thresholds_range = [t for t in range(0, 256, 10) if t <= max_t] or [0]
             area_range = list(range(10, 501, 10))
         total_iterations = len(self.app_state.element_colors) * len(thresholds_range) * len(area_range)
         
@@ -1611,12 +2026,32 @@ class MainWindow(QWidget):
                 method=self.detection_method, **method_params,
             )
 
+        max_threshold = self.detection_settings.get("max_threshold", 255)
+        if not 0 <= min_thresh <= max_threshold:
+            print(
+                f"[GUI] Skipping simple detection for {file_name} ({color}): "
+                f"threshold {min_thresh} outside [0, {max_threshold}]."
+            )
+            return []
+
+        # SimpleBlobDetector requires strictly 0 < minArea <= maxArea.
+        # A configured 0 means "no minimum", so clamp it to the smallest
+        # accepted value instead of crashing.
+        max_area = self.detection_settings.get("max_area", 50000)
+        effective_min_area = max(1, min_area)
+        if effective_min_area > max_area:
+            print(
+                f"[GUI] Skipping simple detection for {file_name} ({color}): "
+                f"min_area {min_area} exceeds max_area {max_area}."
+            )
+            return []
+
         params = cv2.SimpleBlobDetector_Params()
         params.minThreshold = min_thresh
-        params.maxThreshold = self.detection_settings.get("max_threshold", 255)
+        params.maxThreshold = max_threshold
         params.filterByArea = True
-        params.minArea = min_area
-        params.maxArea = self.detection_settings.get("max_area", 50000)
+        params.minArea = effective_min_area
+        params.maxArea = max_area
         params.thresholdStep = self.detection_settings.get("threshold_step", 5)
         params.filterByColor = self.detection_settings.get("filter_by_color", False)
         params.filterByCircularity = self.detection_settings.get("filter_by_circularity", False)
@@ -1650,6 +2085,8 @@ class MainWindow(QWidget):
         return blobs
 
     def update_boxes(self):
+        if self.graphics_view is None:
+            return
         selected_colors = {c for c, cb in self.checkboxes.items() if cb.isChecked() and c != 'union'}
         blobs = self.get_current_blobs()
         self.graphics_view.update_blobs(blobs, selected_colors)
@@ -1771,7 +2208,7 @@ f"Length: {ub['length']} px<br>"
             )
             self.update_boxes()
             return
-        if self.detection_method in {"connected_components", "watershed"}:
+        if self._uses_fixed_values():
             threshold = self.fixed_threshold_values[value]
             self.app_state.thresholds[color] = threshold
             self.slider_labels[color].setText(
@@ -1797,7 +2234,7 @@ f"Length: {ub['length']} px<br>"
             )
             self.update_boxes()
             return
-        if self.detection_method in {"connected_components", "watershed"}:
+        if self._uses_fixed_values():
             min_area = self.fixed_min_area_values[value]
             self.app_state.area_thresholds[color] = min_area
             self.area_slider_labels[color].setText(
