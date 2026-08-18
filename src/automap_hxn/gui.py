@@ -1577,30 +1577,6 @@ class MainWindow(QWidget):
                 100, lambda: self._start_blob_computation(generation)
             )
 
-    def _exit_analysis_box(self, box):
-        """Close one stacked analysis box. The last box returns to selection."""
-        remaining = [w for w in self.analysis_widgets if w is not box]
-        if not remaining:
-            self.return_to_selection()
-            return
-
-        if box in self.analysis_widgets:
-            self.analysis_widgets.remove(box)
-        if self.analysis_widget is box:
-            # The live detection state (scene, sliders, blob items) belongs to
-            # the box being removed; stop in-flight computation and drop the
-            # dead references so older boxes cannot act on deleted Qt items.
-            with self._analysis_lock:
-                self._analysis_generation += 1
-                self.blob_items.clear()
-                self.union_box_items.clear()
-            self.graphics_scene = None
-            self.graphics_view = None
-            self.pixmap_item = None
-            self.analysis_widget = remaining[-1]
-        self.outer_layout.removeWidget(box)
-        box.deleteLater()
-
     def return_to_selection(self):
         """Discard the current analysis screen and rebuild the TIFF selector."""
         # The scene owns its graphics items.  Clear Python references before
@@ -1667,23 +1643,16 @@ class MainWindow(QWidget):
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
 
-        # Exit closes only the analysis box it belongs to; when it is the last
-        # box it behaves like Return to Selection. Never closes the window,
-        # which would lock out embedded hosts (e.g. the HXN GUI).
-        current_box = self.analysis_widget
-        exit_btn = QPushButton("Exit")
-        exit_btn.clicked.connect(lambda _=False, box=current_box: self._exit_analysis_box(box))
         return_btn = QPushButton("Return to Selection")
         return_btn.clicked.connect(self.return_to_selection)
         reset_btn = QPushButton("Reset View")
         reset_btn.clicked.connect(
             lambda: self.graphics_view.resetTransform() if self.graphics_view else None
         )
-        
+
         button_layout = QHBoxLayout()
         button_layout.addWidget(return_btn)
         button_layout.addWidget(reset_btn)
-        button_layout.addWidget(exit_btn)
         controls_layout.addLayout(button_layout)
 
         # Lists and buttons
