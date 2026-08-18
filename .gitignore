@@ -153,6 +153,11 @@ cython_debug/
 
 # Automatically downloaded YOLO weights
 yolo26s-seg.pt
+
+# Segmentation mask exports (all models)
+mask_exports/
+
+# Legacy export dirs (now subfolders of mask_exports, kept for backwards compat)
 yolo_exports/
 StarDist/
 

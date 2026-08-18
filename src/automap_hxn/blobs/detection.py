@@ -38,7 +38,8 @@ except Exception as error:
 
 # Key: model filename/path, Value: Ultralytics YOLO instance.
 _YOLO_MODEL_CACHE = {}
-_YOLO_EXPORT_DIR = Path(__file__).resolve().parents[3] / "yolo_exports"
+_MASK_EXPORT_ROOT = Path(__file__).resolve().parents[3] / "mask_exports"
+_YOLO_EXPORT_DIR = _MASK_EXPORT_ROOT / "yolo"
 
 # StarDist and TensorFlow are optional so the other detection modes remain
 # usable when its runtime is not installed.
@@ -53,7 +54,7 @@ except Exception as error:
 
 # Key: pretrained model name, Value: StarDist2D instance.
 _STARDIST_MODEL_CACHE = {}
-_STARDIST_EXPORT_DIR = Path(__file__).resolve().parents[3] / "StarDist"
+_STARDIST_EXPORT_DIR = _MASK_EXPORT_ROOT / "stardist"
 
 
 def detect_blobs(img_norm, img_orig, min_thresh, min_area, color, 
@@ -516,6 +517,50 @@ def _export_yolo_results(image, output_name, records):
         json.dump(metadata, stream, indent=2)
 
 
+def _export_label_mask_results(export_dir, model_name, image, output_name, labels, detections):
+    """Shared export for any model that produces an integer instance label map.
+
+    Writes into mask_exports/<model_name>/:
+      - <stem>_<model>_input.tiff         the image the model saw
+      - <stem>_<model>_masks.tiff         binary 0/255 foreground mask
+      - <stem>_<model>_instance_labels.tiff  per-instance integer labels (uint16)
+      - <stem>_<model>_overlay.png        colored filled regions + white outlines
+      - <stem>_<model>_detections.json    center/radius/area per detection
+    """
+    export_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(output_name).stem
+    labels = np.asarray(labels, dtype=np.uint16)
+    mask_preview = (labels > 0).astype(np.uint8) * 255
+
+    if image.ndim == 2:
+        overlay = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    else:
+        overlay = image.copy()
+
+    for label_id in np.unique(labels):
+        if label_id == 0:
+            continue
+        mask = (labels == label_id).astype(np.uint8)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        color = ((37 * int(label_id)) % 256, (97 * int(label_id)) % 256, (173 * int(label_id)) % 256)
+        cv2.drawContours(overlay, contours, -1, color, thickness=cv2.FILLED)
+        cv2.drawContours(overlay, contours, -1, (255, 255, 255), thickness=1)
+
+    tifffile.imwrite(export_dir / f"{stem}_{model_name}_input.tiff", image)
+    tifffile.imwrite(export_dir / f"{stem}_{model_name}_masks.tiff", mask_preview)
+    tifffile.imwrite(export_dir / f"{stem}_{model_name}_instance_labels.tiff", labels)
+    cv2.imwrite(
+        str(export_dir / f"{stem}_{model_name}_overlay.png"),
+        cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+    )
+    serializable = [
+        {k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in d.items()}
+        for d in detections
+    ]
+    with (export_dir / f"{stem}_{model_name}_detections.json").open('w') as f:
+        json.dump(serializable, f, indent=2)
+
+
 def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     """Cellpose-based blob detection for cell/particle segmentation"""
     if not CELLPOSE_AVAILABLE:
@@ -605,8 +650,7 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
     except Exception as e:
         print(f"Cellpose detection failed: {e}")
         return []
-    masks = clear_border(masks) #to clear edge boxes
-    # Convert masks to boxes and areas
+    masks = clear_border(masks)
     boxes, areas = _masks_to_boxes_and_areas(masks)
     
     # Filter by diameter range if specified
@@ -639,7 +683,14 @@ def _detect_blobs_cellpose(img_norm, img_orig, min_thresh, min_area, **kwargs):
             'equiv_diameter': equiv_diameter,
             'bbox': box
         })
-    
+
+    if kwargs.get('export_masks', True) and detections:
+        _export_label_mask_results(
+            _MASK_EXPORT_ROOT / "cellpose", "cellpose",
+            cellpose_input, kwargs.get('output_name', 'cellpose_image'),
+            masks, detections,
+        )
+
     return detections
 
 
@@ -667,25 +718,32 @@ def _detect_blobs_watershed(img_norm, img_orig, min_thresh, min_area, **kwargs):
     for i, (y, x) in enumerate(local_max_coords):
         markers[y, x] = i + 1
     
-    # Apply watershed
     labels = watershed(-dist_transform, markers, mask=binary)
-    
+
     detections = []
+    kept_labels = np.zeros_like(labels, dtype=np.int32)
+    new_id = 1
     for label_id in np.unique(labels):
-        if label_id == 0:  # Skip background
+        if label_id == 0:
             continue
-        
         mask = labels == label_id
-        area = np.sum(mask)
-        
+        area = int(np.sum(mask))
         if area >= min_area:
-            # Calculate centroid
             y_coords, x_coords = np.where(mask)
             x = int(np.mean(x_coords))
             y = int(np.mean(y_coords))
             radius = int(np.sqrt(area / np.pi))
-            detections.append({'center': (x, y), 'radius': radius})
-    
+            detections.append({'center': (x, y), 'radius': radius, 'area': area})
+            kept_labels[mask] = new_id
+            new_id += 1
+
+    if kwargs.get('export_masks', True) and detections:
+        _export_label_mask_results(
+            _MASK_EXPORT_ROOT / "watershed", "watershed",
+            img_norm, kwargs.get('output_name', 'watershed_image'),
+            kept_labels, detections,
+        )
+
     return detections
 
 
@@ -882,21 +940,30 @@ def _detect_blobs_hough_circles(img_norm, img_orig, min_thresh, min_area, **kwar
 
 def _detect_blobs_connected_components(img_norm, img_orig, min_thresh, min_area, **kwargs):
     """Connected components labeling for blob detection"""
-    # Apply threshold
     _, binary = cv2.threshold(img_norm, min_thresh, 255, cv2.THRESH_BINARY)
-    
-    # Find connected components
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary, connectivity=kwargs.get('connectivity', 8)
+    )
+
     detections = []
-    for i in range(1, num_labels):  # Skip background (label 0)
-        area = stats[i, cv2.CC_STAT_AREA]
+    kept_labels = np.zeros_like(labels, dtype=np.uint16)
+    new_id = 1
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
         if area >= min_area:
             x, y = int(centroids[i][0]), int(centroids[i][1])
-            # Estimate radius from area
             radius = int(np.sqrt(area / np.pi))
-            detections.append({'center': (x, y), 'radius': radius})
-    
+            detections.append({'center': (x, y), 'radius': radius, 'area': area})
+            kept_labels[labels == i] = new_id
+            new_id += 1
+
+    if kwargs.get('export_masks', True) and detections:
+        _export_label_mask_results(
+            _MASK_EXPORT_ROOT / "connected_components", "connected_components",
+            img_norm, kwargs.get('output_name', 'cc_image'),
+            kept_labels, detections,
+        )
+
     return detections
 
 def _area_to_equiv_diameter(area_px):

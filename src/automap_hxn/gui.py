@@ -1155,7 +1155,7 @@ class MainWindow(QWidget):
             QMessageBox.information(
                 self, "Installing Ultralytics (YOLO)",
                 "The Ultralytics library is not installed in this environment.\n\n"
-                "Attempting automatic installation — this may take a minute..."
+                "Attempting automatic installation — this should only take a moment..."
             )
             ok, msg = self._try_auto_install("ultralytics")
             if ok:
@@ -1168,13 +1168,19 @@ class MainWindow(QWidget):
                 except Exception as re_err:
                     raise ValueError(
                         f"Ultralytics was installed but could not be imported: {re_err}\n\n"
-                        "Try restarting the application."
+                        "To fix, run in the hxn-gui directory:\n\n"
+                        "    pixi add ultralytics==8.3.253\n\n"
+                        "Then reinstall automap:\n\n"
+                        "    pixi run pip install -e . --no-deps"
                     )
             else:
                 raise ValueError(
                     f"Model '{model_name}' is not available — Ultralytics is not installed.\n\n"
                     f"Attempted automatic installation but it failed:\n{msg}\n\n"
-                    "Select another configuration or install Ultralytics manually."
+                    "To install, run the following in the hxn-gui directory:\n\n"
+                    "    pixi add ultralytics==8.3.253\n\n"
+                    "Or select another detection model (simple, watershed, StarDist) "
+                    "which are already available."
                 )
         if method == "stardist" and not STARDIST_AVAILABLE:
             model_name = methods.get("stardist", {}).get("model_name", "2D_versatile_fluo")
