@@ -474,6 +474,10 @@ class MainWindow(QWidget):
         self.fixed_threshold_values = []
         self.fixed_min_area_values = []
         self.simple_uses_fixed_values = False
+        # Setup screen state (config-driven)
+        self._setup_config = None
+        self._setup_elements = []
+        self._setup_element_files = {}
 
     def _uses_fixed_values(self):
         """True when sliders and the compute sweep use configured value lists."""
@@ -1185,53 +1189,77 @@ class MainWindow(QWidget):
     def _create_setup_screen(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
 
-        # --- Top buttons and label using QGridLayout ---
-        top_grid = QGridLayout()
-        
-        dir_btn = QPushButton("Select Directory")
-        dir_btn.clicked.connect(self.on_dir_selected)
-        top_grid.addWidget(dir_btn, 0, 0)
+        # --- Config section (mandatory) ---
+        config_group = QGroupBox("Configuration")
+        config_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        config_layout = QVBoxLayout(config_group)
+        config_layout.setContentsMargins(10, 20, 10, 10)
 
+        config_row = QHBoxLayout()
+        self.setup_config_btn = QPushButton("Select JSON Config")
+        self.setup_config_btn.clicked.connect(self.on_setup_config_selected)
+        config_row.addWidget(self.setup_config_btn)
+        self.setup_config_label = QLabel("No config loaded — select a JSON to continue.")
+        self.setup_config_label.setStyleSheet("color: #888;")
+        self.setup_config_label.setWordWrap(True)
+        config_row.addWidget(self.setup_config_label, 1)
+        config_layout.addLayout(config_row)
+        layout.addWidget(config_group)
+
+        # --- Element mapping row ---
+        elem_group = QGroupBox("Elements → TIFF Files")
+        elem_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        elem_layout = QVBoxLayout(elem_group)
+        elem_layout.setContentsMargins(10, 20, 10, 10)
+        self.elem_mapping_label = QLabel("Load a config to see expected elements.")
+        self.elem_mapping_label.setStyleSheet("color: #888; font-size: 12px;")
+        self.elem_mapping_label.setWordWrap(True)
+        elem_layout.addWidget(self.elem_mapping_label)
+        layout.addWidget(elem_group)
+
+        # --- Directory + file list ---
+        dir_group = QGroupBox("TIFF Directory")
+        dir_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        dir_layout = QVBoxLayout(dir_group)
+        dir_layout.setContentsMargins(10, 20, 10, 10)
+
+        dir_row = QHBoxLayout()
+        self.setup_dir_btn = QPushButton("Select Directory")
+        self.setup_dir_btn.clicked.connect(self.on_dir_selected)
+        self.setup_dir_btn.setEnabled(False)
+        dir_row.addWidget(self.setup_dir_btn)
         self.dir_label = QLabel("No directory selected.")
-        top_grid.addWidget(self.dir_label, 0, 1, Qt.AlignLeft)
+        self.dir_label.setStyleSheet("color: #888;")
+        dir_row.addWidget(self.dir_label, 1)
+        dir_layout.addLayout(dir_row)
+        dir_layout.addWidget(self.file_list_widget)
+        layout.addWidget(dir_group, 1)
 
+        # --- Bottom buttons ---
+        bottom_row = QHBoxLayout()
         self.mosaic_scan_btn = QPushButton("Perform Mosaic Scan")
         self.mosaic_scan_btn.clicked.connect(self.perform_mosaic_scan)
-        top_grid.addWidget(self.mosaic_scan_btn, 0, 2)
+        bottom_row.addWidget(self.mosaic_scan_btn)
 
-        load_backup_btn = QPushButton("Load Backup")
+        load_backup_btn = QPushButton("Load Backup (.pkl)")
         load_backup_btn.clicked.connect(self.on_load_backup_clicked)
-        top_grid.addWidget(load_backup_btn, 1, 0)
+        bottom_row.addWidget(load_backup_btn)
 
-        top_grid.setColumnStretch(1, 1) # Allow column 1 to expand
-        layout.addLayout(top_grid)
+        bottom_row.addStretch()
 
-        layout.addWidget(self.file_list_widget)
-        param_layout = QGridLayout()
-        param_layout.addWidget(QLabel("Microns per Pixel X:"), 0, 0)
-        self.float_input_micron_x.setRange(0, 1000)
-        self.float_input_micron_x.setValue(1.00)
-        param_layout.addWidget(self.float_input_micron_x, 0, 1)
-        param_layout.addWidget(QLabel("Microns per Pixel Y:"), 1, 0)
-        self.float_input_micron_y.setRange(0, 1000)
-        self.float_input_micron_y.setValue(1.00)
-        param_layout.addWidget(self.float_input_micron_y, 1, 1)
-        param_layout.addWidget(QLabel("True Origin X:"), 2, 0)
-        self.origin_x_input.setRange(-10000, 10000)
-        param_layout.addWidget(self.origin_x_input, 2, 1)
-        param_layout.addWidget(QLabel("True Origin Y:"), 3, 0)
-        self.origin_y_input.setRange(-10000, 10000)
-        param_layout.addWidget(self.origin_y_input, 3, 1)
-        layout.addLayout(param_layout)
+        self.setup_confirm_btn = QPushButton("Confirm and Load Images")
+        self.setup_confirm_btn.clicked.connect(self.on_confirm_clicked)
+        self.setup_confirm_btn.setEnabled(False)
+        self.setup_confirm_btn.setStyleSheet("font-weight: bold; padding: 6px 14px;")
+        bottom_row.addWidget(self.setup_confirm_btn)
+        layout.addLayout(bottom_row)
 
-        # --- Confirm button ---
-        confirm_layout = QHBoxLayout()
-        confirm_layout.addStretch()
-        confirm_btn = QPushButton("Confirm and Load Images")
-        confirm_btn.clicked.connect(self.on_confirm_clicked)
-        confirm_layout.addWidget(confirm_btn)
-        layout.addLayout(confirm_layout)
+        # State
+        self._setup_elements = []       # ordered unique element list from config
+        self._setup_element_files = {}  # element -> abs path (or None)
 
         return widget
 
@@ -1360,27 +1388,160 @@ class MainWindow(QWidget):
             **methods.get(method, {}),
         }
 
-    def on_load_backup_clicked(self):
-        tiff_paths, _ = QFileDialog.getOpenFileNames(self, "Select 3 TIFF files", "", "TIFF Files (*.tif *.tiff)")
-        if len(tiff_paths) != 3:
-            QMessageBox.warning(self, "Invalid Selection", "Please select exactly 3 TIFF files.")
+    def on_setup_config_selected(self):
+        """Load a JSON config; unlocks directory selection and populates element row."""
+        config_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select JSON Configuration",
+            str(Path(__file__).resolve().parents[2] / "configs"),
+            "JSON files (*.json)",
+        )
+        if not config_path:
             return
 
-        pkl_path, _ = QFileDialog.getOpenFileName(self, "Select precomputed_blobs.pkl file", "", "Pickle Files (*.pkl)")
+        config_path = Path(config_path)
+        try:
+            with config_path.open() as f:
+                config = json.load(f)
+        except (OSError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, "Invalid Configuration",
+                                f"Could not read {config_path.name}:\n{error}")
+            return
+
+        elem_list_nested = config.get("export_params", {}).get("elem_list", [])
+        if not elem_list_nested:
+            QMessageBox.warning(self, "Invalid Configuration",
+                                f"{config_path.name} has no elem_list in export_params.")
+            return
+        if isinstance(elem_list_nested[0], str):
+            elem_list_nested = [elem_list_nested]
+        unique_elements = list(dict.fromkeys(
+            e for group in elem_list_nested for e in group
+        ))
+        if not unique_elements or len(unique_elements) > 3:
+            QMessageBox.warning(self, "Invalid Configuration",
+                                f"elem_list must have 1–3 unique elements, got {unique_elements}")
+            return
+
+        # Load detection settings from the config
+        self.detection_config_path = config_path
+        try:
+            self._load_detection_config()
+        except ValueError as error:
+            QMessageBox.warning(self, "Detection Configuration", str(error))
+            return
+
+        method = config.get("segmentation_params", {}).get("blob_detection_method", "simple")
+        self.setup_config_label.setText(
+            f"{config_path.name}   |   method: {method}   |   elements: {', '.join(unique_elements)}"
+        )
+        self.setup_config_label.setStyleSheet("")
+
+        # Store calibration for use at confirm time
+        self._setup_config = config
+        self._setup_elements = unique_elements
+        self._setup_element_files = {e: None for e in unique_elements}
+
+        # Unlock directory selection
+        self.setup_dir_btn.setEnabled(True)
+
+        # Update element mapping row; try auto-match if a directory is already chosen
+        self._refresh_element_mapping()
+        if self.app_state.selected_directory:
+            self._auto_match_elements()
+
+    def _refresh_element_mapping(self):
+        """Rebuild the element→file label and update the Confirm button state."""
+        if not self._setup_elements:
+            self.elem_mapping_label.setText("Load a config to see expected elements.")
+            self.elem_mapping_label.setStyleSheet("color: #888; font-size: 12px;")
+            self.setup_confirm_btn.setEnabled(False)
+            return
+
+        parts = []
+        all_matched = True
+        for elem in self._setup_elements:
+            fpath = self._setup_element_files.get(elem)
+            if fpath:
+                parts.append(f"{elem}: {os.path.basename(fpath)}")
+            else:
+                parts.append(f"{elem}: —")
+                all_matched = False
+
+        self.elem_mapping_label.setText("     ".join(parts))
+        self.elem_mapping_label.setStyleSheet("font-size: 12px;")
+        self.setup_confirm_btn.setEnabled(all_matched)
+
+    def _auto_match_elements(self):
+        """Scan the selected directory and match filenames to element symbols."""
+        directory = self.app_state.selected_directory
+        if not directory or not self._setup_elements:
+            return
+        tiffs = [f for f in sorted(os.listdir(directory))
+                 if f.lower().endswith(('.tif', '.tiff'))]
+        for elem in self._setup_elements:
+            if self._setup_element_files.get(elem):
+                continue  # already matched; don't override a user pick
+            sym = elem.lower()
+            # Score: 3 = exact stem, 2 = stem starts with sym followed by
+            # a non-alpha char or end (e.g. Fe_map matches Fe), 1 = sym
+            # appears at a word boundary within the stem. Plain substring is
+            # not used — "sulphur" contains "s" but should not match "S".
+            import re as _re
+            boundary_re = _re.compile(
+                r'(?<![a-z])' + _re.escape(sym) + r'(?![a-z])'
+            )
+            best, best_score = None, 0
+            for fname in tiffs:
+                stem = Path(fname).stem.lower()
+                if stem == sym:
+                    score = 3
+                elif stem.startswith(sym) and (len(stem) == len(sym) or not stem[len(sym)].isalpha()):
+                    score = 2
+                elif boundary_re.search(stem):
+                    score = 1
+                else:
+                    score = 0
+                if score > best_score:
+                    best, best_score = fname, score
+            if best:
+                self._setup_element_files[elem] = os.path.join(directory, best)
+        self._refresh_element_mapping()
+
+    def on_load_backup_clicked(self):
+        if not getattr(self, '_setup_config', None):
+            QMessageBox.warning(self, "No Config", "Select a JSON config first.")
+            return
+
+        n = len(self._setup_elements)
+        tiff_paths, _ = QFileDialog.getOpenFileNames(
+            self, f"Select {n} TIFF file(s)", "", "TIFF Files (*.tif *.tiff)"
+        )
+        if len(tiff_paths) != n:
+            QMessageBox.warning(self, "Invalid Selection",
+                                f"Please select exactly {n} TIFF file(s).")
+            return
+
+        pkl_path, _ = QFileDialog.getOpenFileName(
+            self, "Select precomputed_blobs.pkl file", "", "Pickle Files (*.pkl)"
+        )
         if not pkl_path:
             return
 
-        self.app_state.microns_per_pixel_x = self.float_input_micron_x.value()
-        self.app_state.microns_per_pixel_y = self.float_input_micron_y.value()
-        self.app_state.true_origin_x = self.origin_x_input.value()
-        self.app_state.true_origin_y = self.origin_y_input.value()
+        calib = self._setup_config.get("calibration_params", {})
+        self.app_state.microns_per_pixel_x = calib.get("microns_per_pixel_x", 1.0)
+        self.app_state.microns_per_pixel_y = calib.get("microns_per_pixel_y", 1.0)
+        self.app_state.true_origin_x = calib.get("true_origin_x", 0.0)
+        self.app_state.true_origin_y = calib.get("true_origin_y", 0.0)
 
-        self.app_state.img_paths = sorted(tiff_paths)
-        self.app_state.file_names = [os.path.basename(p) for p in self.app_state.img_paths]
-        self.app_state.element_colors = ['red', 'green', 'blue']
-        self.app_state.thresholds = {color: 100 for color in self.app_state.element_colors}
-        self.app_state.area_thresholds = {color: 200 for color in self.app_state.element_colors}
-
+        self.app_state.img_paths = tiff_paths
+        self.app_state.file_names = [os.path.basename(p) for p in tiff_paths]
+        color_map = ['red', 'green', 'blue']
+        self.app_state.element_colors = color_map[:n]
+        self.app_state.thresholds = {c: self.detection_settings.get("min_threshold", 100)
+                                     for c in self.app_state.element_colors}
+        self.app_state.area_thresholds = {c: self.detection_settings.get("min_area", 200)
+                                          for c in self.app_state.element_colors}
         try:
             with open(pkl_path, 'rb') as f:
                 self.app_state.precomputed_blobs = pickle.load(f)
@@ -1392,12 +1553,16 @@ class MainWindow(QWidget):
 
     def on_dir_selected(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Directory")
-        if not directory: return
+        if not directory:
+            return
         self.app_state.selected_directory = directory
         self.dir_label.setText(directory)
+        self.dir_label.setStyleSheet("")
         self.mosaic_scan_btn.hide()
         self.app_state.file_paths = []
         self.app_state.selected_files_order = []
+        # Reset any previous auto-match so we re-run against the new directory
+        self._setup_element_files = {e: None for e in self._setup_elements}
         self.file_list_widget.clear()
         for fname in sorted(os.listdir(directory)):
             if fname.lower().endswith(('.tif', '.tiff')):
@@ -1411,18 +1576,14 @@ class MainWindow(QWidget):
                     self.update_file_selection(selected_item, selected_checkbox, state)
                 )
                 self.app_state.file_paths.append(os.path.join(directory, fname))
+        self._auto_match_elements()
 
     def update_file_selection(self, item, checkbox, state):
-        """Track the selected TIFFs; confirmation requires exactly three."""
+        """Track checked TIFFs and assign them to unmatched elements in order."""
         checked_indices = [
             row for row in range(self.file_list_widget.count())
             if self.file_list_widget.itemWidget(self.file_list_widget.item(row)).isChecked()
         ]
-
-        # Preserve the user's selection order, which determines the RGB
-        # channel assignment, while removing any unchecked entries. The
-        # existing Confirm action rejects anything other than exactly three,
-        # which avoids modifying a checkbox during its own click event.
         selected = [
             row for row in (self.app_state.selected_files_order or [])
             if row in checked_indices
@@ -1433,6 +1594,15 @@ class MainWindow(QWidget):
         self.app_state.selected_files_order = selected
         if checked_indices and self.mosaic_scan_btn is not None:
             self.mosaic_scan_btn.hide()
+
+        # Map checked files to elements in order; uncheck extras beyond n elements
+        n = len(self._setup_elements)
+        for i, elem in enumerate(self._setup_elements):
+            if i < len(selected):
+                self._setup_element_files[elem] = self.app_state.file_paths[selected[i]]
+            else:
+                self._setup_element_files[elem] = None
+        self._refresh_element_mapping()
 
     def perform_mosaic_scan(self):
         """Submit the initial coarse scan before the GUI enters image-analysis mode."""
@@ -1493,34 +1663,28 @@ class MainWindow(QWidget):
         )
 
     def on_confirm_clicked(self):
-        self.app_state.microns_per_pixel_x = self.float_input_micron_x.value()
-        self.app_state.microns_per_pixel_y = self.float_input_micron_y.value()
-        self.app_state.true_origin_x = self.origin_x_input.value()
-        self.app_state.true_origin_y = self.origin_y_input.value()
-        
-        if len(self.app_state.selected_files_order or []) != 3:
-            QMessageBox.warning(self, "Invalid Selection", "Please select exactly 3 TIFF files.")
+        # Guard: all elements must be matched
+        missing = [e for e in self._setup_elements
+                   if not self._setup_element_files.get(e)]
+        if missing:
+            QMessageBox.warning(self, "Missing Files",
+                                f"No TIFF assigned for: {', '.join(missing)}")
             return
 
-        config_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select detection configuration",
-            str(self.detection_config_path),
-            "JSON files (*.json)",
-        )
-        if not config_path:
-            return
-        self.detection_config_path = Path(config_path)
+        # Calibration comes from the JSON, not spinboxes
+        calib = self._setup_config.get("calibration_params", {})
+        self.app_state.microns_per_pixel_x = calib.get("microns_per_pixel_x", 1.0)
+        self.app_state.microns_per_pixel_y = calib.get("microns_per_pixel_y", 1.0)
+        self.app_state.true_origin_x = calib.get("true_origin_x", 0.0)
+        self.app_state.true_origin_y = calib.get("true_origin_y", 0.0)
 
-        try:
-            self._load_detection_config()
-        except ValueError as error:
-            QMessageBox.warning(self, "Detection Configuration", str(error))
-            return
-        
-        self.app_state.img_paths = [self.app_state.file_paths[i] for i in self.app_state.selected_files_order]
-        self.app_state.file_names = [os.path.basename(p) for p in self.app_state.img_paths]
-        self.app_state.element_colors = ['red', 'green', 'blue']
+        # Build img_paths in element order
+        self.app_state.img_paths = [self._setup_element_files[e]
+                                    for e in self._setup_elements]
+        self.app_state.file_names = [os.path.basename(p)
+                                     for p in self.app_state.img_paths]
+        color_map = ['red', 'green', 'blue']
+        self.app_state.element_colors = color_map[:len(self._setup_elements)]
         self.app_state.thresholds = {
             color: self.detection_settings["min_threshold"]
             for color in self.app_state.element_colors
