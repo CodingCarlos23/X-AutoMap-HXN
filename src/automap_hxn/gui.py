@@ -1536,6 +1536,22 @@ class MainWindow(QWidget):
             self._analysis_generation += 1
             generation = self._analysis_generation
 
+        # Only one analysis box at a time: loading again replaces the current
+        # view instead of stacking a second box below it.
+        if self.analysis_widgets:
+            with self._analysis_lock:
+                self.blob_items.clear()
+                self.union_box_items.clear()
+            for box in self.analysis_widgets:
+                self.outer_layout.removeWidget(box)
+                box.deleteLater()
+            self.analysis_widgets = []
+            if self.graphics_scene is not None:
+                self.graphics_scene.deleteLater()
+            self.graphics_scene = None
+            self.graphics_view = None
+            self.pixmap_item = None
+
         self.setup_widget.setParent(None)
         self.analysis_widget = QWidget()
         self.analysis_widgets.append(self.analysis_widget)
