@@ -130,6 +130,7 @@ JSON_MAKER_COMMON_SECTIONS = {
         "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
         "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
         "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
+        "tiled_uri": None,
     },
     "calibration_params": {
         "microns_per_pixel_x": 1.5, "microns_per_pixel_y": 1.5,
@@ -143,6 +144,17 @@ JSON_MAKER_COMMON_SECTIONS = {
     "morphology_params": {
         "normalize_kernel_size": [3, 3], "dilate_iterations": 2,
         "blur_kernel": [3, 3],
+    },
+    "mosaic_params": {
+        "xlen": 100,
+        "ylen": 100,
+        "overlap_per": 0,
+        "step_size": 250,
+        "dwell": 0.01,
+        "mll": False,
+        "remote_seg": False,
+        "followup_fine_scan": False,
+        "ref_scan_id": None,
     },
 }
 
@@ -379,6 +391,10 @@ class JSONMakerWidget(QWidget):
         # === BOTTOM BUTTON ===
         button_layout = QHBoxLayout()
         button_layout.addStretch()
+        reset_btn = QPushButton("↺ Reset to Defaults")
+        reset_btn.setStyleSheet("padding: 8px 16px;")
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        button_layout.addWidget(reset_btn)
         create_btn = QPushButton("💾 Create JSON Configuration")
         create_btn.setStyleSheet("padding: 8px 16px; font-weight: bold;")
         create_btn.clicked.connect(self.on_create_json_clicked)
@@ -467,6 +483,17 @@ class JSONMakerWidget(QWidget):
             scan_form.addRow(key, field_widget)
             self.json_maker_fields["scan_params"][key] = (field_widget, default)
         layout.addWidget(scan_group)
+
+        mosaic_group = QGroupBox("mosaic_params")
+        mosaic_form = QFormLayout(mosaic_group)
+        mosaic_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        mosaic_form.setContentsMargins(10, 22, 10, 10)
+        self.json_maker_fields["mosaic_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["mosaic_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            mosaic_form.addRow(key, field_widget)
+            self.json_maker_fields["mosaic_params"][key] = (field_widget, default)
+        layout.addWidget(mosaic_group)
 
         fine_group = QGroupBox("fine_scan_params")
         fine_form = QFormLayout(fine_group)
@@ -707,6 +734,51 @@ class JSONMakerWidget(QWidget):
             seg["min_threshold_intensity"] = 0
             seg["min_threshold_area"] = 0
         return config
+
+    def _reset_to_defaults(self):
+        """Reset every form field back to its schema default."""
+        # Common section fields
+        for section, fields in self.json_maker_fields.items():
+            for key, (widget, default) in fields.items():
+                self._reset_field(widget, default)
+
+        # Per-method detection fields
+        for method, fields in self.json_maker_method_fields.items():
+            for key, (widget, default) in fields.items():
+                self._reset_field(widget, default)
+
+        # Re-sync the method dropdowns / visibility
+        self._on_json_maker_method_changed()
+
+    @staticmethod
+    def _reset_field(widget, default):
+        """Set one widget back to its default value."""
+        if isinstance(widget, ModelSelectField):
+            options = [widget.combo.itemText(i) for i in range(widget.combo.count())
+                       if widget.combo.itemText(i) != ModelSelectField.OTHER]
+            if str(default) in options:
+                widget.combo.setCurrentText(str(default))
+            else:
+                widget.combo.setCurrentText(ModelSelectField.OTHER)
+                widget.custom_input.setText(str(default))
+        elif isinstance(widget, SweepValuesField):
+            widget.mode_combo.setCurrentText(SweepValuesField.CUSTOM)
+            widget.custom_input.setText(json.dumps(default))
+        elif isinstance(widget, QComboBox):
+            widget.setCurrentText(str(default))
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(bool(default))
+        elif isinstance(widget, QSpinBox):
+            widget.setValue(int(default))
+        elif isinstance(widget, QDoubleSpinBox):
+            widget.setValue(float(default))
+        elif isinstance(widget, QLineEdit):
+            if isinstance(default, list):
+                widget.setText(json.dumps(default))
+            elif default is not None:
+                widget.setText(str(default))
+            else:
+                widget.clear()
 
     def on_create_json_clicked(self):
         """Write a new initial-scan JSON from the form values."""

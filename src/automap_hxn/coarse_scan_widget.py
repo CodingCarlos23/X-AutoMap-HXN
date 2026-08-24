@@ -1,10 +1,15 @@
-"""Coarse Scan Sender widget — load a JSON config and queue the initial coarse scan.
+"""Coarse / Mosaic Scan Sender widget.
 
-Pure Qt + stdlib (json, pathlib) at import time.
-bluesky_queueserver_api is lazy-imported only when the user clicks Preview or Send.
+Reads ALL scan geometry from the JSON config (mosaic_params block) and submits
+mosaic_overlap_scan_auto_relative in a background QThread. Configuration is done
+in the JSON Maker — this widget is the executor only.
+
+Pure Qt + stdlib at import time. Heavy deps (bluesky) are lazy-imported inside
+the thread worker only.
 """
 
 import json
+import math
 from pathlib import Path
 
 from qtpy.QtWidgets import (
@@ -12,21 +17,107 @@ from qtpy.QtWidgets import (
     QLineEdit, QFileDialog, QGroupBox, QTextEdit, QMessageBox,
     QScrollArea, QSizePolicy,
 )
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtGui import QFont
+import datetime
 
+
+# ---------------------------------------------------------------------------
+# Background thread
+# ---------------------------------------------------------------------------
+
+class MosaicScanThread(QThread):
+    """Runs mosaic_overlap_scan_auto_relative without blocking the UI."""
+
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, json_path, params, tiled_uri=None, parent=None):
+        super().__init__(parent)
+        self._json_path = json_path
+        self._params = params  # kwargs forwarded to mosaic_overlap_scan_auto_relative
+        self._tiled_uri = tiled_uri
+
+    def run(self):
+        try:
+            from automap_hxn.workflows import mosaic_overlap_scan_auto_relative
+
+            params = dict(self._params)
+
+            # Auto-create Tiled client from URI if remote_seg is enabled
+            if params.get("remote_seg") and self._tiled_uri:
+                try:
+                    from tiled.client import from_uri
+                    params["tiled_client"] = from_uri(self._tiled_uri)
+                except Exception as err:
+                    self.error.emit(
+                        f"Could not connect to Tiled at '{self._tiled_uri}':\n{err}\n\n"
+                        "Check tiled_uri in export_params or disable remote_seg."
+                    )
+                    return
+
+            mosaic_overlap_scan_auto_relative(
+                beamline_params=self._json_path,
+                initial_scan_path=self._json_path,
+                **params,
+            )
+            self.finished.emit("Mosaic scan completed successfully.")
+        except ImportError as err:
+            self.error.emit(
+                f"Could not import workflows module: {err}\n\n"
+                "Install bluesky-queueserver-api and its dependencies."
+            )
+        except Exception as err:
+            self.error.emit(str(err))
+
+
+# ---------------------------------------------------------------------------
+# Helper: tile count + time estimate (pure Python, no numpy needed)
+# ---------------------------------------------------------------------------
+
+def _calc_tile_info(mot1_s, mot1_e, xlen, ylen, overlap_per, step_size, dwell):
+    """Return (x_tiles, y_tiles, est_minutes) or (0, 0, 0) on bad inputs."""
+    scan_range = abs(mot1_e - mot1_s)
+    if scan_range <= 0 or step_size <= 0 or dwell <= 0:
+        return 0, 0, 0.0
+    grid_step = scan_range * (1 - overlap_per * 0.01)
+    if grid_step <= 0:
+        return 0, 0, 0.0
+    start = grid_step / 2
+    x_tiles = max(0, math.floor((xlen - start) / grid_step) + 1) if xlen >= start else 0
+    y_tiles = max(0, math.floor((ylen - start) / grid_step) + 1) if ylen >= start else 0
+    num_steps_fly = round(25_000 / step_size)
+    fly_time = (num_steps_fly ** 2) * dwell * 2
+    est_minutes = (fly_time * x_tiles * y_tiles) / 60
+    return x_tiles, y_tiles, est_minutes
+
+
+# ---------------------------------------------------------------------------
+# Widget
+# ---------------------------------------------------------------------------
 
 class CoarseScanWidget(QWidget):
-    """Self-contained widget: load a JSON config, preview and send the initial coarse scan.
+    """Load a JSON config and send the mosaic scan — no editable parameters.
 
-    Importable without any heavy dependencies (bluesky, numpy, etc.).
-    Heavy imports happen lazily inside _on_preview_clicked / _on_send_clicked.
+    All scan geometry lives in the JSON's mosaic_params block (configured in
+    the JSON Maker). This widget reads it, shows a summary, and fires the scan.
+
+    Emits log_message(str) for each key event — connect to a log widget to
+    build a persistent history across scans.
     """
+
+    log_message = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._json_path = None
+        self._json_params = {}
+        self._scan_thread = None
         self._setup_ui()
+
+    # ------------------------------------------------------------------
+    # UI setup
+    # ------------------------------------------------------------------
 
     def _setup_ui(self):
         self.setStyleSheet(
@@ -42,7 +133,6 @@ class CoarseScanWidget(QWidget):
             "  top: 2px;"
             "}"
         )
-        # Outer layout: scroll area fills the widget so buttons are always visible.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -57,21 +147,18 @@ class CoarseScanWidget(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        header = QLabel("<b>Coarse / Mosaic Scan Sender</b>")
+        header = QLabel("<b>Mosaic Scan Sender</b>")
         header.setStyleSheet("font-size: 14px; padding: 5px;")
         layout.addWidget(header)
 
         layout.addWidget(self._build_json_section())
+        layout.addWidget(self._build_summary_section())
         layout.addWidget(self._build_preview_section())
         layout.addLayout(self._build_button_row())
         layout.addStretch()
 
         scroll.setWidget(container)
         outer.addWidget(scroll)
-
-    # ------------------------------------------------------------------
-    # Section builders
-    # ------------------------------------------------------------------
 
     def _build_json_section(self):
         group = QGroupBox("JSON Configuration")
@@ -89,15 +176,27 @@ class CoarseScanWidget(QWidget):
         path_row.addWidget(browse_btn)
         outer.addLayout(path_row)
 
-        self._json_summary = QLabel("")
-        self._json_summary.setWordWrap(True)
-        self._json_summary.setStyleSheet("color: #444; font-size: 11px; padding: 2px 4px;")
-        outer.addWidget(self._json_summary)
+        return group
+
+    def _build_summary_section(self):
+        group = QGroupBox("Scan Summary")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(10, 22, 10, 10)
+
+        self._summary_label = QLabel("Load a JSON config to see the scan summary.")
+        self._summary_label.setWordWrap(True)
+        self._summary_label.setStyleSheet("font-size: 11px; padding: 2px 4px;")
+        outer.addWidget(self._summary_label)
+
+        self._tile_label = QLabel("")
+        self._tile_label.setWordWrap(True)
+        self._tile_label.setStyleSheet("font-size: 12px; font-weight: bold; padding: 4px;")
+        outer.addWidget(self._tile_label)
 
         return group
 
     def _build_preview_section(self):
-        group = QGroupBox("Plan Preview")
+        group = QGroupBox("Preview")
         outer = QVBoxLayout(group)
         outer.setContentsMargins(10, 22, 10, 10)
 
@@ -107,9 +206,7 @@ class CoarseScanWidget(QWidget):
         mono.setStyleHint(QFont.TypeWriter)
         self._preview_text.setFont(mono)
         self._preview_text.setStyleSheet("background: #f8f8f8; font-size: 11px;")
-        self._preview_text.setPlaceholderText(
-            "Load a JSON config to preview its contents here."
-        )
+        self._preview_text.setPlaceholderText("Load a JSON config to preview its contents here.")
         self._preview_text.setMinimumHeight(120)
         self._preview_text.setMaximumHeight(220)
         self._preview_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -128,10 +225,10 @@ class CoarseScanWidget(QWidget):
 
         self._preview_btn = QPushButton("Preview Plans")
         self._preview_btn.setStyleSheet("padding: 8px 14px;")
-        self._preview_btn.clicked.connect(self._on_preview_clicked)
+        self._preview_btn.clicked.connect(self._on_preview_plans_clicked)
         row.addWidget(self._preview_btn)
 
-        self._send_btn = QPushButton("Send Coarse Scan")
+        self._send_btn = QPushButton("Send Mosaic Scan")
         self._send_btn.setStyleSheet(
             "padding: 8px 14px; font-weight: bold; background: #2a6ebb; color: white;"
         )
@@ -142,16 +239,15 @@ class CoarseScanWidget(QWidget):
         return row
 
     # ------------------------------------------------------------------
-    # File loading
+    # JSON loading
     # ------------------------------------------------------------------
 
     def _browse_json(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select JSON Config", "", "JSON files (*.json)"
         )
-        if not path:
-            return
-        self._load_json(path)
+        if path:
+            self._load_json(path)
 
     def _load_json(self, path):
         try:
@@ -162,148 +258,214 @@ class CoarseScanWidget(QWidget):
             return
 
         self._json_path = path
+        self._json_params = params
         self._json_path_edit.setText(path)
+        self._update_summary()
+        self._preview_text.setPlainText(json.dumps(params, indent=2))
 
-        sp = params.get("scan_params", {})
-        ep = params.get("execution_params", {})
+    def _update_summary(self):
+        if not self._json_params:
+            return
+        sp = self._json_params.get("scan_params", {})
+        ep = self._json_params.get("execution_params", {})
+        mp = self._json_params.get("mosaic_params", {})
+
         mode = ep.get("mode", "?")
         mot1 = sp.get("mot1", "?")
         mot2 = sp.get("mot2", "?")
-        m1s = sp.get("mot1_s", "?")
-        m1e = sp.get("mot1_e", "?")
-        m2s = sp.get("mot2_s", "?")
-        m2e = sp.get("mot2_e", "?")
-        step = sp.get("step_size", sp.get("step_size_coarse", "?"))
-        dwell = sp.get("exp_t", sp.get("exp_t_coarse", "?"))
         label = sp.get("label", "?")
-        proceed = ep.get("proceed_with_fine_scan", False)
-        self._json_summary.setText(
-            f"Label: {label}   Mode: {mode}   Proceed to fine scan: {proceed}\n"
-            f"{mot1}: [{m1s}, {m1e}]   {mot2}: [{m2s}, {m2e}]   "
-            f"Step: {step} µm   Dwell: {dwell} s"
+        xlen = mp.get("xlen", "?")
+        ylen = mp.get("ylen", "?")
+        overlap = mp.get("overlap_per", 0)
+        step = mp.get("step_size", "?")
+        dwell = mp.get("dwell", "?")
+        optics = "MLL" if mp.get("mll", False) else "ZP"
+        remote = mp.get("remote_seg", True)
+        fine = mp.get("followup_fine_scan", False)
+
+        self._summary_label.setText(
+            f"Label: {label}   Mode: {mode}   Motors: {mot1} / {mot2}   Optics: {optics}\n"
+            f"Area: {xlen} × {ylen} µm   Overlap: {overlap}%   "
+            f"Step: {step} nm   Dwell: {dwell} s\n"
+            f"Remote seg: {remote}   Follow-up fine scan: {fine}"
         )
 
-        self._preview_text.setPlainText(json.dumps(params, indent=2))
+        # Tile estimate
+        mot1_s = float(sp.get("mot1_s", 0))
+        mot1_e = float(sp.get("mot1_e", 0))
+        try:
+            x_tiles, y_tiles, est_min = _calc_tile_info(
+                mot1_s, mot1_e,
+                float(xlen), float(ylen),
+                float(overlap), float(step), float(dwell),
+            )
+            if x_tiles == 0 or y_tiles == 0:
+                self._tile_label.setText("⚠️  Cannot calculate tiles — check scan range and area values in JSON.")
+            else:
+                unit = "min" if est_min < 60 else "hr"
+                display_time = est_min if est_min < 60 else est_min / 60
+                self._tile_label.setText(
+                    f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total   "
+                    f"Est. time: {display_time:.1f} {unit}"
+                )
+        except (TypeError, ValueError):
+            self._tile_label.setText("⚠️  Could not compute tile estimate — check mosaic_params in JSON.")
 
     # ------------------------------------------------------------------
-    # Actions
+    # Collect params from JSON (no widget overrides)
     # ------------------------------------------------------------------
 
-    def _validate_inputs(self):
+    def _collect_params(self):
+        mp = self._json_params.get("mosaic_params", {})
+        ref = mp.get("ref_scan_id")
+        return {
+            "xlen": mp.get("xlen", 100),
+            "ylen": mp.get("ylen", 100),
+            "overlap_per": mp.get("overlap_per", 0),
+            "step_size": mp.get("step_size", 250),
+            "dwell": mp.get("dwell", 0.01),
+            "mll": mp.get("mll", False),
+            "remote_seg": mp.get("remote_seg", True),
+            "followup_fine_scan": mp.get("followup_fine_scan", False),
+            "ref_scan_id": ref if ref else None,
+            "dets": None,
+            "tiled_client": None,
+        }
+
+    def _validate(self):
         if not self._json_path:
             QMessageBox.warning(self, "Missing Input", "Please load a JSON config file first.")
             return False
         return True
 
-    def _build_requests(self):
-        from automap_hxn.queue import build_coarse_scan_requests
-        return build_coarse_scan_requests(self._json_path)
+    # ------------------------------------------------------------------
+    # Buttons
+    # ------------------------------------------------------------------
 
     def _on_preview_json_clicked(self):
-        if not self._validate_inputs():
+        if not self._validate():
             return
-        try:
-            mode, requests = self._build_requests()
-        except ImportError as err:
-            QMessageBox.critical(self, "Dependency Missing",
-                f"Could not import queue module: {err}\n\n"
-                "Install bluesky-queueserver-api into this environment.")
-            return
-        except Exception as err:
-            QMessageBox.critical(self, "Preview Failed", str(err))
-            return
-        self._preview_text.setPlainText(json.dumps(requests, indent=2))
+        payload = {
+            "beamline_params": self._json_path,
+            "initial_scan_path": self._json_path,
+            **self._collect_params(),
+        }
+        self._preview_text.setPlainText(json.dumps(payload, indent=2, default=str))
 
-    def _on_preview_clicked(self):
-        if not self._validate_inputs():
+    def _on_preview_plans_clicked(self):
+        if not self._validate():
             return
-
+        sp = self._json_params.get("scan_params", {})
+        ep = self._json_params.get("execution_params", {})
+        mp = self._json_params.get("mosaic_params", {})
+        mot1_s = float(sp.get("mot1_s", 0))
+        mot1_e = float(sp.get("mot1_e", 0))
         try:
-            mode, requests = self._build_requests()
-        except ImportError as err:
-            QMessageBox.critical(
-                self,
-                "Dependency Missing",
-                f"Could not import queue module: {err}\n\n"
-                "Install bluesky-queueserver-api into this environment.",
+            x_tiles, y_tiles, est_min = _calc_tile_info(
+                mot1_s, mot1_e,
+                float(mp.get("xlen", 100)),
+                float(mp.get("ylen", 100)),
+                float(mp.get("overlap_per", 0)),
+                float(mp.get("step_size", 250)),
+                float(mp.get("dwell", 0.01)),
             )
-            return
-        except Exception as err:
-            QMessageBox.critical(self, "Preview Failed", str(err))
-            return
+        except (TypeError, ValueError):
+            x_tiles = y_tiles = 0
+            est_min = 0.0
 
-        lines = [f"Mode: {mode.upper()}  —  {len(requests)} plan(s)\n"]
-        for i, req in enumerate(requests, 1):
-            lines.append(f"  [{i}] {req['label']}")
-            lines.append(f"      plan: {req['plan_name']}")
-            if "center" in req:
-                c = req["center"]
-                lines.append(
-                    "      center: " + "  ".join(f"{k}={v:.3f}" for k, v in c.items())
-                )
-            if "points" in req:
-                p = req["points"]
-                lines.append(f"      points: {p.get('x', '?')} × {p.get('y', '?')}")
-            lines.append("")
+        scan_range = abs(mot1_e - mot1_s)
+        grid_step = scan_range * (1 - float(mp.get("overlap_per", 0)) * 0.01)
+        mode = ep.get("mode", "?")
+        optics = "MLL (dsx/dsy)" if mp.get("mll", False) else "ZP (smarx/smary)"
+        unit = "min" if est_min < 60 else "hr"
+        display_time = est_min if est_min < 60 else est_min / 60
+
+        lines = [
+            f"Mode: {mode.upper()}",
+            f"Optics: {optics}",
+            f"Total area: {mp.get('xlen')} × {mp.get('ylen')} µm",
+            f"Grid step: {grid_step:.2f} µm  ({mp.get('overlap_per', 0)}% overlap)",
+            f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total",
+            f"Per-tile scan: {sp.get('mot1','?')} / {sp.get('mot2','?')}  "
+            f"[{mot1_s:.2f} → {mot1_e:.2f}]",
+            f"Step size: {mp.get('step_size')} nm   Dwell: {mp.get('dwell')} s",
+            f"Est. total time: {display_time:.1f} {unit}",
+            f"Remote seg: {mp.get('remote_seg', True)}   "
+            f"Follow-up fine scan: {mp.get('followup_fine_scan', False)}",
+        ]
+        if mp.get("ref_scan_id"):
+            lines.append(f"ref_scan_id: {mp.get('ref_scan_id')}")
         self._preview_text.setPlainText("\n".join(lines))
 
+    def _log(self, message):
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_message.emit(f"[{ts}] {message}")
+
     def _on_send_clicked(self):
-        if not self._validate_inputs():
+        if not self._validate():
+            return
+        if self._scan_thread and self._scan_thread.isRunning():
+            QMessageBox.information(self, "Scan Running", "A mosaic scan is already in progress.")
             return
 
+        mp = self._json_params.get("mosaic_params", {})
+        sp = self._json_params.get("scan_params", {})
+        ep = self._json_params.get("execution_params", {})
         try:
-            mode, requests = self._build_requests()
-        except ImportError as err:
-            QMessageBox.critical(
-                self,
-                "Dependency Missing",
-                f"Could not import queue module: {err}\n\n"
-                "Install bluesky-queueserver-api into this environment.",
+            x_tiles, y_tiles, est_min = _calc_tile_info(
+                float(sp.get("mot1_s", 0)), float(sp.get("mot1_e", 0)),
+                float(mp.get("xlen", 100)), float(mp.get("ylen", 100)),
+                float(mp.get("overlap_per", 0)), float(mp.get("step_size", 250)),
+                float(mp.get("dwell", 0.01)),
             )
-            return
-        except Exception as err:
-            QMessageBox.critical(self, "Build Failed", str(err))
-            return
+        except (TypeError, ValueError):
+            x_tiles = y_tiles = 0
+            est_min = 0.0
 
-        if mode != "real":
-            self._preview_text.setPlainText(
-                f"[{mode.upper()}] Dry run — no plans were submitted to the queue.\n\n"
-                + "\n".join(f"  {r['label']}" for r in requests)
-            )
-            QMessageBox.information(
-                self,
-                "Dry Run",
-                f"Mode is '{mode}' — plans were not submitted.\n"
-                "Set execution_params.mode to 'real' in your JSON to submit.",
-            )
-            return
-
-        scan_label = requests[-1].get("label", "coarse scan")
+        mode = ep.get("mode", "?")
         confirm = QMessageBox.question(
             self,
-            "Confirm Send",
-            f"Submit {len(requests)} plan(s) for '{scan_label}' to the queue?\nMode: {mode.upper()}",
+            "Confirm Mosaic Scan",
+            f"Send mosaic scan to queue?\n\n"
+            f"Mode: {mode.upper()}\n"
+            f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total\n"
+            f"Est. time: {est_min:.1f} min",
             QMessageBox.Yes | QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
             return
 
-        try:
-            from automap_hxn.queue import submit_queue_requests
-            result = submit_queue_requests(requests)
-        except Exception as err:
-            QMessageBox.critical(self, "Submission Failed", str(err))
-            return
+        tiled_uri = self._json_params.get("export_params", {}).get("tiled_uri") or None
+        self._scan_thread = MosaicScanThread(
+            self._json_path, self._collect_params(), tiled_uri=tiled_uri, parent=self
+        )
+        self._scan_thread.finished.connect(self._on_scan_finished)
+        self._scan_thread.error.connect(self._on_scan_error)
+        self._scan_thread.start()
 
-        submitted = result.get("submitted", [])
-        QMessageBox.information(
-            self,
-            "Sent",
-            f"Successfully submitted {len(submitted)} plan(s) to the queue.",
-        )
+        self._send_btn.setEnabled(False)
+        self._send_btn.setText("Scanning…")
         self._preview_text.setPlainText(
-            f"Submitted {len(submitted)} plan(s).\n\n"
-            + "\n".join(
-                f"  {s['label']}  uid={s.get('item_uid', '?')}" for s in submitted
-            )
+            f"Mosaic scan started — {x_tiles * y_tiles} tile(s) queued.\n"
+            "Check the terminal for tile-by-tile progress.\n"
+            "The Send button will re-enable when the scan completes or fails."
         )
+        mp = self._json_params.get("mosaic_params", {})
+        self._log(
+            f"Mosaic scan started — {x_tiles}×{y_tiles} tiles "
+            f"({mp.get('xlen')}×{mp.get('ylen')} µm, mode={mode})"
+        )
+
+    def _on_scan_finished(self, message):
+        self._send_btn.setEnabled(True)
+        self._send_btn.setText("Send Mosaic Scan")
+        self._preview_text.setPlainText(f"✓ {message}")
+        self._log(f"✓ {message}")
+        QMessageBox.information(self, "Scan Complete", message)
+
+    def _on_scan_error(self, message):
+        self._send_btn.setEnabled(True)
+        self._send_btn.setText("Send Mosaic Scan")
+        self._preview_text.setPlainText(f"✗ Error:\n{message}")
+        self._log(f"✗ Error: {message.splitlines()[0]}")
+        QMessageBox.critical(self, "Scan Failed", message)

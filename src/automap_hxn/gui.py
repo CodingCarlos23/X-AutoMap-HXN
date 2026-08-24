@@ -238,7 +238,7 @@ class MainWindow(QWidget):
         self.tab_widget.addTab(self.json_maker_tab, "JSON Maker")
 
         self.coarse_scan_tab = CoarseScanWidget()
-        self.tab_widget.addTab(self.coarse_scan_tab, "Coarse Scan")
+        self.tab_widget.addTab(self.coarse_scan_tab, "Mosaic Scan")
 
 
     def _create_json_maker_tab(self):
