@@ -50,9 +50,10 @@ def analyze_data_local(scan_id=None,
     params_json_path = os.path.join(out_dir, f"scan_{scan_id}_params.json")
     
     # Calculate step_size and start positions from scan metadata for accuracy
-    step_size = 1.0
-    x_start = 0.0
-    y_start = 0.0
+    calib = params.get('calibration_params', {})
+    step_size = calib.get('microns_per_pixel_x') or calib.get('microns_per_pixel_y') or 1.0
+    x_start = calib.get('true_origin_x', 0.0)
+    y_start = calib.get('true_origin_y', 0.0)
 
     if os.path.exists(params_json_path):
         with open(params_json_path, 'r') as f:
@@ -66,9 +67,10 @@ def analyze_data_local(scan_id=None,
                 y_start = scan_input[3]
                 print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
             else:
-                # Fallback to saved or provided values
-                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or step_size
                 print(f"[ANALYSIS] Using fallback step_size={step_size}")
+    else:
+        print(f"[ANALYSIS] Using calibration params: step_size={step_size}, x_start={x_start}, y_start={y_start}")
 
     # --- 2. Prepare Elements ---
     elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])

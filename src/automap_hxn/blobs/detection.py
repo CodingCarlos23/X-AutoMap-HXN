@@ -160,16 +160,19 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
         raise ImportError("StarDist is not available. Install the project's segmentation dependencies.")
     
     # Apply morphological preprocessing (normalize and dilate)
-    # EXCEPTION: Skip for cellpose - deep learning models need raw/original images
-    # Morphological dilation can destroy fine details that cellpose was trained to recognize
-    if method in {'cellpose', 'yolo', 'stardist'}: #TODO not clean fix later
-        # Use original images for cellpose (no morphological preprocessing)
+    # If the caller already passed a uint8 img_norm (pre-dilated), use it directly.
+    # This lets analyze_data_local and the GUI control dilation via JSON params.
+    # If img_norm is still a float, fall back to internal re-dilation.
+    if method in {'cellpose', 'yolo', 'stardist'}:
         processed_norm = img_norm
         processed_dilated = img_orig
+    elif img_norm is not None and img_norm.dtype == np.uint8:
+        # Caller pre-processed — use as-is
+        processed_norm = img_norm
+        processed_dilated = img_norm
     else:
-        # Apply morphological preprocessing for all other methods
-        processed_norm, processed_dilated = normalize_and_dilate(img_orig, 
-                                                                 kernel_size=3, 
+        processed_norm, processed_dilated = normalize_and_dilate(img_orig,
+                                                                 kernel_size=3,
                                                                  iterations=1)
     
     # Detect blobs using the selected method
@@ -870,29 +873,38 @@ def detect_blobs_multi_method(img_norm, img_orig, min_thresh, min_area, color, f
 # ---------------- File wrapper ----------------
 def _detect_blobs_simple(img_norm, img_orig, min_thresh, min_area, **kwargs):
     """Simple blob detector method (OpenCV SimpleBlobDetector)"""
+    max_threshold = kwargs.get('max_threshold', 255)
+    max_area = kwargs.get('max_area', 50000)
+
+    if not 0 <= min_thresh <= max_threshold:
+        return []
+
+    effective_min_area = max(1, min_area)
+    if effective_min_area > max_area:
+        return []
+
     params = cv2.SimpleBlobDetector_Params()
     params.minThreshold = min_thresh
-    params.maxThreshold = kwargs.get('max_threshold', 255)
+    params.maxThreshold = max_threshold
     params.filterByArea = True
-    params.minArea = min_area
-    params.maxArea = kwargs.get('max_area', 1600)
-    params.thresholdStep = kwargs.get('threshold_step', 2)
-
+    params.minArea = effective_min_area
+    params.maxArea = max_area
+    params.thresholdStep = kwargs.get('threshold_step', 5)
     params.filterByColor = kwargs.get('filter_by_color', False)
     params.filterByCircularity = kwargs.get('filter_by_circularity', False)
-    params.filterByInertia = kwargs.get('filter_by_inertia', False)
-    params.filterByConvexity = kwargs.get('filter_by_convexity', False)
-    params.minRepeatability = kwargs.get('min_repeatability', 1)
-    
+    params.filterByInertia = False
+    params.filterByConvexity = False
+    params.minRepeatability = 1
+
     detector = cv2.SimpleBlobDetector_create(params)
     keypoints = detector.detect(img_norm)
-    
+
     detections = []
     for kp in keypoints:
         x, y = int(kp.pt[0]), int(kp.pt[1])
         radius = int(kp.size / 2)
         detections.append({'center': (x, y), 'radius': radius})
-    
+
     return detections
 
 def _detect_blobs_contours(img_norm, img_orig, min_thresh, min_area, **kwargs):

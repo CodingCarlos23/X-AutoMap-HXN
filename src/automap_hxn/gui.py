@@ -1287,63 +1287,14 @@ class MainWindow(QWidget):
                 method=self.detection_method, **method_params,
             )
 
-        max_threshold = self.detection_settings.get("max_threshold", 255)
-        if not 0 <= min_thresh <= max_threshold:
-            print(
-                f"[GUI] Skipping simple detection for {file_name} ({color}): "
-                f"threshold {min_thresh} outside [0, {max_threshold}]."
-            )
-            return []
-
-        # SimpleBlobDetector requires strictly 0 < minArea <= maxArea.
-        # A configured 0 means "no minimum", so clamp it to the smallest
-        # accepted value instead of crashing.
-        max_area = self.detection_settings.get("max_area", 50000)
-        effective_min_area = max(1, min_area)
-        if effective_min_area > max_area:
-            print(
-                f"[GUI] Skipping simple detection for {file_name} ({color}): "
-                f"min_area {min_area} exceeds max_area {max_area}."
-            )
-            return []
-
-        params = cv2.SimpleBlobDetector_Params()
-        params.minThreshold = min_thresh
-        params.maxThreshold = max_threshold
-        params.filterByArea = True
-        params.minArea = effective_min_area
-        params.maxArea = max_area
-        params.thresholdStep = self.detection_settings.get("threshold_step", 5)
-        params.filterByColor = self.detection_settings.get("filter_by_color", False)
-        params.filterByCircularity = self.detection_settings.get("filter_by_circularity", False)
-        params.filterByInertia = False
-        params.filterByConvexity = False
-        params.minRepeatability = 1
-        
-        detector = cv2.SimpleBlobDetector_create(params)
-        keypoints = detector.detect(img_norm)
-        blobs = []
-
-        for idx, kp in enumerate(keypoints, start=1):
-            x, y = int(kp.pt[0]), int(kp.pt[1])
-            radius = int(kp.size / 2)
-            box_size = 2 * radius
-            box_x, box_y = x - radius, y - radius
-
-            x1, y1 = max(0, box_x), max(0, box_y)
-            x2, y2 = min(img_orig.shape[1], x + radius), min(img_orig.shape[0], y + radius)
-            roi_orig = img_orig[y1:y2, x1:x2]
-            roi_dilated = img_norm[y1:y2, x1:x2]
-
-            if roi_orig.size > 0:
-                blobs.append({
-                    'Box': f"{file_name} Box #{idx}",
-                    'center': (x, y), 'radius': radius, 'color': color, 'file': file_name,
-                    'max_intensity': roi_orig.max(), 'mean_intensity': roi_orig.mean(),
-                    'mean_dilation': float(roi_dilated.mean()),
-                    'box_x': box_x, 'box_y': box_y, 'box_size': box_size
-                })
-        return blobs
+        method_params = {
+            key: value for key, value in self.detection_settings.items()
+            if key not in {"min_threshold", "min_area", "gui_threshold_values", "gui_min_area_values"}
+        }
+        return detect_blobs(
+            img_norm, img_orig, min_thresh, min_area, color, file_name,
+            method="simple", **method_params,
+        )
 
     def update_boxes(self):
         if self.graphics_view is None:
