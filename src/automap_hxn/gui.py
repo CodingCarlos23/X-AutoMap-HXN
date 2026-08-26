@@ -25,10 +25,8 @@ from qtpy.QtWidgets import QStyle, QStyleOptionButton
 
 from .app_state import AppState
 from .queue import (
-    build_coarse_scan_requests,
     build_fine_scan_requests,
     submit_fine_scan_requests,
-    submit_queue_requests,
 )
 from .blobs.detection import (
     CELLPOSE_AVAILABLE,
@@ -201,7 +199,6 @@ class MainWindow(QWidget):
         self.x_micron_label = QLabel("X Real: 0")
         self.y_micron_label = QLabel("Y Real: 0")
         self.progress_bar = QProgressBar()
-        self.mosaic_scan_btn = None
         self.analysis_widget = None
         self.analysis_widgets = []  # every stacked analysis box, oldest first
         self.detection_config_path = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_opencv.json"
@@ -298,10 +295,6 @@ class MainWindow(QWidget):
 
         # --- Bottom buttons ---
         bottom_row = QHBoxLayout()
-        self.mosaic_scan_btn = QPushButton("Perform Mosaic Scan")
-        self.mosaic_scan_btn.clicked.connect(self.perform_mosaic_scan)
-        bottom_row.addWidget(self.mosaic_scan_btn)
-
         load_backup_btn = QPushButton("Load Backup (.pkl)")
         load_backup_btn.clicked.connect(self.on_load_backup_clicked)
         bottom_row.addWidget(load_backup_btn)
@@ -722,7 +715,6 @@ class MainWindow(QWidget):
         self.app_state.selected_directory = directory
         self.dir_label.setText(directory)
         self.dir_label.setStyleSheet("")
-        self.mosaic_scan_btn.hide()
         self.app_state.file_paths = []
         self.app_state.selected_files_order = []
         # Reset any previous auto-match so we re-run against the new directory
@@ -771,9 +763,6 @@ class MainWindow(QWidget):
             if row not in selected:
                 selected.append(row)
         self.app_state.selected_files_order = selected
-        if checked_indices and self.mosaic_scan_btn is not None:
-            self.mosaic_scan_btn.hide()
-
         # Map checked files to elements in order
         for i, elem in enumerate(self._setup_elements):
             if i < len(selected):
@@ -781,64 +770,6 @@ class MainWindow(QWidget):
             else:
                 self._setup_element_files[elem] = None
         self._refresh_element_mapping()
-
-    def perform_mosaic_scan(self):
-        """Submit the initial coarse scan before the GUI enters image-analysis mode."""
-        default_config = Path(__file__).resolve().parents[2] / "configs" / "initial_scan_sim.json"
-        config_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select mosaic-scan configuration",
-            str(default_config),
-            "JSON files (*.json)",
-        )
-        if not config_path:
-            return
-
-        config_path = Path(config_path)
-        try:
-            mode, requests = build_coarse_scan_requests(config_path)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            QMessageBox.warning(self, "Mosaic Scan", f"Could not build the initial scan:\n{error}")
-            return
-
-        if mode != "real":
-            QMessageBox.warning(
-                self,
-                "Mosaic Scan Disabled",
-                "The initial-scan configuration is not in real mode, so no plans were sent.",
-            )
-            return
-
-        scan = requests[-1]
-        confirmation = QMessageBox(self)
-        confirmation.setWindowTitle("Confirm Mosaic Scan")
-        confirmation.setIcon(QMessageBox.Warning)
-        confirmation.setText(
-            f"The initial coarse scan from {config_path.name} will be sent to QueueServer.\n\n"
-            f"Plan: {scan['plan_name']}\n"
-            f"Center: X={scan['center'][next(iter(scan['center']))]:.2f} µm, "
-            f"Y={list(scan['center'].values())[1]:.2f} µm\n"
-            f"Points: {scan['points']['x']} × {scan['points']['y']}\n\n"
-            "Submit and start the queue?"
-        )
-        confirmation.setDetailedText(json.dumps(requests, indent=2))
-        confirmation.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
-        confirmation.button(QMessageBox.Ok).setText("Submit and Start Queue")
-        if confirmation.exec_() != QMessageBox.Ok:
-            return
-
-        try:
-            result = submit_queue_requests(requests)
-        except Exception as error:
-            QMessageBox.critical(self, "Mosaic Scan Failed", f"No further plans were sent.\n\n{error}")
-            return
-
-        QMessageBox.information(
-            self,
-            "Mosaic Scan Submitted",
-            f"QueueServer accepted and started {len(result['submitted'])} plan(s).\n\n"
-            "For the local simulator, receipts are written in hxn-qserver-sim/output/.",
-        )
 
     def on_confirm_clicked(self):
         # Guard: all elements must be matched
