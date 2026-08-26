@@ -1,8 +1,10 @@
 import numpy as np
 import tqdm
 import json
-from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done
-from .loading import load_and_queue
+import time
+import os
+from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests
+from .loading import load_and_queue, load_params_from_json
 from .utils import RM
 
 import pandas as pd
@@ -106,6 +108,20 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     
     '''
 
+    status = RM.status()
+    if not status.get("worker_environment_exists", False):
+        response = RM.environment_open()
+        if not response.get("success", False):
+            raise RuntimeError(f"Could not open QueueServer worker: {response.get('msg', '')}")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            status = RM.status()
+            if status.get("worker_environment_state") == "idle" and status.get("re_state") == "idle":
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("QueueServer worker did not become ready within 15 seconds.")
+
     if ref_scan_id:
             RM.item_execute(BPlan("recover_zp_csan_pos", 
                             ref_scan_id, 
@@ -122,7 +138,21 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     except (FileNotFoundError, json.JSONDecodeError, TypeError) as e:
         print(f"[ERROR] Failed to load beamline_params from {beamline_params}: {e}")
         beamline_params_dict = {}
-    #params['scan_params'].get("scan_id", target_id)
+
+    # Load full params (with defaults) once for per-tile analysis
+    tile_params = {}
+    if initial_scan_path:
+        try:
+            tile_params = load_params_from_json(initial_scan_path)
+        except Exception as e:
+            print(f"[MOSAIC] Could not load tile params for analysis: {e}")
+
+    proceed_with_fine_scan = tile_params.get('execution_params', {}).get('proceed_with_fine_scan', False)
+    mode = str(tile_params.get('execution_params', {}).get('mode', 'simulation')).lower()
+    is_real = (mode == 'real')
+    is_offline = (mode == 'offline')
+    data_wd = tile_params.get('export_params', {}).get('data_wd', '.')
+
     grid_step = (beamline_params_dict['scan_params'].get("mot1_e")) - (beamline_params_dict['scan_params'].get("mot1_s"))
     grid_step = grid_step*(1-(overlap_per*0.01))
 
@@ -157,26 +187,68 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             # Note: We use absolute moves to specific offsets for better trajectory control
             # but we define those offsets relative to where the script STARTED.
             
-            print(f"Moving to relative position: X={x_rel}, Y={y_rel}")
-            
-            # Using bps.movr to move relative to the STARTING point of the whole scan
-            # We calculate the move needed to get to the next grid point
+            tile_num = y_steps.index(y_rel) * len(x_steps) + x_steps.index(x_rel) + 1
+            total_tiles = len(x_steps) * len(y_steps)
+            print(f"\n[MOSAIC] Tile {tile_num}/{total_tiles}  →  smarx={x_rel:.1f}µm  smary={y_rel:.1f}µm")
+
+            # Queue all 7 items for this tile before firing the queue once.
+            # Previously headless_send_queue_coarse_scan called queue_start()
+            # internally, draining the queue before the return moves were added.
             RM.item_add(BPlan("move_relative", mot_x, x_rel))
             RM.item_add(BPlan("move_relative", mot_y, y_rel))
-            
 
-            # Execute the fly scan
-            headless_send_queue_coarse_scan(
-                initial_scan_path, 
-                remote_seg=remote_seg,
-                tiled_client=tiled_client
-            )
+            _, coarse_requests = build_coarse_scan_requests(initial_scan_path)
+            for req in coarse_requests:
+                RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
 
-            # Reset internal fine stages to zero before next move
             RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
-            
-            # Return to the local "origin" so the next loop's movr is accurate
             RM.item_add(BPlan("move_relative", mot_x, -x_rel))
             RM.item_add(BPlan("move_relative", mot_y, -y_rel))
             RM.queue_start()
             wait_for_queue_done()
+
+            if proceed_with_fine_scan:
+                scan_id = None
+                if is_real:
+                    print("[MOSAIC] Fetching scan_id from databroker...", flush=True)
+                    try:
+                        from hxntools.CompositeBroker import db
+                        scan_id = db[-1].start['scan_id']
+                        print(f"[MOSAIC] scan_id={scan_id}", flush=True)
+                    except Exception as e:
+                        print(f"[MOSAIC] Could not get scan_id from db: {e}")
+                if scan_id is None:
+                    scan_id = tile_params.get('scan_id') or 111111
+
+                out_dir = os.path.join(data_wd, f"automap_{scan_id}")
+                tile_params['out_dir'] = out_dir
+
+                print(f"[MOSAIC] Analyzing tile (scan_id={scan_id}, out_dir={out_dir})...")
+                try:
+                    from .analysis import analyze_data_local
+                    result = analyze_data_local(scan_id=scan_id, params=tile_params)
+                    if result and 'fine_scans_tables' in result:
+                        # Only fine scan on union blobs (detected across all elements in group).
+                        # Individual blobs (single-element groups) are skipped.
+                        union_tables = {
+                            group: df[df['label'].str.startswith('Union Box')]
+                            for group, df in result['fine_scans_tables'].items()
+                        }
+                        union_tables = {g: df for g, df in union_tables.items() if not df.empty}
+
+                        if union_tables:
+                            n_unions = sum(len(df) for df in union_tables.values())
+                            print(f"[MOSAIC] {n_unions} union(s) found — queuing fine scans...")
+                            submit_fine_scans_to_queue(
+                                initial_scan_path, scan_id, out_dir,
+                                tile_params['execution_params'],
+                                fine_scans_tables=union_tables,
+                            )
+                            run_fine_scans(is_real or is_offline)
+                            wait_for_queue_done()
+                        else:
+                            print("[MOSAIC] No union blobs detected in this tile — moving to next tile.")
+                    else:
+                        print("[MOSAIC] No particles detected in this tile — moving to next tile.")
+                except Exception as e:
+                    print(f"[MOSAIC] Tile analysis failed: {e}")

@@ -159,11 +159,11 @@ def analyze_data_local(scan_id=None,
         if img_max>img_min:
             tiff_img = (tiff_img-img_min)/(img_max-img_min)
 
-        b = detect_blobs(tiff_img, 
-                        tiff_img, 
+        b = detect_blobs(tiff_dilated,
+                        tiff_img,
                         min_thresh,
-                        min_area, color, 
-                        tiff_path.name, 
+                        min_area, color,
+                        tiff_path.name,
                         method=detection_method,
                         **method_params)
     

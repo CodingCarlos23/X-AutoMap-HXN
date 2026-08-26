@@ -277,10 +277,12 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     # eventual Queue Server submission and its preview on one calculation path.
     mode, requests = build_fine_scan_requests(json_path, fine_scans_table)
     is_real = (mode == 'real')
+    is_offline = (mode == 'offline')
+    submit = is_real or is_offline
 
     # Process each fine scan from the table
     print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table (Mode: {mode.upper()})")
-    
+
     for request in requests:
         time.sleep(0.5)
         label = request['label']
@@ -290,7 +292,7 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
         num_steps_x, num_steps_y = request['points']['x'], request['points']['y']
         step_size, dwell = request['step_size'], request['dwell']
 
-        if is_real:
+        if submit:
             print(f"[FINE_SCANS] Queuing: {label} (cx={cx:.2f}, cy={cy:.2f}, sx={sx:.2f}, sy={sy:.2f})")
             print(f"[FINE_SCANS]   → Padded size: {sx_padded:.2f} x {sy_padded:.2f} μm, step: {step_size:.3f} μm")
             scan_range = request['relative_range']
@@ -302,8 +304,8 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
             RM.item_add(BPlan(request['plan_name'], *request['plan_args']))
         else:
             print(f"[{mode.upper()}] Would queue: {label} (cx={cx:.2f}, cy={cy:.2f})")
-    
-    print(f"[FINE_SCANS] ✅ All {len(fine_scans_table)} fine scans {'queued' if is_real else 'prepared'}")
+
+    print(f"[FINE_SCANS] ✅ All {len(fine_scans_table)} fine scans {'queued' if submit else 'prepared'}")
 
 def send_fly2d_to_queue(label,
                         dets,
@@ -389,7 +391,7 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True)
         else:
             idle_stuck_start = None  # reset if queue becomes active again
 
-        print(".", end="", flush=True)
+        print(f". [{items} item(s) remaining, state={state}]", end="\n", flush=True)
         time.sleep(poll_interval)
 
 def submit_and_export(execution_params, scan_params, export_params, segmentation_params=None):
@@ -560,26 +562,27 @@ def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fi
     # Get mode from execution_params
     mode = str(execution_params.get('mode', 'simulation')).lower()
     is_real = (mode == 'real')
-    
+    is_offline = (mode == 'offline')
+
     print(f"\n[QUEUE] Processing fine scans in: {out_dir}")
-    
-    if is_real:
-        # Process each table if provided
+
+    if is_real or is_offline:
+        # Offline: coarse scan was skipped but fine scans should still be queued
+        # from the analysis of existing data.
         if fine_scans_tables:
             for group_name, table in fine_scans_tables.items():
                 print(f"[QUEUE] Submitting {len(table)} fine scans for group '{group_name}'")
                 headless_send_queue_fine_scan(json_path, fine_scans_table=table)
         else:
-            # Fallback: load from JSON config or CSV files
             headless_send_queue_fine_scan(json_path)
     else:
-        # Covers both Sim and Offline
-        print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Skipping actual queue submission.")
+        # Simulation only — nothing is real
+        print(f"[SIM] Skipping actual queue submission.")
         if fine_scans_tables:
-            print(f"[{'OFFLINE' if mode=='offline' else 'SIM'}] Would queue {sum(len(t) for t in fine_scans_tables.values())} fine scans from {len(fine_scans_tables)} groups")
+            print(f"[SIM] Would queue {sum(len(t) for t in fine_scans_tables.values())} fine scans from {len(fine_scans_tables)} groups")
         print(f"Would call: headless_send_queue_fine_scan('{json_path}')")
 
-def run_fine_scans(is_real): 
+def run_fine_scans(is_real):
     """
     Step 4: Start the Queue.
     """
@@ -588,9 +591,9 @@ def run_fine_scans(is_real):
         if st['items_in_queue'] != 0 and st['manager_state'] == 'idle':
             RM.queue_start()
             print('[QSERVER] Queue started')
-        else: 
+        else:
             print('[QSERVER] Queue waiting or already running')
-        
+
         wait_for_queue_done()
     else:
         print("[SIM] Would check RM.status() and start queue.")

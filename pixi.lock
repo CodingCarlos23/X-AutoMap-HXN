@@ -16299,7 +16299,7 @@ packages:
   - jupyter>=1.1.1,<2
   - numpy>=2.4.2,<2.5
   - pandas>=3.0.0,<4
-  - opencv-python>=4.13,<5
+  - opencv-python>=4.6.0,<5
   - scikit-image>=0.26.0,<0.27
   - tifffile>=2026.1.28,<2027
   - qtpy>=2.4.3,<3
@@ -16311,7 +16311,7 @@ packages:
   - bluesky-queueserver-api>=0.0.13,<0.0.14
   - hxntools>=0.6.5,<0.7
   - cellpose>=4.0.8,<5 ; extra == 'segmentation'
-  - ultralytics>=8.4,<9 ; extra == 'segmentation'
+  - ultralytics>=8.3,<9 ; extra == 'segmentation'
   - stardist>=0.9.2,<1 ; extra == 'segmentation'
   - tensorflow>=2.19,<2.20 ; extra == 'segmentation'
   requires_python: '>=3.11'

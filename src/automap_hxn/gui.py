@@ -968,7 +968,10 @@ class MainWindow(QWidget):
 
         img_r, img_g, img_b = loaded_images[:3]
         self.source_images = [img_r, img_g, img_b]
-        self.norm_dilated = [normalize_and_dilate(im) for im in self.source_images]
+        _morph = getattr(self, '_setup_config', {}).get('morphology_params', {})
+        _kernel = tuple(_morph.get('normalize_kernel_size', [3, 3]))
+        _iters  = _morph.get('dilate_iterations', 2)
+        self.norm_dilated = [normalize_and_dilate(im, kernel_size=_kernel, iterations=_iters) for im in self.source_images]
         
         merged_rgb = cv2.merge([nd[0] for nd in self.norm_dilated])
         # Keep an owned reference: PySide6 may destroy a scene that is only a

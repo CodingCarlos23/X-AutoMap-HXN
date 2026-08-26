@@ -163,6 +163,50 @@ JSON_MAKER_MODES = ["real", "simulation", "offline", "analysis-only"]
 # Known model choices for the JSON Maker's model dropdowns, keyed by
 # (detection method, field name). Fields listed here render as a dropdown
 # with an "Other..." entry that reveals a free-text input.
+# Unit suffixes shown next to form row labels, keyed by (section, field).
+# Use section=None for detection method fields (shared across methods).
+_FIELD_UNITS = {
+    ("scan_params",       "mot1_s"):              "µm",
+    ("scan_params",       "mot1_e"):              "µm",
+    ("scan_params",       "mot2_s"):              "µm",
+    ("scan_params",       "mot2_e"):              "µm",
+    ("scan_params",       "exp_t"):               "s",
+    ("scan_params",       "step_size"):           "µm",
+    ("fine_scan_params",  "step_size_fine"):      "µm",
+    ("fine_scan_params",  "exp_t_fine"):          "s",
+    ("fine_scan_params",  "fine_scan_pad_ratio"): "fraction 0–1",
+    ("mosaic_params",     "xlen"):                "µm",
+    ("mosaic_params",     "ylen"):                "µm",
+    ("mosaic_params",     "overlap_per"):         "%",
+    ("mosaic_params",     "step_size"):           "nm",  # nm — different from scan_params.step_size (µm)
+    ("mosaic_params",     "dwell"):               "s",
+    ("calibration_params","microns_per_pixel_x"): "µm/px",
+    ("calibration_params","microns_per_pixel_y"): "µm/px",
+    ("calibration_params","true_origin_x"):       "px",
+    ("calibration_params","true_origin_y"):       "px",
+    ("segmentation_params","min_threshold_intensity"): "0–255",
+    ("segmentation_params","min_threshold_area"):      "px²",
+    # detection method fields (section=None)
+    (None, "max_area"):                 "px²",
+    (None, "min_distance"):             "px",
+    (None, "gui_min_area_values"):      "px²",
+    (None, "gui_min_size_values"):      "px²",
+    (None, "diameter"):                 "px",
+    (None, "min_diameter"):             "px",
+    (None, "max_diameter"):             "px",
+    (None, "min_size"):                 "px²",
+    (None, "bsize"):                    "px",
+    (None, "imgsz"):                    "px",
+    (None, "tile_size"):                "px",
+    (None, "tile_overlap"):             "px",
+}
+
+def _row_label(section, key):
+    """Return 'key (unit)' if a unit is defined, otherwise just 'key'."""
+    unit = _FIELD_UNITS.get((section, key)) or _FIELD_UNITS.get((None, key))
+    return f"{key} ({unit})" if unit else key
+
+
 JSON_MAKER_MODEL_OPTIONS = {
     ("cellpose", "model_type"): ["cpsam", "cyto3", "cyto2", "cyto", "nuclei"],
     ("yolo", "model"): [
@@ -425,7 +469,7 @@ class JSONMakerWidget(QWidget):
         for key, default in JSON_MAKER_COMMON_SECTIONS["segmentation_params"].items():
             if key not in derived_seg_keys:
                 field_widget = self._make_json_maker_field(key, default)
-                seg_form.addRow(key, field_widget)
+                seg_form.addRow(_row_label("segmentation_params", key), field_widget)
                 self.json_maker_fields["segmentation_params"][key] = (field_widget, default)
         seg_note = QLabel(
             "min_threshold_intensity / min_threshold_area are set automatically "
@@ -448,7 +492,7 @@ class JSONMakerWidget(QWidget):
                 field_widget = self._make_json_maker_field(
                     key, default, options=JSON_MAKER_MODEL_OPTIONS.get((method, key))
                 )
-                group_form.addRow(key, field_widget)
+                group_form.addRow(_row_label(None, key), field_widget)
                 self.json_maker_method_fields[method][key] = (field_widget, default)
             self.json_maker_method_groups[method] = group
             layout.addWidget(group)
@@ -480,7 +524,7 @@ class JSONMakerWidget(QWidget):
         self.json_maker_fields["scan_params"] = {}
         for key, default in JSON_MAKER_COMMON_SECTIONS["scan_params"].items():
             field_widget = self._make_json_maker_field(key, default)
-            scan_form.addRow(key, field_widget)
+            scan_form.addRow(_row_label("scan_params", key), field_widget)
             self.json_maker_fields["scan_params"][key] = (field_widget, default)
         layout.addWidget(scan_group)
 
@@ -491,7 +535,7 @@ class JSONMakerWidget(QWidget):
         self.json_maker_fields["mosaic_params"] = {}
         for key, default in JSON_MAKER_COMMON_SECTIONS["mosaic_params"].items():
             field_widget = self._make_json_maker_field(key, default)
-            mosaic_form.addRow(key, field_widget)
+            mosaic_form.addRow(_row_label("mosaic_params", key), field_widget)
             self.json_maker_fields["mosaic_params"][key] = (field_widget, default)
         layout.addWidget(mosaic_group)
 
@@ -502,7 +546,7 @@ class JSONMakerWidget(QWidget):
         self.json_maker_fields["fine_scan_params"] = {}
         for key, default in JSON_MAKER_COMMON_SECTIONS["fine_scan_params"].items():
             field_widget = self._make_json_maker_field(key, default)
-            fine_form.addRow(key, field_widget)
+            fine_form.addRow(_row_label("fine_scan_params", key), field_widget)
             self.json_maker_fields["fine_scan_params"][key] = (field_widget, default)
         layout.addWidget(fine_group)
 
@@ -524,7 +568,7 @@ class JSONMakerWidget(QWidget):
         self.json_maker_fields["calibration_params"] = {}
         for key, default in JSON_MAKER_COMMON_SECTIONS["calibration_params"].items():
             field_widget = self._make_json_maker_field(key, default)
-            calib_form.addRow(key, field_widget)
+            calib_form.addRow(_row_label("calibration_params", key), field_widget)
             self.json_maker_fields["calibration_params"][key] = (field_widget, default)
         layout.addWidget(calib_group)
 

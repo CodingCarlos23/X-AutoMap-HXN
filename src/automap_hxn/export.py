@@ -72,24 +72,19 @@ def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
         unions_json_path = Path(output_dir) / unions_json_filename
         
         if unions_json_path.exists():
-            merged_unions_path = process_and_save_json(unions_json_path)
-            if merged_unions_path and Path(merged_unions_path).exists():
-                print(f"Drawing union boxes from {merged_unions_path}...")
-                with open(merged_unions_path, "r") as f:
-                    unions_data = json.load(f)
-                
-                for union_info in unions_data.values():
-                    center = union_info.get("image_center")
-                    length = union_info.get("image_length")
+            with open(unions_json_path, "r") as f:
+                unions_data = json.load(f)
 
-                    if center and length:
-                        x, y = center[0], center[1]
-                        half_len = length / 2
-                        top_left = (int(x - half_len), int(y - half_len))
-                        bottom_right = (int(x + half_len), int(y + half_len))
-                        cv2.rectangle(merged_rgb, top_left, bottom_right, (255, 255, 255), 1) # White box, thickness 1
-            else:
-                print(f"⚠️ Could not find merged unions file from {unions_json_path} to draw boxes.")
+            for union_info in unions_data.values():
+                center = union_info.get("image_center")
+                length = union_info.get("image_length")
+
+                if center and length:
+                    x, y = center[0], center[1]
+                    half_len = length / 2
+                    top_left = (int(x - half_len), int(y - half_len))
+                    bottom_right = (int(x + half_len), int(y + half_len))
+                    cv2.rectangle(merged_rgb, top_left, bottom_right, (255, 255, 255), 1)
         else:
             print(f"⚠️ Could not find {unions_json_path} to draw boxes.")
 
