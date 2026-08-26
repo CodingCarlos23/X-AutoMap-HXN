@@ -235,10 +235,9 @@ def analyze_data_local(scan_id=None,
             # Multiple elements: create union boxes
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
 
             for idx, union in unions.items():
-                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                box_name = f"Union Box {group_name} #{idx}"
                 formatted_unions[box_name] = {
                     "text": box_name,
                     "cx": union["real_center_um"][0], # Ensuring keys match headless expectations
@@ -562,10 +561,9 @@ def analyze_data_from_arrays(element_arrays, params):
             # Multiple elements: create union boxes
             print(f"[ANALYSIS] Union mode for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
             
             for idx, union in unions.items():
-                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                box_name = f"Union Box {group_name} #{idx}"
                 formatted_unions[box_name] = {
                     "text": box_name,
                     "cx": union["real_center_um"][0],
@@ -803,10 +801,9 @@ def analyze_data_get_fine_scans_table(scan_id=None,
             # Multiple elements: create union boxes
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start)
-            unions = merge_overlapping_boxes_dict(unions, overlap_thresh=segmentation.get('overlap_thresh', 0.5) or params.get('overlap_thresh', 0.5))
 
             for idx, union in unions.items():
-                box_name = f"Union Box {group_name} #{idx.split('#')[-1].strip()}"
+                box_name = f"Union Box {group_name} #{idx}"
                 formatted_unions[box_name] = {
                     "text": box_name,
                     "cx": union["real_center_um"][0],

@@ -43,6 +43,7 @@ from automap_hxn.utils import (
     resize_if_needed, normalize_and_dilate,
     make_json_serializable
 )
+from .blobs.processing import find_union_blobs
 
 from .json_maker import JSONMakerWidget
 from .coarse_scan_widget import CoarseScanWidget
@@ -1543,34 +1544,30 @@ f"Length: {ub['length']} px<br>"
         for blob in blobs:
             blobs_by_color[blob['color']].append(blob)
 
+        # Wrap in the {color: {key: [blobs]}} format expected by find_union_blobs
+        blobs_for_union = {color: {'gui': blob_list} for color, blob_list in blobs_by_color.items()}
+
+        raw = find_union_blobs(
+            blobs_for_union,
+            self.app_state.microns_per_pixel_x,
+            self.app_state.microns_per_pixel_y,
+            self.app_state.true_origin_x,
+            self.app_state.true_origin_y,
+        )
+
         union_objects = {}
-        union_index = 1
-        
-        reds = blobs_by_color.get('red', [])
-        greens = blobs_by_color.get('green', [])
-        blues = blobs_by_color.get('blue', [])
-    
-        for r in reds:
-            for g in greens:
-                if not self._boxes_intersect(r, g): continue
-                for b in blues:
-                    if self._boxes_intersect(r, b) and self._boxes_intersect(g, b):
-                        cx, cy = self._union_center(r, g, b)
-                        length, area = self._union_box_dimensions(r, g, b)
-                        
-                        real_cx = (cx * self.app_state.microns_per_pixel_x) + self.app_state.true_origin_x
-                        real_cy = (cy * self.app_state.microns_per_pixel_y) + self.app_state.true_origin_y
-                        real_length_x = length * self.app_state.microns_per_pixel_x
-                        real_length_y = length * self.app_state.microns_per_pixel_y
-                        
-                        union_objects[union_index] = {
-                            'center': (cx, cy), 'length': length, 'area': area,
-                            'real_center': (real_cx, real_cy),
-                            'real_size': (real_length_x, real_length_y),
-                            'real_area': real_length_x * real_length_y
-                        }
-                        union_index += 1
-        
+        for idx, u in raw.items():
+            real_cx, real_cy = u['real_center_um']
+            real_w, real_h = u['real_size_um']
+            union_objects[idx] = {
+                'center': tuple(u['center']),
+                'length': u['length'],
+                'area': u['area'],
+                'real_center': (real_cx, real_cy),
+                'real_size': (real_w, real_h),
+                'real_area': real_w * real_h,
+            }
+
         self.graphics_view.union_dict = union_objects
         self.union_list_widget.clear()
         for idx, ub in union_objects.items():
@@ -1586,31 +1583,6 @@ f"Length: {ub['length']} px<br>"
                 json.dump(serializable_dict, f, indent=4)
         
         self.update_boxes()
-
-    def _boxes_intersect(self, b1, b2):
-        x1_min, y1_min = b1['box_x'], b1['box_y']
-        x1_max = x1_min + b1['box_size']
-        y1_max = y1_min + b1['box_size']
-        x2_min, y2_min = b2['box_x'], b2['box_y']
-        x2_max = x2_min + b2['box_size']
-        y2_max = y2_min + b2['box_size']
-        return not (x1_max < x2_min or x1_min > x2_max or y1_max < y2_min or y1_min > y2_max)
-
-    def _union_center(self, b1, b2, b3):
-        x_vals = [b1['center'][0], b2['center'][0], b3['center'][0]]
-        y_vals = [b1['center'][1], b2['center'][1], b3['center'][1]]
-        return (sum(x_vals) // 3, sum(y_vals) // 3)
-
-    def _union_box_dimensions(self, b1, b2, b3):
-        xs = [b['box_x'] for b in [b1, b2, b3]]
-        ys = [b['box_y'] for b in [b1, b2, b3]]
-        sizes = [b['box_size'] for b in [b1, b2, b3]]
-        min_x = min(xs)
-        min_y = min(ys)
-        max_x = max(x + s for x, s in zip(xs, sizes))
-        max_y = max(y + s for y, s in zip(ys, sizes))
-        length = max(max_x - min_x, max_y - min_y)
-        return length, length**2
 
     def send_to_list(self):
         existing_texts = {self.queue_server_list.item(i).text() for i in range(self.queue_server_list.count())}
