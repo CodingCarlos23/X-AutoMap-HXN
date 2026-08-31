@@ -710,7 +710,8 @@ class MainWindow(QWidget):
         self._init_analysis_gui(from_backup=True)
 
     def on_dir_selected(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Directory")
+        default_dir = getattr(self, "_setup_config", {}).get("export_params", {}).get("data_wd", "") or str(Path.home())
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", default_dir)
         if not directory:
             return
         self.app_state.selected_directory = directory

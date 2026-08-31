@@ -10,7 +10,7 @@ import pandas as pd
 from .blobs.detection import detect_blobs
 from .blobs.processing import find_union_blobs
 from .plotting import plot_analysis_results
-from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict
+from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict, resize_if_needed
 from .export import create_rgb_tiff, create_all_elements_tiff, save_each_blob_as_individual_scan
 
 
@@ -38,8 +38,11 @@ def analyze_data_local(scan_id=None,
     if scan_id is None:
         scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
     out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
+    results_dir = str(Path(out_dir) / f"{Path(out_dir).name}_results")
+    os.makedirs(results_dir, exist_ok=True)
     print(f"[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
-    
+    print(f"[ANALYSIS] Results will be written to {results_dir}")
+
     # Skip analysis if remote_seg is True (data sent to remote port, no TIFFs)
     remote_seg = params.get('remote_seg') or params.get('segmentation_params', {}).get('remote_seg', False)
     if remote_seg:
@@ -83,19 +86,24 @@ def analyze_data_local(scan_id=None,
 
     # Flatten to get unique elements for loading
     all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
-    
+
     # Load Tiff Paths
     tiff_paths = wait_for_element_tiffs(all_elements, out_dir)
+
+    # Determine target shape — most common among all TIFFs, matching GUI resize_if_needed logic
+    from collections import Counter
+    _shapes = [tiff.imread(str(tiff_paths[e])).shape for e in all_elements if e in tiff_paths]
+    target_shape = Counter(_shapes).most_common(1)[0][0] if _shapes else None
 
     COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
-    
+
     segmentation = params.get("segmentation_params", {})
     min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
     min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
-    
+
     # Method-specific parameters from JSON config
     detection_methods = params.get("detection_methods", {})
     simple_methods = detection_methods.get("simple", {})
@@ -150,7 +158,9 @@ def analyze_data_local(scan_id=None,
         tiff_path = tiff_paths[element]
         print(f"Processing {tiff_path.name} ({color})")
         tiff_img = tiff.imread(str(tiff_path)).astype(np.float32)
-        
+        if target_shape and tiff_img.shape != target_shape:
+            tiff_img = resize_if_needed(tiff_img, tiff_path.name, target_shape)
+
         # Use configurable normalization and dilation parameters
         morphology = params.get('morphology_params', {})
         kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
@@ -168,7 +178,6 @@ def analyze_data_local(scan_id=None,
                         tiff_path.name,
                         method=detection_method,
                         **method_params)
-    
         precomputed_blobs[color][(min_thresh, min_area)] = b
 
     # --- 4. Union & Export Loop ---
@@ -257,15 +266,15 @@ def analyze_data_local(scan_id=None,
         # Save results if we have any formatted unions/blobs
         if formatted_unions:
             # Save the "Master" output JSON (Headless ignores this via startswith("unions_output"))
-            out_json = Path(out_dir) / f"unions_output_{group_name}.json"
+            out_json = Path(results_dir) / f"unions_output_{group_name}.json"
             # Convert to JSON-serializable format
             serializable_unions = make_json_serializable(formatted_unions)
             with open(out_json, "w") as f:
                 json.dump(serializable_unions, f, indent=2)
-            
+
             # Save the INDIVIDUAL JSONs (Headless finds these)
-            # This function must create files that do NOT start with "unions_output"  
-            save_each_blob_as_individual_scan(formatted_unions, out_dir)
+            # This function must create files that do NOT start with "unions_output"
+            save_each_blob_as_individual_scan(formatted_unions, results_dir)
             
             # Initialize results dictionary for this group
             all_results['groups'][group_name] = {
@@ -277,7 +286,7 @@ def analyze_data_local(scan_id=None,
             
             # Create and save fine scans table (for remote server compatibility)
             try:
-                fine_scans_table_path = Path(out_dir) / f"fine_scans_table_{group_name}.csv"
+                fine_scans_table_path = Path(results_dir) / f"fine_scans_table_{group_name}.csv"
                 print(f"[TABLE] Creating fine scans table from {len(formatted_unions)} formatted unions...")
                 table = formatted_unions_to_table(formatted_unions, save_to=str(fine_scans_table_path))
                 if not table.empty:
@@ -306,9 +315,9 @@ def analyze_data_local(scan_id=None,
             orig = element_to_color.get(element)
             if orig: group_blobs_vis[COLOR_ORDER[i]] = precomputed_blobs[orig]
 
-        create_rgb_tiff(tiff_paths, out_dir, elem_list, group_name)
-        create_all_elements_tiff(tiff_paths, out_dir, elem_list, group_blobs_vis, group_name)
-        
+        create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name)
+        create_all_elements_tiff(tiff_paths, results_dir, elem_list, group_blobs_vis, group_name)
+
         # Plot analysis results with bounding boxes
         # Collect formatted unions for plotting
         formatted_unions_dict = {}
@@ -317,9 +326,9 @@ def analyze_data_local(scan_id=None,
             # Get formatted_unions from all_results
             if 'groups' in all_results and group_name_plot in all_results['groups']:
                 formatted_unions_dict[group_name_plot] = all_results['groups'][group_name_plot]['formatted_unions']
-        
+
         if formatted_unions_dict:
-            plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, out_dir)
+            plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, results_dir)
 
     print("[ANALYSIS] Done.")
     

@@ -1,0 +1,75 @@
+{
+  "execution_params": {
+    "mode": "offline",
+    "proceed_with_fine_scan": true
+  },
+  "scan_params": {
+    "label": "bnl_t1_offline",
+    "scan_id": 9999,
+    "dets": "dets_fast",
+    "det_names": ["fs", "eiger2", "xspress3"],
+    "mot1": "zpssx",
+    "mot1_s": -12.5,
+    "mot1_e": 12.5,
+    "mot2": "zpssy",
+    "mot2_s": -12.5,
+    "mot2_e": 12.5,
+    "exp_t": 0.005,
+    "step_size": 0.25,
+    "zp_move_flag": 0,
+    "smar_move_flag": 0,
+    "roi_positions_file": null
+  },
+  "mosaic_params": {
+    "xlen": 50,
+    "ylen": 50,
+    "overlap_per": 5,
+    "step_size": 250,
+    "dwell": 0.01,
+    "mll": false,
+    "remote_seg": false,
+    "followup_fine_scan": false,
+    "ref_scan_id": null
+  },
+  "fine_scan_params": {
+    "step_size_fine": 0.1,
+    "exp_t_fine": 0.005,
+    "fine_scan_pad_ratio": 0.3
+  },
+  "export_params": {
+    "elem_list": [["Ca", "Fe", "S"]],
+    "export_norm": "sclr1_ch4",
+    "data_wd": "/home/codingcarlos/BNL Test Data",
+    "tiled_reconstructions": "tst/sandbox/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/synaps/segmentations",
+    "tiled_uri": null
+  },
+  "calibration_params": {
+    "microns_per_pixel_x": 1.5,
+    "microns_per_pixel_y": 1.5,
+    "true_origin_x": 10,
+    "true_origin_y": 10
+  },
+  "segmentation_params": {
+    "overlap_thresh": 0.5,
+    "blob_detection_method": "simple",
+    "min_threshold_intensity": 10,
+    "min_threshold_area": 200
+  },
+  "morphology_params": {
+    "normalize_kernel_size": [3, 3],
+    "dilate_iterations": 2,
+    "blur_kernel": [3, 3]
+  },
+  "detection_methods": {
+    "simple": {
+      "max_area": 50000,
+      "max_threshold": 200,
+      "threshold_step": 5,
+      "filter_by_color": false,
+      "filter_by_circularity": false,
+      "gui_threshold_values": [10],
+      "gui_min_area_values": [200]
+    }
+  }
+}

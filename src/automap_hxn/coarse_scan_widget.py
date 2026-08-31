@@ -244,7 +244,9 @@ class CoarseScanWidget(QWidget):
 
     def _browse_json(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select JSON Config", "", "JSON files (*.json)"
+            self, "Select JSON Config",
+            str(Path(__file__).resolve().parents[2] / "configs"),
+            "JSON files (*.json)"
         )
         if path:
             self._load_json(path)
@@ -461,6 +463,7 @@ class CoarseScanWidget(QWidget):
         self._send_btn.setText("Send Mosaic Scan")
         self._preview_text.setPlainText(f"✓ {message}")
         self._log(f"✓ {message}")
+        print(f"[MOSAIC] ✓ {message}")
         QMessageBox.information(self, "Scan Complete", message)
 
     def _on_scan_error(self, message):
