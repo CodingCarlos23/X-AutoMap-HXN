@@ -1548,12 +1548,14 @@ f"Length: {ub['length']} px<br>"
         # Wrap in the {color: {key: [blobs]}} format expected by find_union_blobs
         blobs_for_union = {color: {'gui': blob_list} for color, blob_list in blobs_by_color.items()}
 
+        overlap_thresh = getattr(self, "_setup_config", {}).get("segmentation_params", {}).get("overlap_thresh", 0.5)
         raw = find_union_blobs(
             blobs_for_union,
             self.app_state.microns_per_pixel_x,
             self.app_state.microns_per_pixel_y,
             self.app_state.true_origin_x,
             self.app_state.true_origin_y,
+            overlap_thresh=overlap_thresh,
         )
 
         union_objects = {}

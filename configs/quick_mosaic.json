@@ -7,7 +7,7 @@
   },
   "scan_params": {
     "label": "quick_mosaic",
-    "scan_id": 111111,
+    "scan_id": null,
     "dets": "dets_fast",
     "det_names": [
       "fs",

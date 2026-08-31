@@ -2,12 +2,12 @@
   "segmentation_params": {
     "overlap_thresh": 0.5,
     "blob_detection_method": "simple",
-    "min_threshold_intensity": 50,
+    "min_threshold_intensity": 10,
     "min_threshold_area": 200
   },
   "scan_params": {
     "label": "quick_mosaic_sim",
-    "scan_id": 111111,
+    "scan_id": null,
     "dets": "dets_fast",
     "det_names": [
       "fs",
@@ -88,7 +88,7 @@
       "filter_by_color": false,
       "filter_by_circularity": false,
       "gui_threshold_values": [
-        50
+        10
       ],
       "gui_min_area_values": [
         200
