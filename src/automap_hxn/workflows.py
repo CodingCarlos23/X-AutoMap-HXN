@@ -108,23 +108,37 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     
     '''
 
-    status = RM.status()
-    if not status.get("worker_environment_exists", False):
-        response = RM.environment_open()
-        if not response.get("success", False):
-            raise RuntimeError(f"Could not open QueueServer worker: {response.get('msg', '')}")
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            status = RM.status()
-            if status.get("worker_environment_state") == "idle" and status.get("re_state") == "idle":
-                break
-            time.sleep(0.25)
-        else:
-            raise RuntimeError("QueueServer worker did not become ready within 15 seconds.")
+    # Determine mode early so we can skip ZMQ entirely in simulation
+    _early_params = {}
+    if initial_scan_path:
+        try:
+            with open(initial_scan_path, 'r') as _f:
+                _early_params = json.load(_f)
+        except Exception:
+            pass
+    _mode = str(_early_params.get('execution_params', {}).get('mode', 'simulation')).lower()
+    _is_real_or_offline = _mode in ('real', 'offline')
 
-    if ref_scan_id:
-            RM.item_execute(BPlan("recover_zp_csan_pos", 
-                            ref_scan_id, 
+    if _is_real_or_offline:
+        status = RM.status()
+        if not status.get("worker_environment_exists", False):
+            response = RM.environment_open()
+            if not response.get("success", False):
+                raise RuntimeError(f"Could not open QueueServer worker: {response.get('msg', '')}")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                status = RM.status()
+                if status.get("worker_environment_state") == "idle" and status.get("re_state") == "idle":
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("QueueServer worker did not become ready within 15 seconds.")
+    else:
+        print(f"[SIM] Skipping QueueServer environment check (mode={_mode})")
+
+    if ref_scan_id and _is_real_or_offline:
+            RM.item_execute(BPlan("recover_zp_csan_pos",
+                            ref_scan_id,
                             zp_move_flag = 0,
                             smar_move_flag = 1,
                             move_base = 1))
