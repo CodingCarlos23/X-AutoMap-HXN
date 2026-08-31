@@ -51,7 +51,7 @@
       ]
     ],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/home/codingcarlos/mosaic_175um_stitched",
+    "data_wd": "/home/codingcarlos/Documents/github/X-AutoMap-HXN/data/mosaic_175um_stitched",
     "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
     "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
     "tiled_uri": null
