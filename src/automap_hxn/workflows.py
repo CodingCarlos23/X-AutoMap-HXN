@@ -194,18 +194,22 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             # Queue all 7 items for this tile before firing the queue once.
             # Previously headless_send_queue_coarse_scan called queue_start()
             # internally, draining the queue before the return moves were added.
-            RM.item_add(BPlan("move_relative", mot_x, x_rel))
-            RM.item_add(BPlan("move_relative", mot_y, y_rel))
-
             _, coarse_requests = build_coarse_scan_requests(initial_scan_path)
-            for req in coarse_requests:
-                RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
-
-            RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
-            RM.item_add(BPlan("move_relative", mot_x, -x_rel))
-            RM.item_add(BPlan("move_relative", mot_y, -y_rel))
-            RM.queue_start()
-            wait_for_queue_done()
+            if is_real or is_offline:
+                RM.item_add(BPlan("move_relative", mot_x, x_rel))
+                RM.item_add(BPlan("move_relative", mot_y, y_rel))
+                for req in coarse_requests:
+                    RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
+                RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
+                RM.item_add(BPlan("move_relative", mot_x, -x_rel))
+                RM.item_add(BPlan("move_relative", mot_y, -y_rel))
+                RM.queue_start()
+                wait_for_queue_done()
+            else:
+                print(f"[SIM] Would queue: move_relative {mot_x} {x_rel}, move_relative {mot_y} {y_rel}")
+                for req in coarse_requests:
+                    print(f"[SIM] Would queue: {req['plan_name']} {req['plan_args']}")
+                print(f"[SIM] Would queue: mov {fine_x} 0 {fine_y} 0, return moves, queue_start")
 
             if proceed_with_fine_scan:
                 scan_id = None
