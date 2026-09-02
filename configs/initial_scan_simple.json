@@ -1,13 +1,20 @@
 {
-  "execution_params": {
-    "mode": "offline",
-    "proceed_with_fine_scan": true
+  "segmentation_params": {
+    "overlap_thresh": 0.5,
+    "unions_only": false,
+    "blob_detection_method": "simple",
+    "min_threshold_intensity": 100,
+    "min_threshold_area": 200
   },
   "scan_params": {
-    "label": "bnl_t1_offline",
-    "scan_id": 9999,
+    "label": "simple_test",
+    "scan_id": "111111",
     "dets": "dets_fast",
-    "det_names": ["fs", "eiger2", "xspress3"],
+    "det_names": [
+      "fs",
+      "eiger2",
+      "xspress3"
+    ],
     "mot1": "zpssx",
     "mot1_s": -12.5,
     "mot1_e": 12.5,
@@ -22,8 +29,8 @@
   },
   "mosaic_params": {
     "xlen": 50,
-    "ylen": 50,
-    "overlap_per": 5,
+    "ylen": 25,
+    "overlap_per": 0,
     "step_size": 250,
     "dwell": 0.01,
     "mll": false,
@@ -37,11 +44,17 @@
     "fine_scan_pad_ratio": 0.3
   },
   "export_params": {
-    "elem_list": [["Ca", "Fe", "S"]],
+    "elem_list": [
+      [
+        "Ca",
+        "Fe",
+        "S"
+      ]
+    ],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/home/codingcarlos/BNL Test Data",
-    "tiled_reconstructions": "tst/sandbox/synaps/reconstructions",
-    "tiled_segmentations": "tst/sandbox/synaps/segmentations",
+    "data_wd": "/home/codingcarlos/mosaic_175um_stitched",
+    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
     "tiled_uri": null
   },
   "calibration_params": {
@@ -50,26 +63,38 @@
     "true_origin_x": 10,
     "true_origin_y": 10
   },
-  "segmentation_params": {
-    "overlap_thresh": 0.5,
-    "blob_detection_method": "simple",
-    "min_threshold_intensity": 10,
-    "min_threshold_area": 200
+  "execution_params": {
+    "mode": "real",
+    "proceed_with_fine_scan": true
   },
   "morphology_params": {
-    "normalize_kernel_size": [3, 3],
+    "normalize_kernel_size": [
+      3,
+      3
+    ],
     "dilate_iterations": 2,
-    "blur_kernel": [3, 3]
+    "blur_kernel": [
+      3,
+      3
+    ]
+  },
+  "analysis_params": {
+    "analysis": true,
+    "execute": true
   },
   "detection_methods": {
     "simple": {
       "max_area": 50000,
-      "max_threshold": 200,
+      "max_threshold": 1000,
       "threshold_step": 5,
       "filter_by_color": false,
       "filter_by_circularity": false,
-      "gui_threshold_values": [10],
-      "gui_min_area_values": [200]
+      "gui_threshold_values": [
+        100
+      ],
+      "gui_min_area_values": [
+        200
+      ]
     }
   }
 }

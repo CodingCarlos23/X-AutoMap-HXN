@@ -1,13 +1,14 @@
 {
   "segmentation_params": {
     "overlap_thresh": 0.5,
-    "blob_detection_method": "stardist",
-    "min_threshold_intensity": 0,
-    "min_threshold_area": 0
+    "unions_only": true,
+    "blob_detection_method": "simple",
+    "min_threshold_intensity": 100,
+    "min_threshold_area": 200
   },
   "scan_params": {
-    "label": "stardist_test",
-    "scan_id": null,
+    "label": "simple_test",
+    "scan_id": "111111",
     "dets": "dets_fast",
     "det_names": [
       "fs",
@@ -27,7 +28,7 @@
     "roi_positions_file": null
   },
   "mosaic_params": {
-    "xlen": 25,
+    "xlen": 50,
     "ylen": 25,
     "overlap_per": 0,
     "step_size": 250,
@@ -51,7 +52,7 @@
       ]
     ],
     "export_norm": "sclr1_ch4",
-    "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
+    "data_wd": "/home/codingcarlos/mosaic_175um_stitched",
     "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
     "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
     "tiled_uri": null
@@ -82,11 +83,18 @@
     "execute": true
   },
   "detection_methods": {
-    "stardist": {
-      "model_name": "2D_versatile_fluo",
-      "prob_thresh": 0.5,
-      "nms_thresh": 0.4,
-      "min_size": 0
+    "simple": {
+      "max_area": 50000,
+      "max_threshold": 10000,
+      "threshold_step": 5,
+      "filter_by_color": false,
+      "filter_by_circularity": false,
+      "gui_threshold_values": [
+        100
+      ],
+      "gui_min_area_values": [
+        200
+      ]
     }
   }
 }

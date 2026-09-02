@@ -25,9 +25,8 @@ JSON_MAKER_UNIVERSAL = "universal"
 
 DETECTION_METHOD_BLOCKS = {
     "simple": {
-        # max_threshold is derived automatically at create time: it matches
-        # the largest gui_threshold_values entry.
         "max_area": 50000,
+        "max_threshold": 1000,
         "threshold_step": 5,
         "filter_by_color": False,
         "filter_by_circularity": False,
@@ -140,14 +139,15 @@ JSON_MAKER_COMMON_SECTIONS = {
     "segmentation_params": {
         "min_threshold_intensity": 100, "min_threshold_area": 200,
         "overlap_thresh": 0.5,
+        "unions_only": True,
     },
     "morphology_params": {
         "normalize_kernel_size": [3, 3], "dilate_iterations": 2,
         "blur_kernel": [3, 3],
     },
     "mosaic_params": {
-        "xlen": 100,
-        "ylen": 100,
+        "xlen": 50,
+        "ylen": 25,
         "overlap_per": 0,
         "step_size": 250,
         "dwell": 0.01,
@@ -753,7 +753,7 @@ class JSONMakerWidget(QWidget):
         if "simple" in detection_methods:
             simple_block = detection_methods["simple"]
             threshold_values = simple_block.get("gui_threshold_values", [100])
-            simple_block["max_threshold"] = max(threshold_values)
+            simple_block.setdefault("max_threshold", 1000)
             area_values = simple_block.get("gui_min_area_values", [200])
             max_area = simple_block.get("max_area", 50000)
             oversized = [a for a in area_values if a > max_area]

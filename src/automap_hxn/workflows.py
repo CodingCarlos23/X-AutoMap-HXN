@@ -248,26 +248,30 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     from .analysis import analyze_data_local
                     result = analyze_data_local(scan_id=scan_id, params=tile_params)
                     if result and 'fine_scans_tables' in result:
-                        # Only fine scan on union blobs (detected across all elements in group).
-                        # Individual blobs (single-element groups) are skipped.
-                        union_tables = {
-                            group: df[df['label'].str.startswith('Union Box')]
-                            for group, df in result['fine_scans_tables'].items()
-                        }
-                        union_tables = {g: df for g, df in union_tables.items() if not df.empty}
+                        unions_only = tile_params.get('segmentation_params', {}).get('unions_only', True)
+                        if unions_only:
+                            fine_tables = {
+                                group: df[df['label'].str.startswith('Union Box')]
+                                for group, df in result['fine_scans_tables'].items()
+                            }
+                            fine_tables = {g: df for g, df in fine_tables.items() if not df.empty}
+                            label = "union"
+                        else:
+                            fine_tables = {g: df for g, df in result['fine_scans_tables'].items() if not df.empty}
+                            label = "blob"
 
-                        if union_tables:
-                            n_unions = sum(len(df) for df in union_tables.values())
-                            print(f"[MOSAIC] {n_unions} union(s) found — queuing fine scans...")
+                        if fine_tables:
+                            n = sum(len(df) for df in fine_tables.values())
+                            print(f"[MOSAIC] {n} {label}(s) found — queuing fine scans...")
                             submit_fine_scans_to_queue(
                                 initial_scan_path, scan_id, out_dir,
                                 tile_params['execution_params'],
-                                fine_scans_tables=union_tables,
+                                fine_scans_tables=fine_tables,
                             )
                             run_fine_scans(is_real or is_offline)
                             wait_for_queue_done()
                         else:
-                            print("[MOSAIC] No union blobs detected in this tile — moving to next tile.")
+                            print(f"[MOSAIC] No {label}s detected in this tile — moving to next tile.")
                     else:
                         print("[MOSAIC] No particles detected in this tile — moving to next tile.")
                 except Exception as e:

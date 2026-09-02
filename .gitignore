@@ -166,7 +166,7 @@ secret_config.yaml
 
 #Ignore this folder
 models/
-# data/
+data/
 
 ## Ignore folders starting with "auto"
 #auto*/
