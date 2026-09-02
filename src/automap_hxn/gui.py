@@ -47,6 +47,7 @@ from .blobs.processing import find_union_blobs
 
 from .json_maker import JSONMakerWidget
 from .coarse_scan_widget import CoarseScanWidget
+from .llm_json_maker import LLMJsonMakerWidget
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -237,6 +238,9 @@ class MainWindow(QWidget):
 
         self.coarse_scan_tab = CoarseScanWidget()
         self.tab_widget.addTab(self.coarse_scan_tab, "Mosaic Scan")
+
+        self.llm_json_maker_tab = LLMJsonMakerWidget()
+        self.tab_widget.addTab(self.llm_json_maker_tab, "LLM JSON Maker")
 
 
     def _create_json_maker_tab(self):
