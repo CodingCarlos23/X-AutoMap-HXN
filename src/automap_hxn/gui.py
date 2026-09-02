@@ -102,11 +102,11 @@ class ZoomableGraphicsView(QGraphicsView):
     
         for item in selected_items:
             text = item.toolTip()
-            center_match = re.search(r"Center: \((\d+), (\d+)\)", text)
-            length_match = re.search(r"Length: (\d+)\s*px", text)
-    
+            center_match = re.search(r"Center: \((\d+\.?\d*), (\d+\.?\d*)\)", text)
+            length_match = re.search(r"Length: (\d+\.?\d*)\s*px", text)
+
             if center_match and length_match:
-                x, y, length = int(center_match.group(1)), int(center_match.group(2)), int(length_match.group(1))
+                x, y, length = int(float(center_match.group(1))), int(float(center_match.group(2))), int(float(length_match.group(1)))
                 radius = length / 2 + 5
                 circle = QGraphicsEllipseItem(x - radius, y - radius, radius * 2, radius * 2)
                 circle.setPen(QPen(QColor("yellow"), 2, Qt.SolidLine))
@@ -224,11 +224,34 @@ class MainWindow(QWidget):
 
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(0)
+
+        # Persistent top bar — always visible across all tabs
+        _top_bar = QHBoxLayout()
+        _top_bar.setContentsMargins(6, 4, 6, 4)
+        _top_bar.addStretch(1)
+        _hxn_lbl = QLabel("<b>HXN</b>")
+        _hxn_lbl.setStyleSheet(
+            "font-size: 16px; font-weight: bold; padding: 4px 12px;"
+            " border: 2px solid palette(mid); border-radius: 4px;"
+        )
+        _hxn_lbl.setAlignment(Qt.AlignCenter)
+        _top_bar.addWidget(_hxn_lbl)
+        root_layout.addLayout(_top_bar)
+
         self.tab_widget = QTabWidget()
         root_layout.addWidget(self.tab_widget)
 
         self.automap_tab = QWidget()
         self.outer_layout = QVBoxLayout(self.automap_tab)
+
+        # AutoMap tab header
+        _header_row = QHBoxLayout()
+        _title_lbl = QLabel("<b>AutoMap</b>")
+        _title_lbl.setStyleSheet("font-size: 14px; padding: 5px;")
+        _header_row.addWidget(_title_lbl)
+        self.outer_layout.addLayout(_header_row)
+
         self.setup_widget = self._create_setup_screen()
         self.outer_layout.addWidget(self.setup_widget)
         self.tab_widget.addTab(self.automap_tab, "AutoMap")
@@ -924,6 +947,13 @@ class MainWindow(QWidget):
     def _create_controls_panel(self):
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
+
+        config_name = getattr(self, "detection_config_path", None)
+        config_name = Path(config_name).name if config_name else "No config loaded"
+        self.active_config_label = QLabel(f"Config: <b>{config_name}</b>")
+        self.active_config_label.setStyleSheet("font-size: 11px; color: #555; padding: 2px 0;")
+        self.active_config_label.setWordWrap(True)
+        controls_layout.addWidget(self.active_config_label)
 
         return_btn = QPushButton("Return to Selection")
         return_btn.clicked.connect(self.return_to_selection)

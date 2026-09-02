@@ -14,6 +14,36 @@ from .utils import make_json_serializable, wait_for_element_tiffs, formatted_uni
 from .export import create_rgb_tiff, create_all_elements_tiff, save_each_blob_as_individual_scan
 
 
+def _dedup_formatted_blobs(formatted_unions, overlap_thresh):
+    """Deduplicate individual blob entries (cx/cy/num_x/num_y format) by IoU and containment."""
+    keys = sorted(formatted_unions, key=lambda k: formatted_unions[k]['num_x'] * formatted_unions[k]['num_y'], reverse=True)
+    kept = []
+    for k in keys:
+        a = formatted_unions[k]
+        ax0, ay0 = a['cx'] - a['num_x'] / 2, a['cy'] - a['num_y'] / 2
+        ax1, ay1 = ax0 + a['num_x'], ay0 + a['num_y']
+        area_a = a['num_x'] * a['num_y']
+        discard = False
+        for j in kept:
+            b = formatted_unions[j]
+            bx0, by0 = b['cx'] - b['num_x'] / 2, b['cy'] - b['num_y'] / 2
+            bx1, by1 = bx0 + b['num_x'], by0 + b['num_y']
+            ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+            ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+            inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            if inter == 0:
+                continue
+            area_b = b['num_x'] * b['num_y']
+            iou = inter / (area_a + area_b - inter)
+            frac_a = inter / area_a if area_a > 0 else 0
+            if frac_a >= 0.9 or iou > overlap_thresh:
+                discard = True
+                break
+        if not discard:
+            kept.append(k)
+    return {k: formatted_unions[k] for k in kept}
+
+
 def analyze_data_local(scan_id=None, 
                        return_results=False, 
                        params=None):
@@ -259,6 +289,12 @@ def analyze_data_local(scan_id=None,
                         "mean_intensity": blob.get('mean_intensity', 0)
                     }
                     blob_counter += 1
+
+            # Dedup individual blobs by IoU / containment (same logic as _dedup_unions)
+            if len(formatted_unions) > 1:
+                overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
+                formatted_unions = _dedup_formatted_blobs(formatted_unions, overlap_thresh)
+                print(f"[DEDUP] {blob_counter - 1} blobs → {len(formatted_unions)} after dedup (thresh={overlap_thresh})")
 
         # Save results if we have any formatted unions/blobs
         if formatted_unions:
