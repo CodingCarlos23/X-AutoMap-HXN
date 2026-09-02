@@ -497,8 +497,8 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
             raise ValueError("Mode is Offline but no 'scan_id' provided in export_params!")
         print(f"[OFFLINE] Using Target ID: {last_id}")
     else:
-        last_id = 111111 
-        print(f"[SIM] Using dummy ID: {last_id}")
+        last_id = scan_params.get('scan_id')
+        print(f"[SIM] Using scan_id: {last_id}")
 
     out_dir = os.path.join(data_wd, f"automap_{last_id}")
     os.makedirs(out_dir, exist_ok=True)

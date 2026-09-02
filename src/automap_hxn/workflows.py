@@ -136,12 +136,14 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     else:
         print(f"[SIM] Skipping QueueServer environment check (mode={_mode})")
 
-    if ref_scan_id and _is_real_or_offline:
-            RM.item_execute(BPlan("recover_zp_csan_pos",
-                            ref_scan_id,
-                            zp_move_flag = 0,
-                            smar_move_flag = 1,
-                            move_base = 1))
+    if ref_scan_id and not _is_real_or_offline:
+        RM.item_add(BPlan("recover_zp_csan_pos",
+                          ref_scan_id,
+                          zp_move_flag=0,
+                          smar_move_flag=1,
+                          move_base=1))
+        RM.queue_start()
+        wait_for_queue_done()
 
     try:
         if beamline_params:
@@ -236,7 +238,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     except Exception as e:
                         print(f"[MOSAIC] Could not get scan_id from db: {e}")
                 if scan_id is None:
-                    scan_id = tile_params.get('scan_id') or 111111
+                    scan_id = tile_params.get('scan_id')
 
                 out_dir = os.path.join(data_wd, f"automap_{scan_id}")
                 tile_params['out_dir'] = out_dir
