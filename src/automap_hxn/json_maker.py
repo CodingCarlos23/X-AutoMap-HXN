@@ -824,6 +824,29 @@ class JSONMakerWidget(QWidget):
             else:
                 widget.clear()
 
+    def _suggest_json_filename(self, config, active_method):
+        """Build a descriptive filename from the config values."""
+        # method
+        method = active_method or "simple"
+
+        # union_or_all
+        unions_only = config.get("segmentation_params", {}).get("unions_only", True)
+        union_part = "union" if unions_only else "all"
+
+        # scan_id
+        scan_id = config.get("scan_params", {}).get("scan_id")
+        id_part = f"id-{scan_id}" if scan_id not in (None, "", "null") else "id-DB"
+
+        # threshold + area (simple only)
+        parts = [method, union_part, id_part]
+        if method == "simple":
+            thresh = config.get("segmentation_params", {}).get("min_threshold_intensity", "")
+            area = config.get("segmentation_params", {}).get("min_threshold_area", "")
+            if thresh != "" and area != "":
+                parts.append(f"t{thresh}_a{area}")
+
+        return "_".join(parts) + ".json"
+
     def on_create_json_clicked(self):
         """Write a new initial-scan JSON from the form values."""
         selection, active_method = self._json_maker_selection()
@@ -834,7 +857,7 @@ class JSONMakerWidget(QWidget):
             return
 
         configs_dir = Path(__file__).resolve().parents[2] / "configs"
-        default_name = f"initial_scan_{selection}.json"
+        default_name = self._suggest_json_filename(config, active_method)
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save JSON Configuration",
