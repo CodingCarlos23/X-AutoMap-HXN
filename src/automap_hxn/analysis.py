@@ -203,45 +203,13 @@ def analyze_data_local(scan_id=None,
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
 
         formatted_unions = {}
-        
-        if len(group_blobs_for_union) == 1:
-            # Single element: process individual blobs without union formation
-            print(f"[SINGLE ELEMENT] Processing individual blobs for {group_name}")
-            color = list(group_blobs_for_union.keys())[0]
-            blob_data = group_blobs_for_union[color]
-            
-            # Get blobs from the (min_thresh, min_area) key
-            individual_blobs = list(blob_data.values())
-            if individual_blobs:
-                individual_blobs = individual_blobs[0]  # Get the blob list
-                
-                for idx, blob in enumerate(individual_blobs, start=1):
-                    # Convert blob coordinates to real-world coordinates
-                    image_center_x = blob['center'][0]
-                    image_center_y = blob['center'][1]
-                    real_center_x = x_start + (image_center_x * step_size)
-                    real_center_y = y_start + (image_center_y * step_size)
-                    
-                    # Use blob size or default size
-                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
-                    
-                    box_name = f"Individual Blob {group_name} #{idx}"
-                    formatted_unions[box_name] = {
-                        "text": box_name,
-                        "cx": real_center_x,
-                        "cy": real_center_y,
-                        "num_x": blob_size_um,
-                        "num_y": blob_size_um,
-                        # Preserve original blob info
-                        "image_center": blob['center'],
-                        "image_radius": blob['radius'],
-                        "color": blob['color'],
-                        "max_intensity": blob.get('max_intensity', 0),
-                        "mean_intensity": blob.get('mean_intensity', 0)
-                    }
-                    
-        elif len(group_blobs_for_union) >= 2:
-            # Multiple elements: create union boxes
+        unions_only = params.get("segmentation_params", {}).get("unions_only", True)
+
+        if not group_blobs_for_union:
+            print(f"[SKIP] No valid blobs found for group {group_name}")
+            continue
+        elif len(group_blobs_for_union) >= 2 and unions_only:
+            # Multiple elements with unions_only=True: create union boxes (intersections only)
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
             unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start, overlap_thresh=overlap_thresh)
@@ -250,19 +218,47 @@ def analyze_data_local(scan_id=None,
                 box_name = f"Union Box {group_name} #{idx}"
                 formatted_unions[box_name] = {
                     "text": box_name,
-                    "cx": union["real_center_um"][0], # Ensuring keys match headless expectations
+                    "cx": union["real_center_um"][0],
                     "cy": union["real_center_um"][1],
                     "num_x": union["real_size_um"][0],
                     "num_y": union["real_size_um"][1],
-                    # Preserve original verbose keys if needed for other logs
                     "image_center": union["center"],
                     "image_length": union["length"],
                     "real_center_um": union["real_center_um"],
                     "real_size_um": union["real_size_um"],
                 }
         else:
-            print(f"[SKIP] No valid blobs found for group {group_name}")
-            continue
+            # Single element OR unions_only=False: queue every blob from every element individually
+            mode_label = "SINGLE ELEMENT" if len(group_blobs_for_union) == 1 else "INDIVIDUAL MODE (unions_only=False)"
+            print(f"[{mode_label}] Processing individual blobs for {group_name}")
+            color_to_elem = {['red', 'green', 'blue'][i]: e for i, e in enumerate(elem_list) if i < 3}
+            blob_counter = 1
+            for color, blob_data in group_blobs_for_union.items():
+                element_name = color_to_elem.get(color, color)
+                individual_blobs = list(blob_data.values())
+                if not individual_blobs:
+                    continue
+                individual_blobs = individual_blobs[0]
+                for blob in individual_blobs:
+                    image_center_x = blob['center'][0]
+                    image_center_y = blob['center'][1]
+                    real_center_x = x_start + (image_center_x * step_size)
+                    real_center_y = y_start + (image_center_y * step_size)
+                    blob_size_um = blob.get('box_size', blob['radius'] * 2) * step_size
+                    box_name = f"Individual Blob {element_name} #{blob_counter}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": real_center_x,
+                        "cy": real_center_y,
+                        "num_x": blob_size_um,
+                        "num_y": blob_size_um,
+                        "image_center": blob['center'],
+                        "image_radius": blob['radius'],
+                        "color": blob['color'],
+                        "max_intensity": blob.get('max_intensity', 0),
+                        "mean_intensity": blob.get('mean_intensity', 0)
+                    }
+                    blob_counter += 1
 
         # Save results if we have any formatted unions/blobs
         if formatted_unions:
@@ -304,8 +300,8 @@ def analyze_data_local(scan_id=None,
                 print(f"⚠️ Error creating fine scans table for {group_name}: {type(e).__name__}: {e}")
                 traceback.print_exc()
                 all_results['groups'][group_name]['fine_scans_table'] = {}
-            # Add union data for multi-element groups
-            if len(group_blobs_for_union) >= 2:
+            # Add union data when union mode was actually used
+            if len(group_blobs_for_union) >= 2 and unions_only:
                 all_results['groups'][group_name]['unions'] = unions
 
     # --- 5. Visualization ---
