@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import subprocess
 import shutil
 import urllib.request
@@ -12,7 +13,7 @@ import numpy as np
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
-    QScrollArea, QMessageBox,
+    QScrollArea, QMessageBox, QComboBox, QCheckBox, QSpinBox,
 )
 from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtGui import (
@@ -20,18 +21,44 @@ from qtpy.QtGui import (
 )
 
 
-MODEL = "qwen2.5vl:3b"
+MODEL = "qwen2.5vl:7b"
 OLLAMA_URL = "http://localhost:11434/api/chat"
+
+KNOWN_MODELS = [
+    "qwen2.5vl:7b",
+    "qwen2.5vl:3b",
+    "qwen2.5vl:72b",
+]
+
+_active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget
 
 LOCATE_SYSTEM_PROMPT = (
     "You are a scientific image analysis assistant for XRF (X-ray fluorescence) scan data. "
-    "Identify all distinct features, particles, clusters, or regions of interest visible in the image. "
+    "Identify all distinct bright features, particles, or clusters visible in the image. "
     "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
     '{"features": [{"id": 1, "label": "particle cluster", "x1": 0.10, "y1": 0.20, '
     '"x2": 0.45, "y2": 0.60, "description": "bright region with high signal"}], "total_count": 1}\n'
     "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
     "where (0,0) is the top-left corner and (1,1) is the bottom-right corner of the image. "
-    "x1 < x2, y1 < y2. Include every distinct feature you can identify."
+    "x1 < x2, y1 < y2. "
+    "Draw each bounding box tightly around the BRIGHT CORE of each feature — "
+    "do not include surrounding dark background. Be as precise as possible with the box edges. "
+    "Include every distinct feature you can identify."
+)
+
+GROUNDING_PROMPT = (
+    "Detect all bright spots, particles, and clusters of interest in this XRF scan image. "
+    "For every distinct bright feature you find, identify it and mark its bounding box location."
+)
+
+# qwen2.5vl native grounding token patterns (coords in [0, 1000])
+_RE_LABEL_BOX = re.compile(
+    r'<\|object_ref_start\|>(.*?)<\|object_ref_end\|>'
+    r'<\|box_start\|>\((\d+),(\d+)\),\((\d+),(\d+)\)<\|box_end\|>',
+    re.DOTALL,
+)
+_RE_BOX_ONLY = re.compile(
+    r'<\|box_start\|>\((\d+),(\d+)\),\((\d+),(\d+)\)<\|box_end\|>'
 )
 
 BOX_COLORS = [
@@ -45,7 +72,7 @@ BOX_COLORS = [
 ]
 
 
-def _load_image_pixmap(path):
+def _load_image_pixmap(path, dilate_ksize: int = 0):
     """Load any image (including 16/32-bit TIFF) and return (QPixmap, width, height)."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
@@ -55,6 +82,9 @@ def _load_image_pixmap(path):
     if mx > mn:
         arr = (arr - mn) / (mx - mn)
     arr = (arr * 255).astype(np.uint8)
+    if dilate_ksize > 0:
+        kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
+        arr = cv2.dilate(arr, kernel)
     if arr.ndim == 3:
         arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
     else:
@@ -103,6 +133,34 @@ def _draw_feature_boxes(base_pixmap, features):
     return result
 
 
+# ── image display with mouse coord tracking ───────────────────────────────────
+
+class _ImageDisplay(QLabel):
+    """QLabel that emits fractional (0–1) mouse coordinates over the displayed pixmap."""
+    mouse_moved = Signal(float, float)
+    mouse_left = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+    def mouseMoveEvent(self, event):
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return
+        ox = (self.width() - pm.width()) / 2
+        oy = (self.height() - pm.height()) / 2
+        px = event.x() - ox
+        py = event.y() - oy
+        if 0 <= px <= pm.width() and 0 <= py <= pm.height():
+            self.mouse_moved.emit(px / pm.width(), py / pm.height())
+        else:
+            self.mouse_left.emit()
+
+    def leaveEvent(self, event):
+        self.mouse_left.emit()
+
+
 # ── background threads ────────────────────────────────────────────────────────
 
 class _PullThread(QThread):
@@ -112,7 +170,7 @@ class _PullThread(QThread):
     def run(self):
         try:
             proc = subprocess.Popen(
-                ["ollama", "pull", MODEL],
+                ["ollama", "pull", _active_model],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -137,7 +195,7 @@ class _ChatThread(QThread):
 
     def run(self):
         payload = json.dumps({
-            "model": MODEL,
+            "model": _active_model,
             "messages": self.messages,
             "stream": True,
         }, ensure_ascii=False).encode("utf-8")
@@ -167,8 +225,8 @@ class _ChatThread(QThread):
 _VLM_MAX_DIM = 1024
 
 
-def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM):
-    """Load image, downsample to max_dim on the longest side, return base64-PNG string."""
+def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0):
+    """Load image, optionally dilate, downsample to max_dim, return base64-PNG string."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
         raise ValueError(f"Could not read image: {path}")
@@ -177,8 +235,18 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM):
     if mx > mn:
         arr = (arr - mn) / (mx - mn)
     arr = (arr * 255).astype(np.uint8)
+    if dilate_ksize > 0:
+        kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
+        arr = cv2.dilate(arr, kernel)
+    # CLAHE: sharpen local contrast so blob edges are crisper for the VLM
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     if arr.ndim == 2:
+        arr = clahe.apply(arr)
         arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    else:
+        lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     h, w = arr.shape[:2]
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
@@ -193,16 +261,17 @@ class _LocateThread(QThread):
     result = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, image_path):
+    def __init__(self, image_path, dilate_ksize: int = 0):
         super().__init__()
         self.image_path = image_path
+        self.dilate_ksize = dilate_ksize
 
     def run(self):
         try:
-            img_b64 = _encode_image_for_vlm(self.image_path)
+            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize)
 
             payload = json.dumps({
-                "model": MODEL,
+                "model": _active_model,
                 "messages": [
                     {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
                     {
@@ -233,6 +302,225 @@ class _LocateThread(QThread):
             self.result.emit(parsed)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class _LocateGroundThread(QThread):
+    """Uses qwen2.5vl's native grounding tokens for higher-precision bounding boxes."""
+    result = Signal(dict)
+    error = Signal(str)
+    mode_used = Signal(str)   # "grounding" or "no_boxes"
+
+    def __init__(self, image_path, dilate_ksize: int = 0):
+        super().__init__()
+        self.image_path = image_path
+        self.dilate_ksize = dilate_ksize
+
+    def run(self):
+        try:
+            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize)
+
+            payload = json.dumps({
+                "model": _active_model,
+                "messages": [{
+                    "role": "user",
+                    "content": GROUNDING_PROMPT,
+                    "images": [img_b64],
+                }],
+                "stream": True,
+            }, ensure_ascii=False).encode("utf-8")
+
+            req = urllib.request.Request(
+                OLLAMA_URL, data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            full_text = ""
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for line in resp:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        full_text += chunk.get("message", {}).get("content", "")
+                    except json.JSONDecodeError:
+                        pass
+
+            features = self._parse(full_text)
+            if not features:
+                self.mode_used.emit("no_boxes")
+                return
+
+            self.mode_used.emit("grounding")
+            self.result.emit({"features": features, "total_count": len(features)})
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @staticmethod
+    def _parse(text: str) -> list:
+        # Try paired label + box first
+        matches = _RE_LABEL_BOX.findall(text)
+        if matches:
+            return [
+                {
+                    "id": i + 1,
+                    "label": label.strip() or f"feature_{i + 1}",
+                    "x1": round(int(x1) / 1000, 4),
+                    "y1": round(int(y1) / 1000, 4),
+                    "x2": round(int(x2) / 1000, 4),
+                    "y2": round(int(y2) / 1000, 4),
+                    "description": "native grounding",
+                }
+                for i, (label, x1, y1, x2, y2) in enumerate(matches)
+            ]
+        # Fall back: box tokens without labels
+        boxes = _RE_BOX_ONLY.findall(text)
+        if boxes:
+            return [
+                {
+                    "id": i + 1,
+                    "label": f"feature_{i + 1}",
+                    "x1": round(int(x1) / 1000, 4),
+                    "y1": round(int(y1) / 1000, 4),
+                    "x2": round(int(x2) / 1000, 4),
+                    "y2": round(int(y2) / 1000, 4),
+                    "description": "native grounding",
+                }
+                for i, (x1, y1, x2, y2) in enumerate(boxes)
+            ]
+        return []
+
+
+def _box_iou(a: dict, b: dict) -> float:
+    ix1 = max(a["x1"], b["x1"])
+    iy1 = max(a["y1"], b["y1"])
+    ix2 = min(a["x2"], b["x2"])
+    iy2 = min(a["y2"], b["y2"])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter == 0.0:
+        return 0.0
+    area_a = (a["x2"] - a["x1"]) * (a["y2"] - a["y1"])
+    area_b = (b["x2"] - b["x1"]) * (b["y2"] - b["y1"])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+class _LocateTileThread(QThread):
+    """Splits the image into 4 quadrants, queries each separately, maps coords back."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, image_path, dilate_ksize: int = 0):
+        super().__init__()
+        self.image_path = image_path
+        self.dilate_ksize = dilate_ksize
+
+    def run(self):
+        try:
+            arr = cv2.imread(str(self.image_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+            if arr is None:
+                raise ValueError(f"Could not read: {self.image_path}")
+            arr = arr.astype(np.float32)
+            mn, mx = arr.min(), arr.max()
+            if mx > mn:
+                arr = (arr - mn) / (mx - mn)
+            arr = (arr * 255).astype(np.uint8)
+            if self.dilate_ksize > 0:
+                kernel = np.ones((self.dilate_ksize, self.dilate_ksize), np.uint8)
+                arr = cv2.dilate(arr, kernel)
+
+            h, w = arr.shape[:2]
+            h2, w2 = h // 2, w // 2
+
+            quads = [
+                ("TL", arr[0:h2,  0:w2],  0.0,    0.0,    w2/w,       h2/h),
+                ("TR", arr[0:h2,  w2:w],  w2/w,   0.0,    (w-w2)/w,   h2/h),
+                ("BL", arr[h2:h,  0:w2],  0.0,    h2/h,   w2/w,       (h-h2)/h),
+                ("BR", arr[h2:h,  w2:w],  w2/w,   h2/h,   (w-w2)/w,   (h-h2)/h),
+            ]
+
+            all_features = []
+            fid = 1
+            for qi, (name, crop, xoff, yoff, xscale, yscale) in enumerate(quads):
+                self.progress.emit(f"Quadrant {qi + 1}/4 ({name})...")
+                try:
+                    img_b64 = self._encode_crop(crop)
+                    features = self._query(img_b64)
+                except Exception as e:
+                    features = []
+                    self.progress.emit(f"Quadrant {name} failed: {e}")
+
+                for feat in features:
+                    feat["id"] = fid
+                    feat["x1"] = round(xoff + float(feat.get("x1", 0)) * xscale, 4)
+                    feat["y1"] = round(yoff + float(feat.get("y1", 0)) * yscale, 4)
+                    feat["x2"] = round(xoff + float(feat.get("x2", 1)) * xscale, 4)
+                    feat["y2"] = round(yoff + float(feat.get("y2", 1)) * yscale, 4)
+                    feat["description"] = f"[{name}] " + feat.get("description", "")
+                    all_features.append(feat)
+                    fid += 1
+
+            all_features = self._dedup(all_features)
+            for i, f in enumerate(all_features):
+                f["id"] = i + 1
+
+            self.result.emit({"features": all_features, "total_count": len(all_features)})
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @staticmethod
+    def _encode_crop(crop: np.ndarray) -> str:
+        if crop.ndim == 2:
+            bgr = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+        else:
+            bgr = crop.copy()
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        ok, buf = cv2.imencode(".png", bgr)
+        if not ok:
+            raise RuntimeError("cv2.imencode failed")
+        return base64.b64encode(buf.tobytes()).decode()
+
+    @staticmethod
+    def _query(img_b64: str) -> list:
+        payload = json.dumps({
+            "model": _active_model,
+            "messages": [
+                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": "Find all distinct features and regions of interest in this image. Return JSON only.",
+                    "images": [img_b64],
+                },
+            ],
+            "stream": False,
+            "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        content = data.get("message", {}).get("content", "{}").strip()
+        if content.startswith("```"):
+            content = "\n".join(content.splitlines()[1:-1])
+        return json.loads(content).get("features", [])
+
+    @staticmethod
+    def _dedup(features: list, iou_thresh: float = 0.3) -> list:
+        keep = [True] * len(features)
+        for i in range(len(features)):
+            if not keep[i]:
+                continue
+            for j in range(i + 1, len(features)):
+                if keep[j] and _box_iou(features[i], features[j]) > iou_thresh:
+                    keep[j] = False
+        return [f for f, k in zip(features, keep) if k]
 
 
 # ── tab widgets ───────────────────────────────────────────────────────────────
@@ -274,7 +562,7 @@ class _ChatTab(QWidget):
         self.status_label = QLabel("Checking Ollama...")
         self.status_label.setWordWrap(True)
         status_row.addWidget(self.status_label, 1)
-        self.download_btn = QPushButton(f"Download {MODEL}")
+        self.download_btn = QPushButton(f"Download {_active_model}")
         self.download_btn.setVisible(False)
         self.download_btn.clicked.connect(self._start_pull)
         status_row.addWidget(self.download_btn)
@@ -330,10 +618,10 @@ class _ChatTab(QWidget):
             result = subprocess.run(
                 ["ollama", "list"], capture_output=True, text=True, timeout=5
             )
-            if MODEL in result.stdout:
+            if _active_model in result.stdout:
                 self._set_ready()
             else:
-                self.status_label.setText(f"Model {MODEL} is not downloaded yet.")
+                self.status_label.setText(f"Model {_active_model} is not downloaded yet.")
                 self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
                 self.download_btn.setVisible(True)
         except Exception as e:
@@ -341,7 +629,7 @@ class _ChatTab(QWidget):
             self.status_label.setStyleSheet("color: #c0392b; padding: 5px;")
 
     def _set_ready(self):
-        self.status_label.setText(f"Model {MODEL} is ready.")
+        self.status_label.setText(f"Model {_active_model} is ready.")
         self.status_label.setStyleSheet("color: #27ae60; padding: 5px;")
         self.download_btn.setVisible(False)
         self.log_box.setVisible(False)
@@ -370,7 +658,7 @@ class _ChatTab(QWidget):
         self.download_btn.setEnabled(False)
         self.log_box.clear()
         self.log_box.setVisible(True)
-        self.status_label.setText(f"Downloading {MODEL}... (this may take a few minutes)")
+        self.status_label.setText(f"Downloading {_active_model}... (this may take a few minutes)")
         self.status_label.setStyleSheet("color: #2980b9; padding: 5px;")
         self._pull_thread = _PullThread()
         self._pull_thread.log.connect(self._append_log)
@@ -413,7 +701,7 @@ class _ChatTab(QWidget):
             ]
         self._history.append(msg)
 
-        self.chat_area.append(f"<b>{MODEL}:</b> ")
+        self.chat_area.append(f"<b>{_active_model}:</b> ")
         trimmed = []
         for i, m in enumerate(self._history):
             if i < len(self._history) - 1 and "images" in m:
@@ -463,6 +751,7 @@ class _LocateTab(QWidget):
         self._image_path = None
         self._locate_thread = None
         self._orig_pixmap = None
+        self._dilated_pixmap = None
         self._model_ok = True
         self._init_ui()
         self._check_model()
@@ -484,6 +773,44 @@ class _LocateTab(QWidget):
         pick_row.addWidget(self.image_name_label, 1)
         layout.addLayout(pick_row)
 
+        dilate_row = QHBoxLayout()
+        self._dilate_check = QCheckBox("Dilate image")
+        self._dilate_check.setToolTip("Expand bright regions before display and analysis")
+        self._dilate_check.toggled.connect(self._on_dilate_changed)
+        dilate_row.addWidget(self._dilate_check)
+        self._kernel_spin = QSpinBox()
+        self._kernel_spin.setRange(3, 21)
+        self._kernel_spin.setSingleStep(2)
+        self._kernel_spin.setValue(5)
+        self._kernel_spin.setSuffix(" px kernel")
+        self._kernel_spin.setEnabled(False)
+        self._kernel_spin.valueChanged.connect(self._on_dilate_changed)
+        dilate_row.addWidget(self._kernel_spin)
+        dilate_row.addStretch()
+        layout.addLayout(dilate_row)
+
+        tile_row = QHBoxLayout()
+        self._tile_check = QCheckBox("Tile (4-quadrant)")
+        self._tile_check.setToolTip(
+            "Split image into 4 quadrants, query each separately, then merge coords back.\n"
+            "Each feature takes up 2× more of the VLM's visual field → better precision."
+        )
+        tile_row.addWidget(self._tile_check)
+        tile_row.addStretch()
+        layout.addLayout(tile_row)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Detection mode:"))
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Grounding (native tokens)")
+        self._mode_combo.addItem("JSON (structured prompt)")
+        self._mode_combo.setToolTip(
+            "Grounding uses qwen2.5vl's native box tokens (higher precision if supported).\n"
+            "JSON uses a structured prompt and falls back safely on any model."
+        )
+        mode_row.addWidget(self._mode_combo, 1)
+        layout.addLayout(mode_row)
+
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
         self.locate_btn.setEnabled(False)
@@ -496,12 +823,27 @@ class _LocateTab(QWidget):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.img_display = QLabel()
+        self.scroll_area.viewport().setMouseTracking(True)
+        self.img_display = _ImageDisplay()
         self.img_display.setAlignment(Qt.AlignCenter)
         self.img_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.img_display.mouse_moved.connect(self._on_mouse_moved)
+        self.img_display.mouse_left.connect(self._on_mouse_left)
         self.scroll_area.setWidget(self.img_display)
         self.scroll_area.setVisible(False)
-        layout.addWidget(self.scroll_area, 1)
+
+        self.coord_label = QLabel("X: —\nY: —")
+        self.coord_label.setFixedWidth(75)
+        self.coord_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.coord_label.setStyleSheet(
+            "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
+        )
+
+        image_row = QHBoxLayout()
+        image_row.setSpacing(0)
+        image_row.addWidget(self.scroll_area, 1)
+        image_row.addWidget(self.coord_label)
+        layout.addLayout(image_row, 1)
 
         self.info_panel = QTextEdit()
         self.info_panel.setReadOnly(True)
@@ -520,9 +862,9 @@ class _LocateTab(QWidget):
             result = subprocess.run(
                 ["ollama", "list"], capture_output=True, text=True, timeout=5
             )
-            if MODEL not in result.stdout:
+            if _active_model not in result.stdout:
                 self.model_status.setText(
-                    f"{MODEL} not downloaded — use the Chat tab to download it first."
+                    f"{_active_model} not downloaded — use the Chat tab to download it first."
                 )
                 self.model_status.setStyleSheet("color: #e67e22; padding: 4px;")
                 self._model_ok = False
@@ -543,7 +885,8 @@ class _LocateTab(QWidget):
         self.image_name_label.setStyleSheet("")
         try:
             self._orig_pixmap, _, _ = _load_image_pixmap(path)
-            self._show_pixmap(self._orig_pixmap)
+            self._dilated_pixmap = None
+            self._update_display()
             self.scroll_area.setVisible(True)
         except Exception as e:
             self.status_label.setText(f"Could not load image: {e}")
@@ -562,10 +905,22 @@ class _LocateTab(QWidget):
         if not self._image_path or (self._locate_thread and self._locate_thread.isRunning()):
             return
         self.locate_btn.setEnabled(False)
-        self.status_label.setText("Analyzing image... this may take 30–60 seconds.")
-        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+        ksize = self._get_dilate_ksize()
+        use_tile = self._tile_check.isChecked()
+        use_grounding = self._mode_combo.currentIndex() == 0 and not use_tile
 
-        self._locate_thread = _LocateThread(self._image_path)
+        if use_tile:
+            self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
+            self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize)
+            self._locate_thread.progress.connect(self._on_tile_progress)
+        elif use_grounding:
+            self.status_label.setText("Grounding mode — analyzing... this may take 30–60 seconds.")
+            self._locate_thread = _LocateGroundThread(self._image_path, dilate_ksize=ksize)
+            self._locate_thread.mode_used.connect(self._on_mode_used)
+        else:
+            self.status_label.setText("JSON mode — analyzing... this may take 30–60 seconds.")
+            self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize)
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
         self._locate_thread.error.connect(self._on_error)
         self._locate_thread.start()
@@ -579,8 +934,9 @@ class _LocateTab(QWidget):
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
 
-        if self._orig_pixmap and features:
-            annotated = _draw_feature_boxes(self._orig_pixmap, features)
+        base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+        if base and features:
+            annotated = _draw_feature_boxes(base, features)
             self._show_pixmap(annotated)
 
         self._populate_info(features, json_path)
@@ -612,6 +968,51 @@ class _LocateTab(QWidget):
         self.info_panel.setPlainText("\n".join(lines).strip())
         self.info_panel.setVisible(True)
 
+    def _get_dilate_ksize(self) -> int:
+        return self._kernel_spin.value() if self._dilate_check.isChecked() else 0
+
+    def _on_dilate_changed(self) -> None:
+        self._kernel_spin.setEnabled(self._dilate_check.isChecked())
+        self._dilated_pixmap = None
+        if self._image_path and self._orig_pixmap:
+            self._update_display()
+
+    def _update_display(self) -> None:
+        ksize = self._get_dilate_ksize()
+        if ksize > 0:
+            if self._dilated_pixmap is None:
+                self._dilated_pixmap, _, _ = _load_image_pixmap(self._image_path, dilate_ksize=ksize)
+            self._show_pixmap(self._dilated_pixmap)
+        else:
+            self._show_pixmap(self._orig_pixmap)
+
+    def _on_mouse_moved(self, fx: float, fy: float) -> None:
+        self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
+        self.coord_label.setStyleSheet(
+            "font-family: monospace; font-size: 11px; padding: 6px;"
+        )
+
+    def _on_mouse_left(self) -> None:
+        self.coord_label.setText("X: —\nY: —")
+        self.coord_label.setStyleSheet(
+            "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
+        )
+
+    def _on_tile_progress(self, msg: str) -> None:
+        self.status_label.setText(msg)
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+    def _on_mode_used(self, mode: str) -> None:
+        if mode == "grounding":
+            self.status_label.setText("Grounding tokens detected — native precision active.")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        elif mode == "no_boxes":
+            self.locate_btn.setEnabled(True)
+            self.status_label.setText(
+                "No grounding tokens found — this Ollama build strips them. Switch to JSON mode."
+            )
+            self.status_label.setStyleSheet("color: #e67e22; padding: 4px;")
+
     def _on_error(self, msg):
         self.locate_btn.setEnabled(True)
         self.status_label.setText(f"Error: {msg}")
@@ -624,8 +1025,28 @@ class LLMJsonMakerWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 4, 4, 0)
+        layout.setSpacing(4)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Model:"))
+        self._model_combo = QComboBox()
+        self._model_combo.setEditable(True)
+        for m in KNOWN_MODELS:
+            self._model_combo.addItem(m)
+        self._model_combo.setCurrentText(MODEL)
+        self._model_combo.setToolTip(
+            "Select or type a model name. Changes take effect on the next send or locate."
+        )
+        self._model_combo.currentTextChanged.connect(self._on_model_changed)
+        model_row.addWidget(self._model_combo, 1)
+        layout.addLayout(model_row)
+
         tabs = QTabWidget()
         tabs.addTab(_ChatTab(), "Chat")
         tabs.addTab(_LocateTab(), "Feature Locator")
         layout.addWidget(tabs)
+
+    def _on_model_changed(self, text: str) -> None:
+        global _active_model
+        _active_model = text.strip()
