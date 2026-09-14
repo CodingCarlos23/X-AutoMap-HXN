@@ -4,7 +4,6 @@ import json
 import os
 import pandas as pd
 import cv2
-from skimage.measure import shannon_entropy
 from pathlib import Path
 
 try:
@@ -76,14 +75,6 @@ def table_to_individual_scans(df, output_dir="scans"):
     
     print(f"✅ Created {len(df)} individual scan JSON files in {output_dir}")
 
-def is_featureless(img):
-    img = np.nan_to_num(img)
-    ent = shannon_entropy(img)
-    pnr = (img.max() - img.mean()) / (img.std() + 1e-5)
-    edge_map = cv2.Canny(img.astype(np.uint8), 50, 150)
-    edge_ratio = np.count_nonzero(edge_map) / img.size
-
-    return (ent < 2.5) and (pnr < 2.5) and (edge_ratio < 0.01)
 
 def make_json_serializable(obj):
     """
@@ -168,10 +159,6 @@ def resize_if_needed(img, name, target_shape):
 def normalize_and_dilate(img, kernel_size=None, iterations=None):
     img = np.nan_to_num(img)
 
-    if is_featureless(img):
-        print("[normalize_and_dilate] Skipped — no signal detected (entropy+pnr+edges)")
-        return np.zeros_like(img, dtype=np.uint8), np.zeros_like(img, dtype=np.uint8)
-    
     norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     
     # Use defaults if parameters not provided (backwards compatibility)

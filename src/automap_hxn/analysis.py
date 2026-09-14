@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import traceback
 from pathlib import Path
@@ -11,7 +12,7 @@ from .blobs.detection import detect_blobs
 from .blobs.processing import find_union_blobs
 from .plotting import plot_analysis_results
 from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict, resize_if_needed
-from .export import create_rgb_tiff, create_all_elements_tiff, save_each_blob_as_individual_scan
+from .export import create_rgb_tiff, create_all_elements_tiff, create_merged_boxes_tiff, save_each_blob_as_individual_scan
 
 
 def _dedup_formatted_blobs(formatted_unions, overlap_thresh):
@@ -42,6 +43,111 @@ def _dedup_formatted_blobs(formatted_unions, overlap_thresh):
         if not discard:
             kept.append(k)
     return {k: formatted_unions[k] for k in kept}
+
+
+def _merge_cross_element_blobs(formatted_unions, overlap_thresh):
+    """Merge blobs from different elements that overlap spatially into one encompassing box.
+
+    Only fires when inter / min(area_a, area_b) > overlap_thresh so that
+    small corner-clips below the threshold don't trigger a merge.
+    Iterates until no further merges are possible (handles chains of 3+ elements).
+    """
+    def _elem_set(label):
+        m = re.match(r'Individual Blob (\w+) #\d+', label)
+        if m:
+            return {m.group(1)}
+        m2 = re.match(r'Cross-element (.+) #\d+', label)
+        if m2:
+            return set(m2.group(1).split('+'))
+        return set()
+
+    elem_sets = {k: _elem_set(k) for k in formatted_unions}
+    merge_counter = [1]
+
+    changed = True
+    while changed:
+        changed = False
+        labels = list(formatted_unions.keys())
+        for i, key_a in enumerate(labels):
+            if key_a not in formatted_unions:
+                continue
+            a = formatted_unions[key_a]
+            ax0 = a['cx'] - a['num_x'] / 2
+            ax1 = a['cx'] + a['num_x'] / 2
+            ay0 = a['cy'] - a['num_y'] / 2
+            ay1 = a['cy'] + a['num_y'] / 2
+            area_a = a['num_x'] * a['num_y']
+            for key_b in labels[i + 1:]:
+                if key_b not in formatted_unions:
+                    continue
+                if elem_sets[key_a] & elem_sets[key_b]:
+                    continue  # share an element — not a cross-element pair
+                b = formatted_unions[key_b]
+                bx0 = b['cx'] - b['num_x'] / 2
+                bx1 = b['cx'] + b['num_x'] / 2
+                by0 = b['cy'] - b['num_y'] / 2
+                by1 = b['cy'] + b['num_y'] / 2
+                area_b = b['num_x'] * b['num_y']
+                inter = max(0, min(ax1, bx1) - max(ax0, bx0)) * max(0, min(ay1, by1) - max(ay0, by0))
+                if inter == 0:
+                    continue
+                smaller = min(area_a, area_b)
+                if smaller <= 0 or inter / smaller <= overlap_thresh:
+                    continue
+                # Merge
+                new_x0 = min(ax0, bx0)
+                new_x1 = max(ax1, bx1)
+                new_y0 = min(ay0, by0)
+                new_y1 = max(ay1, by1)
+                new_cx = (new_x0 + new_x1) / 2
+                new_cy = (new_y0 + new_y1) / 2
+                new_num_x = new_x1 - new_x0
+                new_num_y = new_y1 - new_y0
+                new_elems = elem_sets[key_a] | elem_sets[key_b]
+                elem_str = '+'.join(sorted(new_elems))
+                new_label = f"Cross-element {elem_str} #{merge_counter[0]}"
+                merge_counter[0] += 1
+                ic_a = a.get('image_center')
+                ic_b = b.get('image_center')
+                ir_a = a.get('image_radius') or 0
+                ir_b = b.get('image_radius') or 0
+                # Compute pixel-space encompassing box for correct overlay drawing
+                if ic_a and ic_b:
+                    ptl_x = min(ic_a[0] - ir_a, ic_b[0] - ir_b)
+                    ptl_y = min(ic_a[1] - ir_a, ic_b[1] - ir_b)
+                    pbr_x = max(ic_a[0] + ir_a, ic_b[0] + ir_b)
+                    pbr_y = max(ic_a[1] + ir_a, ic_b[1] + ir_b)
+                    merged_ic = [(ptl_x + pbr_x) / 2, (ptl_y + pbr_y) / 2]
+                    merged_ir = max((pbr_x - ptl_x) / 2, (pbr_y - ptl_y) / 2)
+                elif ic_a or ic_b:
+                    merged_ic = ic_a or ic_b
+                    merged_ir = max(ir_a, ir_b)
+                else:
+                    merged_ic = None
+                    merged_ir = 0
+                formatted_unions[new_label] = {
+                    "text": new_label,
+                    "cx": new_cx,
+                    "cy": new_cy,
+                    "num_x": new_num_x,
+                    "num_y": new_num_y,
+                    "image_center": merged_ic,
+                    "image_radius": merged_ir,
+                    "color": a.get('color') or b.get('color'),
+                    "max_intensity": max(a.get('max_intensity', 0), b.get('max_intensity', 0)),
+                    "mean_intensity": (a.get('mean_intensity', 0) + b.get('mean_intensity', 0)) / 2,
+                }
+                elem_sets[new_label] = new_elems
+                del formatted_unions[key_a]
+                del formatted_unions[key_b]
+                elem_sets.pop(key_a, None)
+                elem_sets.pop(key_b, None)
+                changed = True
+                break
+            if changed:
+                break
+
+    return formatted_unions
 
 
 def analyze_data_local(scan_id=None, 
@@ -290,6 +396,15 @@ def analyze_data_local(scan_id=None,
                     }
                     blob_counter += 1
 
+            # Cross-element overlap merge: if blobs from different elements overlap,
+            # replace them with one encompassing box to avoid scanning the same region twice.
+            if len(group_blobs_for_union) > 1 and len(formatted_unions) > 1:
+                overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
+                pre_merge = len(formatted_unions)
+                formatted_unions = _merge_cross_element_blobs(formatted_unions, overlap_thresh)
+                if len(formatted_unions) < pre_merge:
+                    print(f"[MERGE] {pre_merge} blobs → {len(formatted_unions)} after cross-element merge (thresh={overlap_thresh})")
+
             # Dedup individual blobs by IoU / containment (same logic as _dedup_unions)
             if len(formatted_unions) > 1:
                 overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
@@ -350,6 +465,12 @@ def analyze_data_local(scan_id=None,
 
         create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name)
         create_all_elements_tiff(tiff_paths, results_dir, elem_list, group_blobs_vis, group_name)
+
+        # For multi-element individual mode, also save a merged/deduped overlay
+        if not unions_only and len(elem_list) > 1:
+            group_fu = all_results.get('groups', {}).get(group_name, {}).get('formatted_unions', {})
+            if group_fu:
+                create_merged_boxes_tiff(tiff_paths, group_fu, results_dir, elem_list, group_name)
 
         # Plot analysis results with bounding boxes
         # Collect formatted unions for plotting

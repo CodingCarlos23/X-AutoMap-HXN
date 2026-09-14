@@ -209,6 +209,87 @@ def create_all_elements_tiff(tiff_paths, output_dir, element_list, precomputed_b
         traceback.print_exc()
 
 
+def create_merged_boxes_tiff(tiff_paths, formatted_unions, output_dir, element_list, group_name):
+    """Save a TIFF showing post-merge+dedup boxes from formatted_unions.
+
+    Individual blobs draw in their element color; cross-element merged boxes draw in white.
+    Only called for multi-element unions_only=False runs.
+    """
+    import traceback
+    from pathlib import Path
+    import tifffile as tiff
+    import numpy as np
+    import cv2
+
+    try:
+        if not element_list or not tiff_paths:
+            return
+
+        first_path = tiff_paths.get(element_list[0])
+        if not first_path:
+            return
+
+        base_img = tiff.imread(first_path)
+        target_shape = base_img.shape
+
+        if len(element_list) >= 3:
+            img_r = tiff.imread(tiff_paths[element_list[0]])
+            img_g = tiff.imread(tiff_paths[element_list[1]])
+            img_b = tiff.imread(tiff_paths[element_list[2]])
+        elif len(element_list) == 2:
+            img_r = tiff.imread(tiff_paths[element_list[0]])
+            img_g = tiff.imread(tiff_paths[element_list[1]])
+            img_b = np.zeros(target_shape, dtype=base_img.dtype)
+        else:
+            img_r = tiff.imread(tiff_paths[element_list[0]])
+            img_g = img_r
+            img_b = img_r
+
+        img_r = resize_if_needed(img_r, 'R', target_shape)
+        img_g = resize_if_needed(img_g, 'G', target_shape)
+        img_b = resize_if_needed(img_b, 'B', target_shape)
+
+        norm_r = cv2.normalize(np.nan_to_num(img_r), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        norm_g = cv2.normalize(np.nan_to_num(img_g), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        norm_b = cv2.normalize(np.nan_to_num(img_b), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        canvas = cv2.merge([norm_b, norm_g, norm_r])
+
+        elem_colors = {
+            element_list[i]: c for i, c in enumerate([(0,0,255),(0,255,0),(255,0,0),(0,165,255),(128,0,128)])
+            if i < len(element_list)
+        }
+
+        n_individual = 0
+        n_merged = 0
+        for label, info in formatted_unions.items():
+            ic = info.get('image_center')
+            ir = info.get('image_radius')
+            if not ic or not ir:
+                continue
+            x, y, r = int(ic[0]), int(ic[1]), int(ir)
+            tl = (x - r, y - r)
+            br = (x + r, y + r)
+            if label.startswith('Cross-element'):
+                color = (255, 255, 255)  # white for merged boxes
+                thickness = 3
+                n_merged += 1
+            else:
+                elem = label.split(' ')[2] if label.startswith('Individual Blob') else None
+                color = elem_colors.get(elem, (200, 200, 200))
+                thickness = 2
+                n_individual += 1
+            cv2.rectangle(canvas, tl, br, color, thickness)
+
+        canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        out_path = Path(output_dir) / f"all_elements_merged_{group_name}.tiff"
+        tiff.imwrite(str(out_path), canvas_rgb)
+        print(f"✅ Saved merged-boxes overlay ({n_merged} merged, {n_individual} individual) to: {out_path}")
+
+    except Exception as e:
+        print(f"❌ Error creating merged boxes TIFF: {e}")
+        traceback.print_exc()
+
+
 def save_each_blob_as_individual_scan(json_safe_data, output_dir="scans"):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
