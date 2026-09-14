@@ -10,6 +10,7 @@ the thread worker only.
 
 import json
 import math
+import threading
 from pathlib import Path
 
 from qtpy.QtWidgets import (
@@ -37,6 +38,10 @@ class MosaicScanThread(QThread):
         self._json_path = json_path
         self._params = params  # kwargs forwarded to mosaic_overlap_scan_auto_relative
         self._tiled_uri = tiled_uri
+        self._abort_event = threading.Event()
+
+    def abort(self):
+        self._abort_event.set()
 
     def run(self):
         try:
@@ -59,9 +64,13 @@ class MosaicScanThread(QThread):
             mosaic_overlap_scan_auto_relative(
                 beamline_params=self._json_path,
                 initial_scan_path=self._json_path,
+                abort_event=self._abort_event,
                 **params,
             )
-            self.finished.emit("Mosaic scan completed successfully.")
+            if self._abort_event.is_set():
+                self.finished.emit("Mosaic scan aborted — no more tiles will be queued.")
+            else:
+                self.finished.emit("Mosaic scan completed successfully.")
         except ImportError as err:
             self.error.emit(
                 f"Could not import workflows module: {err}\n\n"
@@ -234,6 +243,14 @@ class CoarseScanWidget(QWidget):
         )
         self._send_btn.clicked.connect(self._on_send_clicked)
         row.addWidget(self._send_btn)
+
+        self._abort_btn = QPushButton("Abort")
+        self._abort_btn.setStyleSheet(
+            "padding: 8px 14px; font-weight: bold; background: #c0392b; color: white;"
+        )
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.clicked.connect(self._on_abort_clicked)
+        row.addWidget(self._abort_btn)
 
         row.addStretch()
         return row
@@ -447,6 +464,8 @@ class CoarseScanWidget(QWidget):
 
         self._send_btn.setEnabled(False)
         self._send_btn.setText("Scanning…")
+        self._abort_btn.setEnabled(True)
+        self._abort_btn.setText("Abort")
         self._preview_text.setPlainText(
             f"Mosaic scan started — {x_tiles * y_tiles} tile(s) queued.\n"
             "Check the terminal for tile-by-tile progress.\n"
@@ -458,9 +477,19 @@ class CoarseScanWidget(QWidget):
             f"({mp.get('xlen')}×{mp.get('ylen')} µm, mode={mode})"
         )
 
+    def _on_abort_clicked(self):
+        if self._scan_thread and self._scan_thread.isRunning():
+            self._scan_thread.abort()
+            self._abort_btn.setEnabled(False)
+            self._abort_btn.setText("Aborting…")
+            self._log("Abort requested — current tile will finish, then scan stops.")
+            print("[MOSAIC] Abort requested by user.")
+
     def _on_scan_finished(self, message):
         self._send_btn.setEnabled(True)
         self._send_btn.setText("Send Mosaic Scan")
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setText("Abort")
         self._preview_text.setPlainText(f"✓ {message}")
         self._log(f"✓ {message}")
         print(f"[MOSAIC] ✓ {message}")
@@ -469,6 +498,8 @@ class CoarseScanWidget(QWidget):
     def _on_scan_error(self, message):
         self._send_btn.setEnabled(True)
         self._send_btn.setText("Send Mosaic Scan")
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setText("Abort")
         self._preview_text.setPlainText(f"✗ Error:\n{message}")
         self._log(f"✗ Error: {message.splitlines()[0]}")
         QMessageBox.critical(self, "Scan Failed", message)

@@ -88,10 +88,10 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True, tiled_client =
 
 
 def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
-                         step_size = 250, plot_elem = ["Cr"], mll = False, 
-                         beamline_params=None, initial_scan_path=None, 
+                         step_size = 250, plot_elem = ["Cr"], mll = False,
+                         beamline_params=None, initial_scan_path=None,
                          remote_seg=True, followup_fine_scan=False,tiled_client=None,
-                         ref_scan_id = None):
+                         ref_scan_id = None, abort_event=None):
     '''
     # 1. Define the step size for the mosaic grid
     # Since you requested 25 um steps for the grid iteration:
@@ -198,6 +198,9 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     # 3. Iterate over the relative steps
     for y_rel in tqdm.tqdm(y_steps, desc="Y-axis"):
         for x_rel in tqdm.tqdm(x_steps, desc="X-axis"):
+            if abort_event is not None and abort_event.is_set():
+                print("[MOSAIC] Abort requested — no more tiles will be queued.")
+                return
             
             # Move motors relatively (movr) from the CURRENT position to the next step
             # Note: We use absolute moves to specific offsets for better trajectory control
@@ -226,6 +229,10 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                 for req in coarse_requests:
                     print(f"[SIM] Would queue: {req['plan_name']} {req['plan_args']}")
                 print(f"[SIM] Would queue: mov {fine_x} 0 {fine_y} 0, return moves, queue_start")
+
+            if abort_event is not None and abort_event.is_set():
+                print("[MOSAIC] Abort requested — skipping fine scans and stopping.")
+                return
 
             if proceed_with_fine_scan:
                 scan_id = None
@@ -267,6 +274,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                                 initial_scan_path, scan_id, out_dir,
                                 tile_params['execution_params'],
                                 fine_scans_tables=fine_tables,
+                                abort_event=abort_event,
                             )
                             run_fine_scans(is_real or is_offline)
                             wait_for_queue_done()

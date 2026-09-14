@@ -236,7 +236,7 @@ def submit_fine_scan_requests(requests, *, auto_open_environment=True):
     """Backward-compatible name for submitting GUI-generated fine scans."""
     return submit_queue_requests(requests, auto_open_environment=auto_open_environment)
 
-def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
+def headless_send_queue_fine_scan(json_path, fine_scans_table=None, abort_event=None):
     """
     Performs fine scans from a fine_scans_table (DataFrame or CSV path).
     Reads all configuration from a single JSON config file with nested structure.
@@ -284,6 +284,9 @@ def headless_send_queue_fine_scan(json_path, fine_scans_table=None):
     print(f"\n[FINE_SCANS] Processing {len(fine_scans_table)} scans from table (Mode: {mode.upper()})")
 
     for request in requests:
+        if abort_event is not None and abort_event.is_set():
+            print("[FINE_SCANS] Abort requested — stopping fine scan queue.")
+            return
         time.sleep(0.5)
         label = request['label']
         cx, cy = request['center']['x'], request['center']['y']
@@ -546,7 +549,7 @@ def submit_and_export(execution_params, scan_params, export_params, segmentation
 
     return last_id, out_dir
 
-def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None):
+def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fine_scans_tables=None, abort_event=None):
     """
     Step 3: Queue Submission.
     Only actually queues if mode == 'real'. 
@@ -571,10 +574,13 @@ def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fi
         # from the analysis of existing data.
         if fine_scans_tables:
             for group_name, table in fine_scans_tables.items():
+                if abort_event is not None and abort_event.is_set():
+                    print("[QUEUE] Abort requested — skipping remaining fine scan groups.")
+                    return
                 print(f"[QUEUE] Submitting {len(table)} fine scans for group '{group_name}'")
-                headless_send_queue_fine_scan(json_path, fine_scans_table=table)
+                headless_send_queue_fine_scan(json_path, fine_scans_table=table, abort_event=abort_event)
         else:
-            headless_send_queue_fine_scan(json_path)
+            headless_send_queue_fine_scan(json_path, abort_event=abort_event)
     else:
         # Simulation only — nothing is real
         print(f"[SIM] Skipping actual queue submission.")
