@@ -53,9 +53,7 @@ _ENV_VAR = {
 _api_keys: dict = {}  # provider -> key, populated from env / GPG / user input
 
 _GPG_ENV_CANDIDATES = [
-    "~/.private.env.gpg",
-    "~/.env.gpg",
-    "~/.secrets.gpg",
+    "~/.private_env.gpg",
 ]
 
 

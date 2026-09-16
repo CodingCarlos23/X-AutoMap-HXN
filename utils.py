@@ -3567,21 +3567,21 @@ def load_and_queue(json_path, target_id=None,
     # B. Analyze
     analysis_results = None
     fine_scans_tables = None
-    if remote_seg:
-        elem_list=params['export_params']['elem_list']
-        export_xrf_roi_data(scan_id, 
-                            norm=params['export_params']['export_norm'],
-                            elem_list=elem_list, 
-                            remote_seg=remote_seg, 
-                            append_meta_with=params)  # Ensure ROI data is exported for remote analysis
-        #print(f"{elem_list=}")
-        print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
+    elem_list=params['export_params']['elem_list']
+    export_xrf_roi_data(scan_id, 
+                        norm=params['export_params']['export_norm'],
+                        elem_list=elem_list, 
+                        remote_seg=remote_seg, 
+                        append_meta_with=params)  # Ensure ROI data is exported for remote analysis
+    #print(f"{elem_list=}")
+    print(f"[DATA], Exported ROI data for remote analysis {scan_id = }.")
 
 
         #print("no reciever implemented yet, skipping remote analysis...")
         #pass 
         # print("\n[ANALYSIS] Remote analysis selected, receiving data remotely...")
         # #placeholder for Seher
+    if remote_seg:
         remote_receiver = RemoteSegmentationReceiver(remote_sender.cache_size())
         remote_receiver.subscribe()
         metadata = remote_receiver.data_w_metadata[0][0] # assuming there is only 1 segmentation done
