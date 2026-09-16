@@ -28,6 +28,8 @@ KNOWN_MODELS = [
     "qwen2.5vl:7b",
     "qwen2.5vl:3b",
     "qwen2.5vl:72b",
+    "minicpm-v:8b",
+    "llava-llama3:8b",
 ]
 
 _active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget
@@ -46,20 +48,6 @@ LOCATE_SYSTEM_PROMPT = (
     "Include every distinct feature you can identify."
 )
 
-GROUNDING_PROMPT = (
-    "Detect all bright spots, particles, and clusters of interest in this XRF scan image. "
-    "For every distinct bright feature you find, identify it and mark its bounding box location."
-)
-
-# qwen2.5vl native grounding token patterns (coords in [0, 1000])
-_RE_LABEL_BOX = re.compile(
-    r'<\|object_ref_start\|>(.*?)<\|object_ref_end\|>'
-    r'<\|box_start\|>\((\d+),(\d+)\),\((\d+),(\d+)\)<\|box_end\|>',
-    re.DOTALL,
-)
-_RE_BOX_ONLY = re.compile(
-    r'<\|box_start\|>\((\d+),(\d+)\),\((\d+),(\d+)\)<\|box_end\|>'
-)
 
 BOX_COLORS = [
     QColor(255, 80, 80),
@@ -304,92 +292,6 @@ class _LocateThread(QThread):
             self.error.emit(str(e))
 
 
-class _LocateGroundThread(QThread):
-    """Uses qwen2.5vl's native grounding tokens for higher-precision bounding boxes."""
-    result = Signal(dict)
-    error = Signal(str)
-    mode_used = Signal(str)   # "grounding" or "no_boxes"
-
-    def __init__(self, image_path, dilate_ksize: int = 0):
-        super().__init__()
-        self.image_path = image_path
-        self.dilate_ksize = dilate_ksize
-
-    def run(self):
-        try:
-            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize)
-
-            payload = json.dumps({
-                "model": _active_model,
-                "messages": [{
-                    "role": "user",
-                    "content": GROUNDING_PROMPT,
-                    "images": [img_b64],
-                }],
-                "stream": True,
-            }, ensure_ascii=False).encode("utf-8")
-
-            req = urllib.request.Request(
-                OLLAMA_URL, data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            full_text = ""
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                for line in resp:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                        full_text += chunk.get("message", {}).get("content", "")
-                    except json.JSONDecodeError:
-                        pass
-
-            features = self._parse(full_text)
-            if not features:
-                self.mode_used.emit("no_boxes")
-                return
-
-            self.mode_used.emit("grounding")
-            self.result.emit({"features": features, "total_count": len(features)})
-
-        except Exception as e:
-            self.error.emit(str(e))
-
-    @staticmethod
-    def _parse(text: str) -> list:
-        # Try paired label + box first
-        matches = _RE_LABEL_BOX.findall(text)
-        if matches:
-            return [
-                {
-                    "id": i + 1,
-                    "label": label.strip() or f"feature_{i + 1}",
-                    "x1": round(int(x1) / 1000, 4),
-                    "y1": round(int(y1) / 1000, 4),
-                    "x2": round(int(x2) / 1000, 4),
-                    "y2": round(int(y2) / 1000, 4),
-                    "description": "native grounding",
-                }
-                for i, (label, x1, y1, x2, y2) in enumerate(matches)
-            ]
-        # Fall back: box tokens without labels
-        boxes = _RE_BOX_ONLY.findall(text)
-        if boxes:
-            return [
-                {
-                    "id": i + 1,
-                    "label": f"feature_{i + 1}",
-                    "x1": round(int(x1) / 1000, 4),
-                    "y1": round(int(y1) / 1000, 4),
-                    "x2": round(int(x2) / 1000, 4),
-                    "y2": round(int(y2) / 1000, 4),
-                    "description": "native grounding",
-                }
-                for i, (x1, y1, x2, y2) in enumerate(boxes)
-            ]
-        return []
-
 
 def _box_iou(a: dict, b: dict) -> float:
     ix1 = max(a["x1"], b["x1"])
@@ -476,10 +378,6 @@ class _LocateTileThread(QThread):
             bgr = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
         else:
             bgr = crop.copy()
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
         ok, buf = cv2.imencode(".png", bgr)
         if not ok:
             raise RuntimeError("cv2.imencode failed")
@@ -606,6 +504,15 @@ class _ChatTab(QWidget):
         self.input_widget.setLayout(input_row)
         self.input_widget.setVisible(False)
         layout.addWidget(self.input_widget)
+
+    def refresh_model(self):
+        self.download_btn.setText(f"Download {_active_model}")
+        self.download_btn.setVisible(False)
+        self.chat_area.setVisible(False)
+        self.file_btn.setVisible(False)
+        self.input_widget.setVisible(False)
+        self._history.clear()
+        self._check_status()
 
     def _check_status(self):
         if not shutil.which("ollama"):
@@ -799,18 +706,6 @@ class _LocateTab(QWidget):
         tile_row.addStretch()
         layout.addLayout(tile_row)
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Detection mode:"))
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItem("Grounding (native tokens)")
-        self._mode_combo.addItem("JSON (structured prompt)")
-        self._mode_combo.setToolTip(
-            "Grounding uses qwen2.5vl's native box tokens (higher precision if supported).\n"
-            "JSON uses a structured prompt and falls back safely on any model."
-        )
-        mode_row.addWidget(self._mode_combo, 1)
-        layout.addLayout(mode_row)
-
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
         self.locate_btn.setEnabled(False)
@@ -839,18 +734,26 @@ class _LocateTab(QWidget):
             "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
         )
 
+        self.info_panel = QTextEdit()
+        self.info_panel.setReadOnly(True)
+        self.info_panel.setMinimumWidth(200)
+        self.info_panel.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self.info_panel.setPlaceholderText("Feature details will appear here after analysis.")
+        self.info_panel.setVisible(False)
+
+        image_col = QVBoxLayout()
+        image_col.setSpacing(0)
         image_row = QHBoxLayout()
         image_row.setSpacing(0)
         image_row.addWidget(self.scroll_area, 1)
         image_row.addWidget(self.coord_label)
-        layout.addLayout(image_row, 1)
+        image_col.addLayout(image_row)
 
-        self.info_panel = QTextEdit()
-        self.info_panel.setReadOnly(True)
-        self.info_panel.setFixedHeight(130)
-        self.info_panel.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self.info_panel.setVisible(False)
-        layout.addWidget(self.info_panel)
+        content_row = QHBoxLayout()
+        content_row.setSpacing(6)
+        content_row.addLayout(image_col, 3)
+        content_row.addWidget(self.info_panel, 1)
+        layout.addLayout(content_row, 1)
 
     def _check_model(self):
         if not shutil.which("ollama"):
@@ -888,6 +791,7 @@ class _LocateTab(QWidget):
             self._dilated_pixmap = None
             self._update_display()
             self.scroll_area.setVisible(True)
+            self.info_panel.setVisible(True)
         except Exception as e:
             self.status_label.setText(f"Could not load image: {e}")
             self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
@@ -907,18 +811,13 @@ class _LocateTab(QWidget):
         self.locate_btn.setEnabled(False)
         ksize = self._get_dilate_ksize()
         use_tile = self._tile_check.isChecked()
-        use_grounding = self._mode_combo.currentIndex() == 0 and not use_tile
 
         if use_tile:
             self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
             self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize)
             self._locate_thread.progress.connect(self._on_tile_progress)
-        elif use_grounding:
-            self.status_label.setText("Grounding mode — analyzing... this may take 30–60 seconds.")
-            self._locate_thread = _LocateGroundThread(self._image_path, dilate_ksize=ksize)
-            self._locate_thread.mode_used.connect(self._on_mode_used)
         else:
-            self.status_label.setText("JSON mode — analyzing... this may take 30–60 seconds.")
+            self.status_label.setText("Analyzing... this may take 30–60 seconds.")
             self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize)
         self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
@@ -1002,16 +901,6 @@ class _LocateTab(QWidget):
         self.status_label.setText(msg)
         self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
 
-    def _on_mode_used(self, mode: str) -> None:
-        if mode == "grounding":
-            self.status_label.setText("Grounding tokens detected — native precision active.")
-            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
-        elif mode == "no_boxes":
-            self.locate_btn.setEnabled(True)
-            self.status_label.setText(
-                "No grounding tokens found — this Ollama build strips them. Switch to JSON mode."
-            )
-            self.status_label.setStyleSheet("color: #e67e22; padding: 4px;")
 
     def _on_error(self, msg):
         self.locate_btn.setEnabled(True)
@@ -1043,10 +932,12 @@ class LLMJsonMakerWidget(QWidget):
         layout.addLayout(model_row)
 
         tabs = QTabWidget()
-        tabs.addTab(_ChatTab(), "Chat")
+        self._chat_tab = _ChatTab()
+        tabs.addTab(self._chat_tab, "Chat")
         tabs.addTab(_LocateTab(), "Feature Locator")
         layout.addWidget(tabs)
 
     def _on_model_changed(self, text: str) -> None:
         global _active_model
         _active_model = text.strip()
+        self._chat_tab.refresh_model()
