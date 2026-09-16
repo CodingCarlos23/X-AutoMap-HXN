@@ -3,7 +3,7 @@ import tqdm
 import json
 import time
 import os
-from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests, export_xrf_roi_data
+from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests, export_xrf_roi_data, export_scan_params
 from .loading import load_and_queue, load_params_from_json
 from .utils import RM
 
@@ -256,6 +256,31 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                 if _elem_list and isinstance(_elem_list[0], list):
                     _elem_list = list(set(e for sub in _elem_list for e in sub))
                 _norm = ep.get('export_norm', 'sclr1_ch4')
+                _zp_flag = bool(tile_params.get('scan_params', {}).get('zp_move_flag', True))
+
+                scan_params_data = None
+                try:
+                    scan_params_data = export_scan_params(scan_id, zp_flag=_zp_flag, save_to=out_dir)
+                except Exception as e:
+                    print(f"[MOSAIC] export_scan_params failed: {e}")
+
+                # Override calibration in tile_params with real values from scan metadata
+                if scan_params_data:
+                    _step = scan_params_data.get('step_size')
+                    _si = scan_params_data.get('start_doc', {}).get('scan', {}).get('scan_input', [])
+                    _x_start = _si[0] if len(_si) >= 1 else None
+                    _y_start = _si[3] if len(_si) >= 4 else None
+                    if 'calibration_params' not in tile_params:
+                        tile_params['calibration_params'] = {}
+                    if _step is not None:
+                        tile_params['calibration_params']['microns_per_pixel_x'] = _step
+                        tile_params['calibration_params']['microns_per_pixel_y'] = _step
+                    if _x_start is not None:
+                        tile_params['calibration_params']['true_origin_x'] = _x_start
+                    if _y_start is not None:
+                        tile_params['calibration_params']['true_origin_y'] = _y_start
+                    print(f"[MOSAIC] Fine scan using params — step_size={_step}, x_start={_x_start}, y_start={_y_start}")
+
                 print(f"[MOSAIC] Exporting XRF ROI data (scan_id={scan_id}, elems={_elem_list})...")
                 try:
                     export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
