@@ -123,14 +123,18 @@ def build_coarse_scan_requests(json_path):
 
     execution_params = params.get("execution_params", {})
     scan_params = params.get("scan_params", {})
+    mosaic_params = params.get("mosaic_params", {})
     export_params = params.get("export_params", {})
     mode = str(execution_params.get("mode", "simulation")).lower()
 
-    x_motor = scan_params.get("mot1", "zpssx")
-    y_motor = scan_params.get("mot2", "zpssy")
-    x_start, x_end = float(scan_params.get("mot1_s", 0)), float(scan_params.get("mot1_e", 0))
-    y_start, y_end = float(scan_params.get("mot2_s", 0)), float(scan_params.get("mot2_e", 0))
-    step_size = scan_params.get("step_size_coarse", scan_params.get("step_size", 0.25))
+    def _sp(key, default=None):
+        return mosaic_params.get(key, scan_params.get(key, default))
+
+    x_motor = _sp("mot1", "zpssx")
+    y_motor = _sp("mot2", "zpssy")
+    x_start, x_end = float(_sp("mot1_s", 0)), float(_sp("mot1_e", 0))
+    y_start, y_end = float(_sp("mot2_s", 0)), float(_sp("mot2_e", 0))
+    step_size = _sp("step_size_coarse", _sp("step_size", 0.25))
     if step_size <= 0:
         raise ValueError("scan_params.step_size must be greater than zero")
 
@@ -145,13 +149,13 @@ def build_coarse_scan_requests(json_path):
     center = {x_motor: (x_start + x_end) / 2, y_motor: (y_start + y_end) / 2}
     plan_args = [
         scan_params.get("label", "initial_coarse_scan"),
-        scan_params.get("det_names", ["fs", "eiger2", "xspress3"]),
+        _sp("det_names", ["fs", "eiger2", "xspress3"]),
         x_motor, x_start, x_end, x_points,
         y_motor, y_start, y_end, y_points,
-        scan_params.get("exp_t_coarse", scan_params.get("exp_t", 0.01)),
+        _sp("exp_t_coarse", _sp("exp_t", 0.01)),
         json.dumps(center), scan_params.get("scan_id") or "",
         scan_params.get("zp_move_flag", 0), scan_params.get("smar_move_flag", 0),
-        scan_params.get("ic1_count", 6000), json.dumps(elem_list),
+        _sp("ic1_count", 6000), json.dumps(elem_list),
         export_params.get("export_norm", "sclr1_ch4"),
         export_params.get("data_wd", "."),
     ]

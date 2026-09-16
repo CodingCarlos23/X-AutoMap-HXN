@@ -169,7 +169,9 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     is_offline = (mode == 'offline')
     data_wd = tile_params.get('export_params', {}).get('data_wd', '.')
 
-    grid_step = (beamline_params_dict['scan_params'].get("mot1_e")) - (beamline_params_dict['scan_params'].get("mot1_s"))
+    _bp_mp = beamline_params_dict.get('mosaic_params', {})
+    _bp_sp = beamline_params_dict.get('scan_params', {})
+    grid_step = (_bp_mp.get("mot1_e") or _bp_sp.get("mot1_e")) - (_bp_mp.get("mot1_s") or _bp_sp.get("mot1_s"))
     grid_step = grid_step*(1-(overlap_per*0.01))
 
     # 2. Generate the relative step lists

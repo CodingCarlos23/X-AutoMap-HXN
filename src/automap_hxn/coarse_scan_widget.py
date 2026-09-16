@@ -341,7 +341,7 @@ class CoarseScanWidget(QWidget):
             "xlen": mp.get("xlen", 100),
             "ylen": mp.get("ylen", 100),
             "overlap_per": mp.get("overlap_per", 0),
-            "tile_step": mp.get("tile_step", mp.get("step_size", 250)),
+            "step_size": mp.get("tile_step", mp.get("step_size", 250)),
             "dwell": mp.get("dwell", 0.01),
             "mll": mp.get("mll", False),
             "remote_seg": mp.get("remote_seg", True),
