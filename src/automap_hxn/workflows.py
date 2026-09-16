@@ -3,7 +3,7 @@ import tqdm
 import json
 import time
 import os
-from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests
+from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests, export_xrf_roi_data
 from .loading import load_and_queue, load_params_from_json
 from .utils import RM
 
@@ -248,7 +248,19 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     scan_id = tile_params.get('scan_id')
 
                 out_dir = os.path.join(data_wd, f"automap_{scan_id}")
+                os.makedirs(out_dir, exist_ok=True)
                 tile_params['out_dir'] = out_dir
+
+                ep = tile_params.get('export_params', {})
+                _elem_list = ep.get('elem_list', [])
+                if _elem_list and isinstance(_elem_list[0], list):
+                    _elem_list = list(set(e for sub in _elem_list for e in sub))
+                _norm = ep.get('export_norm', 'sclr1_ch4')
+                print(f"[MOSAIC] Exporting XRF ROI data (scan_id={scan_id}, elems={_elem_list})...")
+                try:
+                    export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
+                except Exception as e:
+                    print(f"[MOSAIC] export_xrf_roi_data failed: {e}")
 
                 print(f"[MOSAIC] Analyzing tile (scan_id={scan_id}, out_dir={out_dir})...")
                 try:
