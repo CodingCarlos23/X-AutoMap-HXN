@@ -3568,6 +3568,8 @@ def load_and_queue(json_path, target_id=None,
     analysis_results = None
     fine_scans_tables = None
     elem_list=params['export_params']['elem_list']
+    print(f"Using export xrt data")
+
     export_xrf_roi_data(scan_id, 
                         norm=params['export_params']['export_norm'],
                         elem_list=elem_list, 
