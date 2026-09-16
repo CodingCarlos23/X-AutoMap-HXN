@@ -219,9 +219,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                 RM.item_add(BPlan("move_relative", mot_y, y_rel))
                 for req in coarse_requests:
                     RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
-                RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
-                RM.item_add(BPlan("move_relative", mot_x, -x_rel))
-                RM.item_add(BPlan("move_relative", mot_y, -y_rel))
+                    print(f"[MOSAIC] Queued: {req['plan_name']} {req['plan_args']}")
                 RM.queue_start()
                 wait_for_queue_done()
             else:
@@ -310,6 +308,10 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                                 abort_event=abort_event,
                             )
                             run_fine_scans(is_real or is_offline)
+                            RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
+                            RM.item_add(BPlan("move_relative", mot_x, -x_rel))
+                            RM.item_add(BPlan("move_relative", mot_y, -y_rel))
+                            RM.queue_start()
                             wait_for_queue_done()
                         else:
                             print(f"[MOSAIC] No {label}s detected in this tile — moving to next tile.")
