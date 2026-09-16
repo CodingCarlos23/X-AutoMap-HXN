@@ -338,6 +338,31 @@ def analyze_data_local(scan_id=None,
             if original_color in precomputed_blobs:
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
 
+        # Collect all individual blobs regardless of union results — always saved as all_boxes JSON
+        all_boxes_formatted = {}
+        _color_to_elem = {['red', 'green', 'blue'][i]: e for i, e in enumerate(elem_list) if i < 3}
+        _blob_counter = 1
+        for _color, _blob_data in group_blobs_for_union.items():
+            _element_name = _color_to_elem.get(_color, _color)
+            _blobs = list(_blob_data.values())
+            if not _blobs:
+                continue
+            for _blob in _blobs[0]:
+                _rx = x_start + (_blob['center'][0] * step_size)
+                _ry = y_start + (_blob['center'][1] * step_size)
+                _sz = _blob.get('box_size', _blob['radius'] * 2) * step_size
+                _name = f"All Box {_element_name} #{_blob_counter}"
+                all_boxes_formatted[_name] = {
+                    "text": _name,
+                    "cx": _rx, "cy": _ry, "num_x": _sz, "num_y": _sz,
+                    "image_center": _blob['center'],
+                    "image_radius": _blob['radius'],
+                    "color": _blob['color'],
+                    "max_intensity": _blob.get('max_intensity', 0),
+                    "mean_intensity": _blob.get('mean_intensity', 0),
+                }
+                _blob_counter += 1
+
         formatted_unions = {}
         unions_only = params.get("segmentation_params", {}).get("unions_only", True)
 
@@ -454,6 +479,13 @@ def analyze_data_local(scan_id=None,
             # Add union data when union mode was actually used
             if len(group_blobs_for_union) >= 2 and unions_only:
                 all_results['groups'][group_name]['unions'] = unions
+
+        # Always save all-boxes JSON (every detected blob, no union filtering)
+        if all_boxes_formatted:
+            all_boxes_json = Path(results_dir) / f"all_boxes_{group_name}.json"
+            with open(all_boxes_json, "w") as f:
+                json.dump(make_json_serializable(all_boxes_formatted), f, indent=2)
+            print(f"[ALL BOXES] Saved {len(all_boxes_formatted)} boxes → {all_boxes_json.name}")
 
     # --- 5. Visualization ---
     if tiff_paths:
