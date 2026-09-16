@@ -1,4 +1,4 @@
-"""Coarse / Mosaic Scan Sender widget.
+"""Coarse / Area Scan Sender widget.
 
 Reads ALL scan geometry from the JSON config (mosaic_params block) and submits
 mosaic_overlap_scan_auto_relative in a background QThread. Configuration is done
@@ -156,7 +156,7 @@ class CoarseScanWidget(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        header = QLabel("<b>Mosaic Scan Sender</b>")
+        header = QLabel("<b>Area Scan Sender</b>")
         header.setStyleSheet("font-size: 14px; padding: 5px;")
         layout.addWidget(header)
 
@@ -237,7 +237,7 @@ class CoarseScanWidget(QWidget):
         self._preview_btn.clicked.connect(self._on_preview_plans_clicked)
         row.addWidget(self._preview_btn)
 
-        self._send_btn = QPushButton("Send Mosaic Scan")
+        self._send_btn = QPushButton("Send Area Scan")
         self._send_btn.setStyleSheet(
             "padding: 8px 14px; font-weight: bold; background: #2a6ebb; color: white;"
         )
@@ -290,13 +290,13 @@ class CoarseScanWidget(QWidget):
         mp = self._json_params.get("mosaic_params", {})
 
         mode = ep.get("mode", "?")
-        mot1 = sp.get("mot1", "?")
-        mot2 = sp.get("mot2", "?")
+        mot1 = mp.get("mot1", sp.get("mot1", "?"))
+        mot2 = mp.get("mot2", sp.get("mot2", "?"))
         label = sp.get("label", "?")
         xlen = mp.get("xlen", "?")
         ylen = mp.get("ylen", "?")
         overlap = mp.get("overlap_per", 0)
-        step = mp.get("step_size", "?")
+        step = mp.get("tile_step", mp.get("step_size", "?"))
         dwell = mp.get("dwell", "?")
         optics = "MLL" if mp.get("mll", False) else "ZP"
         remote = mp.get("remote_seg", True)
@@ -310,8 +310,8 @@ class CoarseScanWidget(QWidget):
         )
 
         # Tile estimate
-        mot1_s = float(sp.get("mot1_s", 0))
-        mot1_e = float(sp.get("mot1_e", 0))
+        mot1_s = float(mp.get("mot1_s", sp.get("mot1_s", 0)))
+        mot1_e = float(mp.get("mot1_e", sp.get("mot1_e", 0)))
         try:
             x_tiles, y_tiles, est_min = _calc_tile_info(
                 mot1_s, mot1_e,
@@ -341,7 +341,7 @@ class CoarseScanWidget(QWidget):
             "xlen": mp.get("xlen", 100),
             "ylen": mp.get("ylen", 100),
             "overlap_per": mp.get("overlap_per", 0),
-            "step_size": mp.get("step_size", 250),
+            "tile_step": mp.get("tile_step", mp.get("step_size", 250)),
             "dwell": mp.get("dwell", 0.01),
             "mll": mp.get("mll", False),
             "remote_seg": mp.get("remote_seg", True),
@@ -377,15 +377,15 @@ class CoarseScanWidget(QWidget):
         sp = self._json_params.get("scan_params", {})
         ep = self._json_params.get("execution_params", {})
         mp = self._json_params.get("mosaic_params", {})
-        mot1_s = float(sp.get("mot1_s", 0))
-        mot1_e = float(sp.get("mot1_e", 0))
+        mot1_s = float(mp.get("mot1_s", sp.get("mot1_s", 0)))
+        mot1_e = float(mp.get("mot1_e", sp.get("mot1_e", 0)))
         try:
             x_tiles, y_tiles, est_min = _calc_tile_info(
                 mot1_s, mot1_e,
                 float(mp.get("xlen", 100)),
                 float(mp.get("ylen", 100)),
                 float(mp.get("overlap_per", 0)),
-                float(mp.get("step_size", 250)),
+                float(mp.get("tile_step", mp.get("step_size", 250))),
                 float(mp.get("dwell", 0.01)),
             )
         except (TypeError, ValueError):
@@ -405,9 +405,9 @@ class CoarseScanWidget(QWidget):
             f"Total area: {mp.get('xlen')} × {mp.get('ylen')} µm",
             f"Grid step: {grid_step:.2f} µm  ({mp.get('overlap_per', 0)}% overlap)",
             f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total",
-            f"Per-tile scan: {sp.get('mot1','?')} / {sp.get('mot2','?')}  "
+            f"Per-tile scan: {mp.get('mot1', sp.get('mot1','?'))} / {mp.get('mot2', sp.get('mot2','?'))}  "
             f"[{mot1_s:.2f} → {mot1_e:.2f}]",
-            f"Step size: {mp.get('step_size')} nm   Dwell: {mp.get('dwell')} s",
+            f"Step size: {mp.get('tile_step', mp.get('step_size'))} nm   Dwell: {mp.get('dwell')} s",
             f"Est. total time: {display_time:.1f} {unit}",
             f"Remote seg: {mp.get('remote_seg', True)}   "
             f"Follow-up fine scan: {mp.get('followup_fine_scan', False)}",
@@ -432,9 +432,9 @@ class CoarseScanWidget(QWidget):
         ep = self._json_params.get("execution_params", {})
         try:
             x_tiles, y_tiles, est_min = _calc_tile_info(
-                float(sp.get("mot1_s", 0)), float(sp.get("mot1_e", 0)),
+                float(mp.get("mot1_s", sp.get("mot1_s", 0))), float(mp.get("mot1_e", sp.get("mot1_e", 0))),
                 float(mp.get("xlen", 100)), float(mp.get("ylen", 100)),
-                float(mp.get("overlap_per", 0)), float(mp.get("step_size", 250)),
+                float(mp.get("overlap_per", 0)), float(mp.get("tile_step", mp.get("step_size", 250))),
                 float(mp.get("dwell", 0.01)),
             )
         except (TypeError, ValueError):
@@ -444,7 +444,7 @@ class CoarseScanWidget(QWidget):
         mode = ep.get("mode", "?")
         confirm = QMessageBox.question(
             self,
-            "Confirm Mosaic Scan",
+            "Confirm Area Scan",
             f"Send mosaic scan to queue?\n\n"
             f"Mode: {mode.upper()}\n"
             f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total\n"
@@ -487,7 +487,7 @@ class CoarseScanWidget(QWidget):
 
     def _on_scan_finished(self, message):
         self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send Mosaic Scan")
+        self._send_btn.setText("Send Area Scan")
         self._abort_btn.setEnabled(False)
         self._abort_btn.setText("Abort")
         self._preview_text.setPlainText(f"✓ {message}")
@@ -497,7 +497,7 @@ class CoarseScanWidget(QWidget):
 
     def _on_scan_error(self, message):
         self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send Mosaic Scan")
+        self._send_btn.setText("Send Area Scan")
         self._abort_btn.setEnabled(False)
         self._abort_btn.setText("Abort")
         self._preview_text.setPlainText(f"✗ Error:\n{message}")

@@ -199,7 +199,11 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     for y_rel in tqdm.tqdm(y_steps, desc="Y-axis"):
         for x_rel in tqdm.tqdm(x_steps, desc="X-axis"):
             if abort_event is not None and abort_event.is_set():
-                print("[MOSAIC] Abort requested — no more tiles will be queued.")
+                print("[MOSAIC] Abort requested — stopping queue and exiting.")
+                try:
+                    RM.queue_stop()
+                except Exception as _e:
+                    print(f"[MOSAIC] Could not stop queue: {_e}")
                 return
             
             # Move motors relatively (movr) from the CURRENT position to the next step
@@ -221,7 +225,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
                     print(f"[MOSAIC] Queued: {req['plan_name']} {req['plan_args']}")
                 RM.queue_start()
-                wait_for_queue_done()
+                wait_for_queue_done(abort_event=abort_event)
             else:
                 print(f"[SIM] Would queue: move_relative {mot_x} {x_rel}, move_relative {mot_y} {y_rel}")
                 for req in coarse_requests:
@@ -229,19 +233,34 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                 print(f"[SIM] Would queue: mov {fine_x} 0 {fine_y} 0, return moves, queue_start")
 
             if abort_event is not None and abort_event.is_set():
-                print("[MOSAIC] Abort requested — skipping fine scans and stopping.")
+                print("[MOSAIC] Abort requested — stopping queue and exiting.")
+                try:
+                    RM.queue_stop()
+                except Exception as _e:
+                    print(f"[MOSAIC] Could not stop queue: {_e}")
                 return
 
             if proceed_with_fine_scan:
                 scan_id = None
+                db_online = False
                 if is_real:
-                    print("[MOSAIC] Fetching scan_id from databroker...", flush=True)
+                    print("[MOSAIC] Checking beamline DB...", flush=True)
                     try:
-                        from hxntools.CompositeBroker import db
-                        scan_id = db[-1].start['scan_id']
-                        print(f"[MOSAIC] scan_id={scan_id}", flush=True)
+                        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FTO
+                        def _db_scan_id():
+                            from hxntools.CompositeBroker import db
+                            return db[-1].start['scan_id']
+                        _ex = ThreadPoolExecutor(max_workers=1)
+                        _fut = _ex.submit(_db_scan_id)
+                        _ex.shutdown(wait=False)
+                        try:
+                            scan_id = _fut.result(timeout=3)
+                            db_online = True
+                            print(f"[MOSAIC] DB online — scan_id={scan_id}", flush=True)
+                        except _FTO:
+                            print("[MOSAIC] DB offline — skipping export_scan_params and XRF export")
                     except Exception as e:
-                        print(f"[MOSAIC] Could not get scan_id from db: {e}")
+                        print(f"[MOSAIC] DB check failed: {e}")
                 if scan_id is None:
                     scan_id = tile_params.get('scan_id')
 
@@ -258,8 +277,14 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
                 scan_params_data = None
 
-                print("Used export_scan_params")
-                scan_params_data = export_scan_params(scan_id, zp_flag=_zp_flag, save_to=out_dir)
+                if db_online:
+                    print("[MOSAIC] Online — running export_scan_params", flush=True)
+                    try:
+                        scan_params_data = export_scan_params(scan_id, zp_flag=_zp_flag, save_to=out_dir)
+                    except Exception as _e:
+                        print(f"[MOSAIC] export_scan_params failed: {_e}")
+                else:
+                    print("[MOSAIC] Offline — skipping export_scan_params")
 
                 # Override calibration in tile_params with real values from scan metadata
                 if scan_params_data:
@@ -276,10 +301,16 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                         tile_params['calibration_params']['true_origin_x'] = _x_start
                     if _y_start is not None:
                         tile_params['calibration_params']['true_origin_y'] = _y_start
-                    print(f"[MOSAIC] Fine scan using params — step_size={_step}, x_start={_x_start}, y_start={_y_start}")
+                    print(f"[MOSAIC] Calibration from scan — step_size={_step}, x_start={_x_start}, y_start={_y_start}")
 
-                print(f"[MOSAIC] Exporting XRF ROI data (scan_id={scan_id}, elems={_elem_list})...")
-                export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
+                if db_online:
+                    print(f"[MOSAIC] Online — exporting XRF ROI data (scan_id={scan_id}, elems={_elem_list})...")
+                    try:
+                        export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
+                    except Exception as _e:
+                        print(f"[MOSAIC] export_xrf_roi_data failed: {_e}")
+                else:
+                    print("[MOSAIC] Offline — skipping XRF ROI export")
 
                 print(f"[MOSAIC] Analyzing tile (scan_id={scan_id}, out_dir={out_dir})...")
                 try:
@@ -307,12 +338,12 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                                 fine_scans_tables=fine_tables,
                                 abort_event=abort_event,
                             )
-                            run_fine_scans(is_real or is_offline)
+                            run_fine_scans(is_real or is_offline, abort_event=abort_event)
                             RM.item_add(BPlan("mov", fine_x, 0, fine_y, 0))
                             RM.item_add(BPlan("move_relative", mot_x, -x_rel))
                             RM.item_add(BPlan("move_relative", mot_y, -y_rel))
                             RM.queue_start()
-                            wait_for_queue_done()
+                            wait_for_queue_done(abort_event=abort_event)
                         else:
                             print(f"[MOSAIC] No {label}s detected in this tile — moving to next tile.")
                     else:

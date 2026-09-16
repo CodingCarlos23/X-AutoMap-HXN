@@ -115,11 +115,7 @@ JSON_MAKER_COMMON_SECTIONS = {
     "execution_params": {"mode": "real", "proceed_with_fine_scan": True},
     "scan_params": {
         "label": "universal_test", "scan_id": None,
-        "dets": "dets_fast", "det_names": ["fs", "eiger2", "xspress3"],
-        "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
-        "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
-        "exp_t": 0.005, "step_size": 0.25, "zp_move_flag": 0,
-        "smar_move_flag": 0, "roi_positions_file": None,
+        "zp_move_flag": 0, "smar_move_flag": 0, "roi_positions_file": None,
     },
     "fine_scan_params": {
         "step_size_fine": 0.1, "exp_t_fine": 0.005, "fine_scan_pad_ratio": 0.3,
@@ -146,15 +142,14 @@ JSON_MAKER_COMMON_SECTIONS = {
         "blur_kernel": [3, 3],
     },
     "mosaic_params": {
-        "xlen": 50,
-        "ylen": 25,
-        "overlap_per": 0,
-        "step_size": 250,
-        "dwell": 0.01,
-        "mll": False,
-        "remote_seg": False,
-        "followup_fine_scan": False,
-        "ref_scan_id": None,
+        "dets": "dets_fast", "det_names": ["fs", "eiger2", "xspress3"],
+        "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
+        "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
+        "exp_t": 0.005, "step_size": 0.25,
+        "tile_step": 250,
+        "xlen": 50, "ylen": 25, "overlap_per": 0,
+        "dwell": 0.01, "mll": False,
+        "remote_seg": False, "followup_fine_scan": False, "ref_scan_id": None,
     },
 }
 
@@ -166,19 +161,19 @@ JSON_MAKER_MODES = ["real", "simulation", "offline", "analysis-only"]
 # Unit suffixes shown next to form row labels, keyed by (section, field).
 # Use section=None for detection method fields (shared across methods).
 _FIELD_UNITS = {
-    ("scan_params",       "mot1_s"):              "µm",
-    ("scan_params",       "mot1_e"):              "µm",
-    ("scan_params",       "mot2_s"):              "µm",
-    ("scan_params",       "mot2_e"):              "µm",
-    ("scan_params",       "exp_t"):               "s",
-    ("scan_params",       "step_size"):           "µm",
     ("fine_scan_params",  "step_size_fine"):      "µm",
     ("fine_scan_params",  "exp_t_fine"):          "s",
     ("fine_scan_params",  "fine_scan_pad_ratio"): "fraction 0–1",
+    ("mosaic_params",     "mot1_s"):              "µm",
+    ("mosaic_params",     "mot1_e"):              "µm",
+    ("mosaic_params",     "mot2_s"):              "µm",
+    ("mosaic_params",     "mot2_e"):              "µm",
+    ("mosaic_params",     "exp_t"):               "s",
+    ("mosaic_params",     "step_size"):           "µm",
+    ("mosaic_params",     "tile_step"):           "nm",
     ("mosaic_params",     "xlen"):                "µm",
     ("mosaic_params",     "ylen"):                "µm",
     ("mosaic_params",     "overlap_per"):         "%",
-    ("mosaic_params",     "step_size"):           "nm",  # nm — different from scan_params.step_size (µm)
     ("mosaic_params",     "dwell"):               "s",
     ("calibration_params","microns_per_pixel_x"): "µm/px",
     ("calibration_params","microns_per_pixel_y"): "µm/px",

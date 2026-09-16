@@ -352,7 +352,7 @@ def send_fly2d_to_queue(label,
                       data_wd))
     print("Coarse scan sent to queue.")
 
-def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True):
+def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True, abort_event=None):
     """
     Wait until QServer queue is empty and manager is idle.
     Optionally restart the queue if stuck in idle with items remaining.
@@ -393,6 +393,14 @@ def wait_for_queue_done(poll_interval=5.0, idle_timeout=3600, auto_restart=True)
                 return False
         else:
             idle_stuck_start = None  # reset if queue becomes active again
+
+        if abort_event is not None and abort_event.is_set():
+            print(f"\n[WAIT] Abort detected — stopping queue ({items} item(s) remaining).")
+            try:
+                RM.queue_stop()
+            except Exception as _e:
+                print(f"[WAIT] Could not stop queue: {_e}")
+            return False
 
         print(f". [{items} item(s) remaining, state={state}]", end="\n", flush=True)
         time.sleep(poll_interval)
@@ -588,7 +596,7 @@ def submit_fine_scans_to_queue(json_path, scan_id, out_dir, execution_params, fi
             print(f"[SIM] Would queue {sum(len(t) for t in fine_scans_tables.values())} fine scans from {len(fine_scans_tables)} groups")
         print(f"Would call: headless_send_queue_fine_scan('{json_path}')")
 
-def run_fine_scans(is_real):
+def run_fine_scans(is_real, abort_event=None):
     """
     Step 4: Start the Queue.
     """
@@ -600,6 +608,6 @@ def run_fine_scans(is_real):
         else:
             print('[QSERVER] Queue waiting or already running')
 
-        wait_for_queue_done()
+        wait_for_queue_done(abort_event=abort_event)
     else:
         print("[SIM] Would check RM.status() and start queue.")

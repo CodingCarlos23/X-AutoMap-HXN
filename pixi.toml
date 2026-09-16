@@ -23,6 +23,9 @@ ipympl = ">=0.10.0,<0.11"
 pytorch = "2.7.*"
 torchvision = "0.22.*"
 
+[tasks]
+automap = "python -m automap_hxn.main"
+
 [pypi-dependencies]
 automap_hxn = { path = ".", editable = true }
 ultralytics = ">=8.4,<9"

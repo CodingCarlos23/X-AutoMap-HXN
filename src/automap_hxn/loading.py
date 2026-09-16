@@ -43,7 +43,17 @@ def load_params_from_json(json_path, target_id=None):
     # Map mode to legacy real_test for backward compatibility with other functions
     mode_map = {'simulation': 0, 'real': 1, 'offline': 2, 'analysis-only': 3}
     params['real_test'] = mode_map.get(mode, 0)
-    
+
+    # Merge scan-level fields that live in mosaic_params into scan_params so
+    # that queue.py / workflows.py can keep reading them from scan_params.
+    _SCAN_FIELDS_IN_MOSAIC = ['dets', 'det_names', 'mot1', 'mot1_s', 'mot1_e',
+                               'mot2', 'mot2_s', 'mot2_e', 'exp_t', 'step_size']
+    _mp = params.get('mosaic_params', {})
+    _sp = params.setdefault('scan_params', {})
+    for _k in _SCAN_FIELDS_IN_MOSAIC:
+        if _k in _mp and _k not in _sp:
+            _sp[_k] = _mp[_k]
+
     # 3.1) Add default segmentation parameters if not present
     segmentation = params.get('segmentation_params', {})
     morphology = params.get('morphology_params', {})

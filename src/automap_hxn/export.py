@@ -36,26 +36,35 @@ def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
     Merges the first three element TIFFs into a single RGB TIFF file,
     and draws the union boxes on it.
     """
-    if len(element_list) < 3:
-        print("⚠️ Not enough elements to create an RGB TIFF (need at least 3).")
+    if len(element_list) < 2:
+        print("⚠️ Not enough elements to create an RGB TIFF (need at least 2).")
         return
 
     rgb_elements = element_list[:3]
-    print(f"Creating RGB TIFF from elements (R, G, B): {rgb_elements[0]}, {rgb_elements[1]}, {rgb_elements[2]}")
+    has_blue = len(rgb_elements) >= 3
+    if has_blue:
+        print(f"Creating RGB TIFF from elements (R, G, B): {rgb_elements[0]}, {rgb_elements[1]}, {rgb_elements[2]}")
+    else:
+        print(f"Creating RG TIFF from elements (R, G): {rgb_elements[0]}, {rgb_elements[1]}")
 
     try:
-        # Read the three images
+        # Read the images
         img_r = tiff.imread(tiff_paths[rgb_elements[0]])
         img_g = tiff.imread(tiff_paths[rgb_elements[1]])
-        img_b = tiff.imread(tiff_paths[rgb_elements[2]])
 
         # Determine target shape and resize if needed
-        shapes = [img.shape for img in (img_r, img_g, img_b)]
+        shapes = [img_r.shape, img_g.shape]
+        if has_blue:
+            img_b = tiff.imread(tiff_paths[rgb_elements[2]])
+            shapes.append(img_b.shape)
         target_shape = Counter(shapes).most_common(1)[0][0]
 
         img_r = resize_if_needed(img_r, rgb_elements[0], target_shape)
         img_g = resize_if_needed(img_g, rgb_elements[1], target_shape)
-        img_b = resize_if_needed(img_b, rgb_elements[2], target_shape)
+        if has_blue:
+            img_b = resize_if_needed(img_b, rgb_elements[2], target_shape)
+        else:
+            img_b = np.zeros_like(img_r)
 
         # Normalize each channel to 0-255
         norm_r = cv2.normalize(np.nan_to_num(img_r), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)

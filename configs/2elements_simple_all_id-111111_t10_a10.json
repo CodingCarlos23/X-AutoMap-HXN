@@ -1,6 +1,6 @@
 {
   "segmentation_params": {
-    "overlap_thresh": 0.20,
+    "overlap_thresh": 0.2,
     "unions_only": false,
     "blob_detection_method": "simple",
     "min_threshold_intensity": 10,
@@ -9,6 +9,11 @@
   "scan_params": {
     "label": "simple_test",
     "scan_id": "111111",
+    "zp_move_flag": 0,
+    "smar_move_flag": 0,
+    "roi_positions_file": null
+  },
+  "mosaic_params": {
     "dets": "dets_fast",
     "det_names": [
       "fs",
@@ -23,15 +28,10 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
-    "zp_move_flag": 0,
-    "smar_move_flag": 0,
-    "roi_positions_file": null
-  },
-  "mosaic_params": {
+    "tile_step": 250,
     "xlen": 50,
     "ylen": 25,
     "overlap_per": 0,
-    "step_size": 250,
     "dwell": 0.01,
     "mll": false,
     "remote_seg": false,
