@@ -23,16 +23,127 @@ from qtpy.QtGui import (
 
 MODEL = "qwen2.5vl:7b"
 OLLAMA_URL = "http://localhost:11434/api/chat"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_VERSION = "2023-06-01"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 KNOWN_MODELS = [
+    # ── Local (Ollama) ──────────────────────────────
     "qwen2.5vl:7b",
     "qwen2.5vl:3b",
     "qwen2.5vl:72b",
     "minicpm-v:8b",
     "llava-llama3:8b",
+    # ── Anthropic ───────────────────────────────────
+    "claude-sonnet-5",
+    "claude-opus-5",
+    # ── OpenAI ──────────────────────────────────────
+    "gpt-4o",
+    "gpt-4.1",
 ]
 
 _active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget
+
+# ── provider routing ──────────────────────────────────────────────────────────
+
+_ENV_VAR = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+_api_keys: dict = {}  # provider -> key, populated from env / GPG / user input
+
+_GPG_ENV_CANDIDATES = [
+    "~/.private.env.gpg",
+    "~/.env.gpg",
+    "~/.secrets.gpg",
+]
+
+
+def _get_provider(model: str) -> str:
+    if model.startswith("claude-"):
+        return "anthropic"
+    if model.startswith(("gpt-", "o3", "o4")):
+        return "openai"
+    return "ollama"
+
+
+def _try_load_key(provider: str) -> "str | None":
+    """Check $ENV first, then GPG-encrypted env files. Caches result in _api_keys."""
+    env_var = _ENV_VAR.get(provider, "")
+    val = os.environ.get(env_var, "").strip()
+    if val:
+        _api_keys[provider] = val
+        return val
+    for path in _GPG_ENV_CANDIDATES:
+        expanded = os.path.expanduser(path)
+        if not os.path.exists(expanded):
+            continue
+        try:
+            result = subprocess.run(
+                ["gpg", "--quiet", "--batch", "--yes", "--decrypt", expanded],
+                capture_output=True, text=True, timeout=15,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                for prefix in (f"export {env_var}=", f"{env_var}="):
+                    if line.startswith(prefix):
+                        key = line[len(prefix):].strip().strip('"').strip("'")
+                        if key:
+                            _api_keys[provider] = key
+                            return key
+        except Exception:
+            pass
+    return None
+
+
+def _get_key(provider: str) -> "str | None":
+    return _api_keys.get(provider) or _try_load_key(provider)
+
+
+def _history_to_anthropic(history: list) -> list:
+    msgs = []
+    for msg in history:
+        if msg.get("role") == "system":
+            continue
+        images = msg.get("images", [])
+        if images:
+            content = []
+            for img_b64 in images:
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+                })
+            if msg.get("content"):
+                content.append({"type": "text", "text": msg["content"]})
+            msgs.append({"role": msg["role"], "content": content})
+        else:
+            msgs.append({"role": msg["role"], "content": msg.get("content", "")})
+    return msgs
+
+
+def _history_to_openai(history: list) -> list:
+    msgs = []
+    for msg in history:
+        images = msg.get("images", [])
+        if images:
+            content = []
+            for img_b64 in images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                })
+            if msg.get("content"):
+                content.append({"type": "text", "text": msg["content"]})
+            msgs.append({"role": msg["role"], "content": content})
+        else:
+            msgs.append({"role": msg["role"], "content": msg.get("content", "")})
+    return msgs
+
+
+def _parse_locate_json(content: str) -> dict:
+    if content.startswith("```"):
+        content = "\n".join(content.splitlines()[1:-1])
+    return json.loads(content)
 
 LOCATE_SYSTEM_PROMPT = (
     "You are a scientific image analysis assistant for XRF (X-ray fluorescence) scan data. "
@@ -182,32 +293,106 @@ class _ChatThread(QThread):
         self.messages = messages
 
     def run(self):
+        try:
+            provider = _get_provider(_active_model)
+            if provider == "anthropic":
+                self._run_anthropic()
+            elif provider == "openai":
+                self._run_openai()
+            else:
+                self._run_ollama()
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _run_ollama(self):
         payload = json.dumps({
             "model": _active_model,
             "messages": self.messages,
             "stream": True,
         }, ensure_ascii=False).encode("utf-8")
-        try:
-            req = urllib.request.Request(
-                OLLAMA_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                for line in resp:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            self.token.emit(content)
-                    except json.JSONDecodeError:
-                        pass
-            self.finished.emit()
-        except Exception as e:
-            self.error.emit(str(e))
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for line in resp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        self.token.emit(content)
+                except json.JSONDecodeError:
+                    pass
+        self.finished.emit()
+
+    def _run_anthropic(self):
+        key = _api_keys.get("anthropic", "")
+        sys_msgs = [m for m in self.messages if m.get("role") == "system"]
+        system = sys_msgs[0]["content"] if sys_msgs else ""
+        payload = json.dumps({
+            "model": _active_model,
+            "max_tokens": 4096,
+            "stream": True,
+            "system": system,
+            "messages": _history_to_anthropic(self.messages),
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            ANTHROPIC_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": key,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for line in resp:
+                line = line.strip()
+                if not line or line == b"data: [DONE]":
+                    continue
+                if line.startswith(b"data: "):
+                    line = line[6:]
+                try:
+                    chunk = json.loads(line)
+                    if chunk.get("type") == "content_block_delta":
+                        text = chunk.get("delta", {}).get("text", "")
+                        if text:
+                            self.token.emit(text)
+                except json.JSONDecodeError:
+                    pass
+        self.finished.emit()
+
+    def _run_openai(self):
+        key = _api_keys.get("openai", "")
+        payload = json.dumps({
+            "model": _active_model,
+            "stream": True,
+            "messages": _history_to_openai(self.messages),
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OPENAI_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for line in resp:
+                line = line.strip()
+                if not line or line == b"data: [DONE]":
+                    continue
+                if line.startswith(b"data: "):
+                    line = line[6:]
+                try:
+                    chunk = json.loads(line)
+                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    if content:
+                        self.token.emit(content)
+                except json.JSONDecodeError:
+                    pass
+        self.finished.emit()
 
 
 _VLM_MAX_DIM = 1024
@@ -245,6 +430,11 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0):
     return base64.b64encode(buf.tobytes()).decode()
 
 
+_LOCATE_USER_PROMPT = (
+    "Find all distinct features and regions of interest in this image. Return JSON only."
+)
+
+
 class _LocateThread(QThread):
     result = Signal(dict)
     error = Signal(str)
@@ -257,39 +447,85 @@ class _LocateThread(QThread):
     def run(self):
         try:
             img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize)
-
-            payload = json.dumps({
-                "model": _active_model,
-                "messages": [
-                    {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": "Find all distinct features and regions of interest in this image. Return JSON only.",
-                        "images": [img_b64],
-                    },
-                ],
-                "stream": False,
-                "format": "json",
-            }, ensure_ascii=False).encode("utf-8")
-
-            req = urllib.request.Request(
-                OLLAMA_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-
-            content = data.get("message", {}).get("content", "{}")
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.splitlines()
-                content = "\n".join(lines[1:-1])
-
-            parsed = json.loads(content)
+            provider = _get_provider(_active_model)
+            if provider == "anthropic":
+                parsed = self._query_anthropic(img_b64)
+            elif provider == "openai":
+                parsed = self._query_openai(img_b64)
+            else:
+                parsed = self._query_ollama(img_b64)
             self.result.emit(parsed)
         except Exception as e:
             self.error.emit(str(e))
+
+    def _query_ollama(self, img_b64: str) -> dict:
+        payload = json.dumps({
+            "model": _active_model,
+            "messages": [
+                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
+            ],
+            "stream": False,
+            "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json(data.get("message", {}).get("content", "{}"))
+
+    def _query_anthropic(self, img_b64: str) -> dict:
+        key = _api_keys.get("anthropic", "")
+        payload = json.dumps({
+            "model": _active_model,
+            "max_tokens": 4096,
+            "system": LOCATE_SYSTEM_PROMPT,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                    {"type": "text", "text": _LOCATE_USER_PROMPT},
+                ],
+            }],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            ANTHROPIC_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": key,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}"))
+
+    def _query_openai(self, img_b64: str) -> dict:
+        key = _api_keys.get("openai", "")
+        payload = json.dumps({
+            "model": _active_model,
+            "messages": [
+                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {"type": "text", "text": _LOCATE_USER_PROMPT},
+                ]},
+            ],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OPENAI_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json(
+            data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        )
 
 
 
@@ -317,6 +553,9 @@ class _LocateTileThread(QThread):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _api_keys.get(self._provider, "")
 
     def run(self):
         try:
@@ -383,17 +622,19 @@ class _LocateTileThread(QThread):
             raise RuntimeError("cv2.imencode failed")
         return base64.b64encode(buf.tobytes()).decode()
 
-    @staticmethod
-    def _query(img_b64: str) -> list:
+    def _query(self, img_b64: str) -> list:
+        if self._provider == "anthropic":
+            return self._query_anthropic(img_b64)
+        if self._provider == "openai":
+            return self._query_openai(img_b64)
+        return self._query_ollama(img_b64)
+
+    def _query_ollama(self, img_b64: str) -> list:
         payload = json.dumps({
-            "model": _active_model,
+            "model": self._model,
             "messages": [
                 {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": "Find all distinct features and regions of interest in this image. Return JSON only.",
-                    "images": [img_b64],
-                },
+                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
             ],
             "stream": False,
             "format": "json",
@@ -404,10 +645,56 @@ class _LocateTileThread(QThread):
         )
         with urllib.request.urlopen(req, timeout=600) as resp:
             data = json.loads(resp.read())
-        content = data.get("message", {}).get("content", "{}").strip()
-        if content.startswith("```"):
-            content = "\n".join(content.splitlines()[1:-1])
-        return json.loads(content).get("features", [])
+        return _parse_locate_json(data.get("message", {}).get("content", "{}")).get("features", [])
+
+    def _query_anthropic(self, img_b64: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "max_tokens": 4096,
+            "system": LOCATE_SYSTEM_PROMPT,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                    {"type": "text", "text": _LOCATE_USER_PROMPT},
+                ],
+            }],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            ANTHROPIC_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": self._key,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}")).get("features", [])
+
+    def _query_openai(self, img_b64: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {"type": "text", "text": _LOCATE_USER_PROMPT},
+                ]},
+            ],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OPENAI_API_URL, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json(
+            data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        ).get("features", [])
 
     @staticmethod
     def _dedup(features: list, iou_thresh: float = 0.3) -> list:
@@ -505,9 +792,30 @@ class _ChatTab(QWidget):
         self.input_widget.setVisible(False)
         layout.addWidget(self.input_widget)
 
+        # cloud API key entry (shown only when provider is cloud and key not found)
+        self._key_widget = QWidget()
+        key_row = QHBoxLayout(self._key_widget)
+        key_row.setContentsMargins(0, 4, 0, 0)
+        self._key_label = QLabel("API Key:")
+        key_row.addWidget(self._key_label)
+        self._key_input = QLineEdit()
+        self._key_input.setPlaceholderText("Paste your API key here...")
+        self._key_input.setEchoMode(QLineEdit.Password)
+        key_row.addWidget(self._key_input, 1)
+        self._key_gpg_btn = QPushButton("Load from GPG")
+        self._key_gpg_btn.setToolTip("Try to decrypt ~/.private.env.gpg and load key automatically")
+        self._key_gpg_btn.clicked.connect(self._try_gpg)
+        key_row.addWidget(self._key_gpg_btn)
+        self._key_save_btn = QPushButton("Use Key")
+        self._key_save_btn.clicked.connect(self._save_key)
+        key_row.addWidget(self._key_save_btn)
+        self._key_widget.setVisible(False)
+        layout.addWidget(self._key_widget)
+
     def refresh_model(self):
         self.download_btn.setText(f"Download {_active_model}")
         self.download_btn.setVisible(False)
+        self._key_widget.setVisible(False)
         self.chat_area.setVisible(False)
         self.file_btn.setVisible(False)
         self.input_widget.setVisible(False)
@@ -515,6 +823,13 @@ class _ChatTab(QWidget):
         self._check_status()
 
     def _check_status(self):
+        provider = _get_provider(_active_model)
+        if provider == "ollama":
+            self._check_ollama_status()
+        else:
+            self._check_cloud_status(provider)
+
+    def _check_ollama_status(self):
         if not shutil.which("ollama"):
             self.status_label.setText(
                 "Ollama is not installed. Install it from https://ollama.com and restart."
@@ -535,10 +850,45 @@ class _ChatTab(QWidget):
             self.status_label.setText(f"Could not reach Ollama: {e}")
             self.status_label.setStyleSheet("color: #c0392b; padding: 5px;")
 
+    def _check_cloud_status(self, provider: str):
+        key = _get_key(provider)
+        if key:
+            self._set_ready()
+        else:
+            provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
+            env_var = _ENV_VAR[provider]
+            self.status_label.setText(
+                f"No {env_var} found. Click 'Load from GPG' or paste your {provider_name} key below."
+            )
+            self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
+            self._key_label.setText(f"{provider_name} API Key:")
+            self._key_widget.setVisible(True)
+
+    def _try_gpg(self):
+        provider = _get_provider(_active_model)
+        key = _try_load_key(provider)
+        if key:
+            self._set_ready()
+        else:
+            self.status_label.setText(
+                "GPG decrypt did not find the key. Enter it manually below."
+            )
+            self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
+
+    def _save_key(self):
+        provider = _get_provider(_active_model)
+        key = self._key_input.text().strip()
+        if not key:
+            return
+        _api_keys[provider] = key
+        self._key_input.clear()
+        self._set_ready()
+
     def _set_ready(self):
         self.status_label.setText(f"Model {_active_model} is ready.")
         self.status_label.setStyleSheet("color: #27ae60; padding: 5px;")
         self.download_btn.setVisible(False)
+        self._key_widget.setVisible(False)
         self.log_box.setVisible(False)
         self.chat_area.setVisible(True)
         self.file_btn.setVisible(True)
@@ -756,6 +1106,13 @@ class _LocateTab(QWidget):
         layout.addLayout(content_row, 1)
 
     def _check_model(self):
+        provider = _get_provider(_active_model)
+        if provider == "ollama":
+            self._check_ollama_model()
+        else:
+            self._check_cloud_model(provider)
+
+    def _check_ollama_model(self):
         if not shutil.which("ollama"):
             self.model_status.setText("Ollama not installed — see the Chat tab.")
             self.model_status.setStyleSheet("color: #c0392b; padding: 4px;")
@@ -775,6 +1132,28 @@ class _LocateTab(QWidget):
             self.model_status.setText("Could not reach Ollama.")
             self.model_status.setStyleSheet("color: #c0392b; padding: 4px;")
             self._model_ok = False
+
+    def _check_cloud_model(self, provider: str):
+        key = _get_key(provider)
+        if key:
+            self.model_status.setText("")
+            self.model_status.setStyleSheet("")
+            self._model_ok = True
+        else:
+            provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
+            self.model_status.setText(
+                f"No API key for {provider_name} — configure it in the Chat tab first."
+            )
+            self.model_status.setStyleSheet("color: #e67e22; padding: 4px;")
+            self._model_ok = False
+
+    def refresh_model(self):
+        self._model_ok = True
+        self.model_status.setText("")
+        self.model_status.setStyleSheet("")
+        self._check_model()
+        if self._image_path:
+            self.locate_btn.setEnabled(self._model_ok)
 
     def _pick_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -933,11 +1312,13 @@ class LLMJsonMakerWidget(QWidget):
 
         tabs = QTabWidget()
         self._chat_tab = _ChatTab()
+        self._locate_tab = _LocateTab()
         tabs.addTab(self._chat_tab, "Chat")
-        tabs.addTab(_LocateTab(), "Feature Locator")
+        tabs.addTab(self._locate_tab, "Feature Locator")
         layout.addWidget(tabs)
 
     def _on_model_changed(self, text: str) -> None:
         global _active_model
         _active_model = text.strip()
         self._chat_tab.refresh_model()
+        self._locate_tab.refresh_model()
