@@ -259,10 +259,9 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                 _zp_flag = bool(tile_params.get('scan_params', {}).get('zp_move_flag', True))
 
                 scan_params_data = None
-                try:
-                    scan_params_data = export_scan_params(scan_id, zp_flag=_zp_flag, save_to=out_dir)
-                except Exception as e:
-                    print(f"[MOSAIC] export_scan_params failed: {e}")
+
+                print("Used export_scan_params")
+                scan_params_data = export_scan_params(scan_id, zp_flag=_zp_flag, save_to=out_dir)
 
                 # Override calibration in tile_params with real values from scan metadata
                 if scan_params_data:
@@ -282,10 +281,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     print(f"[MOSAIC] Fine scan using params — step_size={_step}, x_start={_x_start}, y_start={_y_start}")
 
                 print(f"[MOSAIC] Exporting XRF ROI data (scan_id={scan_id}, elems={_elem_list})...")
-                try:
-                    export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
-                except Exception as e:
-                    print(f"[MOSAIC] export_xrf_roi_data failed: {e}")
+                export_xrf_roi_data(scan_id, norm=_norm, elem_list=_elem_list, wd=out_dir, remote_seg=False)
 
                 print(f"[MOSAIC] Analyzing tile (scan_id={scan_id}, out_dir={out_dir})...")
                 try:

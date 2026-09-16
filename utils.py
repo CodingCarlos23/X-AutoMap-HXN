@@ -2443,7 +2443,7 @@ def analyze_data_local(scan_id=None,
                 print(f"[ANALYSIS] Calculated from scan metadata: x_start={x_start}, y_start={y_start}, step_size={step_size}")
             else:
                 # Fallback to saved or provided values
-                step_size = params_data.get('step_size') or params.get('scan_params', {}).get('step_size') or params.get('step_size', 1.0)
+                step_size = params.get('scan_params', {}).get('step_size')
                 print(f"[ANALYSIS] Using fallback step_size={step_size}")
 
     # --- 2. Prepare Elements ---
