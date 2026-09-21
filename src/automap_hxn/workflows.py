@@ -114,8 +114,9 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
         try:
             with open(initial_scan_path, 'r') as _f:
                 _early_params = json.load(_f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Could not load initial_scan_path '{initial_scan_path}': {e}")
+            raise
     _mode = str(_early_params.get('execution_params', {}).get('mode', 'simulation')).lower()
     _is_real_or_offline = _mode in ('real', 'offline')
 
@@ -153,7 +154,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             beamline_params_dict = {}
     except (FileNotFoundError, json.JSONDecodeError, TypeError) as e:
         print(f"[ERROR] Failed to load beamline_params from {beamline_params}: {e}")
-        beamline_params_dict = {}
+        raise
 
     # Load full params (with defaults) once for per-tile analysis
     tile_params = {}
@@ -161,7 +162,8 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
         try:
             tile_params = load_params_from_json(initial_scan_path)
         except Exception as e:
-            print(f"[MOSAIC] Could not load tile params for analysis: {e}")
+            print(f"[ERROR] Could not load tile params from '{initial_scan_path}': {e}")
+            raise
 
     proceed_with_fine_scan = tile_params.get('execution_params', {}).get('proceed_with_fine_scan', False)
     mode = str(tile_params.get('execution_params', {}).get('mode', 'simulation')).lower()

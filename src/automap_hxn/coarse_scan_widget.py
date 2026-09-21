@@ -55,6 +55,7 @@ class MosaicScanThread(QThread):
                     from tiled.client import from_uri
                     params["tiled_client"] = from_uri(self._tiled_uri)
                 except Exception as err:
+                    print(f"[ERROR] Could not connect to Tiled at '{self._tiled_uri}': {err}")
                     self.error.emit(
                         f"Could not connect to Tiled at '{self._tiled_uri}':\n{err}\n\n"
                         "Check tiled_uri in export_params or disable remote_seg."
@@ -72,11 +73,13 @@ class MosaicScanThread(QThread):
             else:
                 self.finished.emit("Mosaic scan completed successfully.")
         except ImportError as err:
+            print(f"[ERROR] Could not import workflows module: {err}")
             self.error.emit(
                 f"Could not import workflows module: {err}\n\n"
                 "Install bluesky-queueserver-api and its dependencies."
             )
         except Exception as err:
+            print(f"[ERROR] Mosaic scan failed: {err}")
             self.error.emit(str(err))
 
 
@@ -273,6 +276,7 @@ class CoarseScanWidget(QWidget):
             with open(path) as f:
                 params = json.load(f)
         except (OSError, json.JSONDecodeError) as err:
+            print(f"[ERROR] Failed to load JSON config: {err}")
             QMessageBox.critical(self, "Error Loading JSON", str(err))
             return
 
@@ -318,17 +322,19 @@ class CoarseScanWidget(QWidget):
                 float(xlen), float(ylen),
                 float(overlap), float(step), float(dwell),
             )
-            if x_tiles == 0 or y_tiles == 0:
-                self._tile_label.setText("⚠️  Cannot calculate tiles — check scan range and area values in JSON.")
-            else:
-                unit = "min" if est_min < 60 else "hr"
-                display_time = est_min if est_min < 60 else est_min / 60
-                self._tile_label.setText(
-                    f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total   "
-                    f"Est. time: {display_time:.1f} {unit}"
-                )
-        except (TypeError, ValueError):
-            self._tile_label.setText("⚠️  Could not compute tile estimate — check mosaic_params in JSON.")
+        except (TypeError, ValueError) as err:
+            print(f"[ERROR] _calc_tile_info: {err}")
+            self._tile_label.setText(f"⚠️  Could not compute tile estimate: {err}")
+            return
+        if x_tiles == 0 or y_tiles == 0:
+            self._tile_label.setText("⚠️  Cannot calculate tiles — check scan range and area values in JSON.")
+        else:
+            unit = "min" if est_min < 60 else "hr"
+            display_time = est_min if est_min < 60 else est_min / 60
+            self._tile_label.setText(
+                f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total   "
+                f"Est. time: {display_time:.1f} {unit}"
+            )
 
     # ------------------------------------------------------------------
     # Collect params from JSON (no widget overrides)
@@ -388,9 +394,10 @@ class CoarseScanWidget(QWidget):
                 float(mp.get("step_size", 0.25)),
                 float(mp.get("dwell", 0.01)),
             )
-        except (TypeError, ValueError):
-            x_tiles = y_tiles = 0
-            est_min = 0.0
+        except (TypeError, ValueError) as err:
+            print(f"[ERROR] _calc_tile_info in preview: {err}")
+            self._preview_text.setPlainText(f"[ERROR] Could not compute tile estimate: {err}")
+            return
 
         scan_range = abs(mot1_e - mot1_s)
         grid_step = scan_range * (1 - float(mp.get("overlap_per", 0)) * 0.01)
@@ -437,9 +444,10 @@ class CoarseScanWidget(QWidget):
                 float(mp.get("overlap_per", 0)), float(mp.get("step_size", 0.25)),
                 float(mp.get("dwell", 0.01)),
             )
-        except (TypeError, ValueError):
-            x_tiles = y_tiles = 0
-            est_min = 0.0
+        except (TypeError, ValueError) as err:
+            print(f"[ERROR] Invalid mosaic_params — cannot start scan: {err}")
+            QMessageBox.critical(self, "Invalid Config", f"Cannot start scan — bad mosaic_params:\n\n{err}")
+            return
 
         mode = ep.get("mode", "?")
         confirm = QMessageBox.question(
