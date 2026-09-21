@@ -1,10 +1,10 @@
 {
   "segmentation_params": {
     "overlap_thresh": 0.5,
-    "unions_only": true,
+    "unions_only": false,
     "blob_detection_method": "simple",
-    "min_threshold_intensity": 50,
-    "min_threshold_area": 50
+    "min_threshold_intensity": 60,
+    "min_threshold_area": 60
   },
   "scan_params": {
     "label": "simple_test",
@@ -28,7 +28,6 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
-    "tile_step": 250,
     "xlen": 50,
     "ylen": 25,
     "overlap_per": 0,
@@ -89,10 +88,10 @@
       "filter_by_color": false,
       "filter_by_circularity": false,
       "gui_threshold_values": [
-        50
+        60
       ],
       "gui_min_area_values": [
-        50
+        60
       ]
     }
   }
