@@ -88,7 +88,7 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True, tiled_client =
 
 
 def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
-                         step_size = 250, plot_elem = ["Cr"], mll = False,
+                         step_size = 0.25, plot_elem = ["Cr"], mll = False,
                          beamline_params=None, initial_scan_path=None,
                          remote_seg=True, followup_fine_scan=False,tiled_client=None,
                          ref_scan_id = None, abort_event=None):
@@ -100,7 +100,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
 
     mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
-                         step_size = 250, plot_elem = ["Ni"], mll = False, 
+                         step_size = 0.25, plot_elem = ["Ni"], mll = False,
                          beamline_params="configs/initial_scan_sim.json", 
                          initial_scan_path="configs/initial_scan_sim.json", 
                          remote_seg=False, followup_fine_scan=True,
@@ -186,7 +186,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     print(f"Total area: {xlen}um x {ylen}um using {grid_step}um steps.")
 
     # Calculate estimated time (keeping your original logic)
-    num_steps_fly = round(25 * 1000 / step_size) # internal fly scan resolution
+    num_steps_fly = round(grid_step / step_size)  # tile size / pixel step (both µm)
     fly_time = (num_steps_fly**2) * dwell * 2
     total_time = (fly_time * len(x_steps) * len(y_steps)) / 60
     

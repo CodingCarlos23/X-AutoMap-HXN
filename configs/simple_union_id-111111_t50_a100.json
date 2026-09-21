@@ -28,7 +28,6 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
-    "tile_step": 250,
     "xlen": 50,
     "ylen": 25,
     "overlap_per": 0,
@@ -90,10 +89,10 @@
       "filter_by_color": false,
       "filter_by_circularity": false,
       "gui_threshold_values": [
-        50
+        10
       ],
       "gui_min_area_values": [
-        100
+        50
       ]
     }
   }
