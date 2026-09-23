@@ -247,6 +247,7 @@ def analyze_data_local(scan_id=None,
     watershed_methods = detection_methods.get("watershed", {})
     cellpose_methods = detection_methods.get("cellpose", {})
     connected_components_methods = detection_methods.get("connected_components", {})
+    stardist_methods = detection_methods.get("stardist", {})
     
     method_params = {
         # Simple blob detector parameters
@@ -278,7 +279,12 @@ def analyze_data_local(scan_id=None,
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
         
         # Connected components parameters
-        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity'),
+        # StarDist parameters
+        'model_name': stardist_methods.get('model_name'),
+        'prob_thresh': stardist_methods.get('prob_thresh'),
+        'nms_thresh': stardist_methods.get('nms_thresh'),
+        'min_size': stardist_methods.get('min_size'),
     }
     
     # Filter out None values to avoid overriding method defaults
@@ -631,6 +637,7 @@ def analyze_data_from_arrays(element_arrays, params):
     watershed_methods = detection_methods.get("watershed", {})
     cellpose_methods = detection_methods.get("cellpose", {})
     connected_components_methods = detection_methods.get("connected_components", {})
+    stardist_methods = detection_methods.get("stardist", {})
     
     method_params = {
         'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
@@ -653,7 +660,12 @@ def analyze_data_from_arrays(element_arrays, params):
         'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
         'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
-        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity'),
+        # StarDist parameters
+        'model_name': stardist_methods.get('model_name'),
+        'prob_thresh': stardist_methods.get('prob_thresh'),
+        'nms_thresh': stardist_methods.get('nms_thresh'),
+        'min_size': stardist_methods.get('min_size'),
     }
     method_params = {k: v for k, v in method_params.items() if v is not None}
     
@@ -868,6 +880,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     watershed_methods = detection_methods.get("watershed", {})
     cellpose_methods = detection_methods.get("cellpose", {})
     connected_components_methods = detection_methods.get("connected_components", {})
+    stardist_methods = detection_methods.get("stardist", {})
     
     min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
     min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
@@ -904,7 +917,12 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
         
         # Connected components parameters
-        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity')
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity'),
+        # StarDist parameters
+        'model_name': stardist_methods.get('model_name'),
+        'prob_thresh': stardist_methods.get('prob_thresh'),
+        'nms_thresh': stardist_methods.get('nms_thresh'),
+        'min_size': stardist_methods.get('min_size'),
     }
     
     # Filter out None values to avoid overriding method defaults

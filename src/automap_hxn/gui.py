@@ -1307,7 +1307,7 @@ class MainWindow(QWidget):
                 if key not in {"min_threshold", "min_area"}
             }
             return detect_blobs(
-                img_orig, img_orig, min_thresh, min_area, color, file_name,
+                img_norm, img_orig, min_thresh, min_area, color, file_name,
                 method="stardist", **stardist_params,
             )
 
