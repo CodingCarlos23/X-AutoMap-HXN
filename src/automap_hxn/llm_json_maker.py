@@ -14,8 +14,9 @@ from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
     QScrollArea, QMessageBox, QComboBox, QCheckBox, QSpinBox,
+    QGroupBox, QRadioButton, QButtonGroup,
 )
-from qtpy.QtCore import Qt, QThread, Signal
+from qtpy.QtCore import Qt, QThread, Signal, QTimer
 from qtpy.QtGui import (
     QTextCursor, QPixmap, QImage, QPainter, QPen, QColor, QFont,
 )
@@ -34,12 +35,12 @@ KNOWN_MODELS = [
     "qwen2.5vl:72b",
     "minicpm-v:8b",
     "llava-llama3:8b",
-    # ── Anthropic ───────────────────────────────────
-    "claude-sonnet-5",
-    "claude-opus-5",
-    # ── OpenAI ──────────────────────────────────────
-    "gpt-4o",
+    # ── Anthropic (via NSLS-II APIM or direct) ──────
+    "claude-sonnet-4-6",
+    "claude-opus-4-5",
+    # ── OpenAI (via NSLS-II APIM) ───────────────────
     "gpt-4.1",
+    "gpt-5.5",
 ]
 
 _active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget
@@ -50,7 +51,8 @@ _ENV_VAR = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
 }
-_api_keys: dict = {}  # provider -> key, populated from env / GPG / user input
+_api_keys: dict = {}   # provider -> key, populated from env / GPG / user input
+_api_urls: dict = {}   # provider -> custom base URL (e.g. AIFAPIM_HOST override)
 
 _GPG_ENV_CANDIDATES = [
     "~/.private_env.gpg",
@@ -65,13 +67,29 @@ def _get_provider(model: str) -> str:
     return "ollama"
 
 
-def _try_load_key(provider: str) -> "str | None":
-    """Check $ENV first, then GPG-encrypted env files. Caches result in _api_keys."""
+def _parse_env_lines(text: str) -> "dict[str, str]":
+    """Parse 'export KEY=value' or 'KEY=value' lines into a dict."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        for prefix in ("export ", ""):
+            if line.startswith(prefix):
+                rest = line[len(prefix):]
+                if "=" in rest:
+                    k, _, v = rest.partition("=")
+                    result[k.strip()] = v.strip().strip('"').strip("'")
+                    break
+    return result
+
+
+def _try_load_key(provider: str) -> "tuple[str | None, str]":
+    """Check $ENV first, then GPG-encrypted env files. Caches result in _api_keys.
+    Returns (key_or_None, diagnostic_message)."""
     env_var = _ENV_VAR.get(provider, "")
     val = os.environ.get(env_var, "").strip()
     if val:
         _api_keys[provider] = val
-        return val
+        return val, ""
     for path in _GPG_ENV_CANDIDATES:
         expanded = os.path.expanduser(path)
         if not os.path.exists(expanded):
@@ -81,21 +99,60 @@ def _try_load_key(provider: str) -> "str | None":
                 ["gpg", "--quiet", "--batch", "--yes", "--decrypt", expanded],
                 capture_output=True, text=True, timeout=15,
             )
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                for prefix in (f"export {env_var}=", f"{env_var}="):
-                    if line.startswith(prefix):
-                        key = line[len(prefix):].strip().strip('"').strip("'")
-                        if key:
-                            _api_keys[provider] = key
-                            return key
-        except Exception:
-            pass
-    return None
+            if result.returncode != 0:
+                err = result.stderr.strip() or "gpg exited non-zero (no error output)"
+                return None, f"GPG error ({expanded}): {err}"
+            env = _parse_env_lines(result.stdout)
+            # Standard key name
+            if env_var in env and env[env_var]:
+                _api_keys[provider] = env[env_var]
+                return env[env_var], ""
+            # Fallback: AIFAPIM_API_KEY + AIFAPIM_HOST for OpenAI-compatible proxy
+            if provider == "openai":
+                apim_key = env.get("AIFAPIM_API_KEY", "").strip()
+                apim_host = env.get("AIFAPIM_HOST", "").strip()
+                if apim_key and apim_host:
+                    _api_keys[provider] = apim_key
+                    host = apim_host.rstrip("/")
+                    if not host.startswith("http"):
+                        host = f"https://{host}"
+                    _api_urls[provider] = f"{host}/openai/v1/responses"
+                    codex_model = env.get("AIFAPIM_CODEX_MODEL", "").strip()
+                    if codex_model and codex_model not in KNOWN_MODELS:
+                        KNOWN_MODELS.append(codex_model)
+                    if codex_model:
+                        _api_keys["_apim_model"] = codex_model
+                    return apim_key, ""
+            return None, (
+                f"GPG decrypted {expanded} but '{env_var}' was not found in the output.\n"
+                f"Keys present: {list(env.keys())}"
+            )
+        except Exception as exc:
+            return None, f"GPG exception: {exc}"
+    return None, f"No GPG env file found at: {', '.join(_GPG_ENV_CANDIDATES)}"
 
 
 def _get_key(provider: str) -> "str | None":
-    return _api_keys.get(provider) or _try_load_key(provider)
+    if provider in _api_keys:
+        return _api_keys[provider]
+    key, _ = _try_load_key(provider)
+    return key
+
+
+def _get_openai_url() -> str:
+    return _api_urls.get("openai", OPENAI_API_URL)
+
+
+def _get_openai_model() -> str:
+    """When using APIM, use the gateway's registered model name instead of the picker value."""
+    return _api_keys.get("_apim_model") or _active_model
+
+
+def _get_openai_auth_headers(key: str) -> dict:
+    # AIFAPIM gateway uses x-api-key; standard OpenAI uses Authorization: Bearer
+    if "openai" in _api_urls:
+        return {"x-api-key": key}
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _history_to_anthropic(history: list) -> list:
@@ -136,6 +193,40 @@ def _history_to_openai(history: list) -> list:
         else:
             msgs.append({"role": msg["role"], "content": msg.get("content", "")})
     return msgs
+
+
+def _history_to_responses_input(history: list) -> list:
+    """Convert chat history to OpenAI Responses API input format (input_text/input_image)."""
+    msgs = []
+    for msg in history:
+        role = msg.get("role")
+        if role == "system":
+            continue
+        images = msg.get("images", [])
+        if images:
+            content = []
+            for img_b64 in images:
+                content.append({
+                    "type": "input_image",
+                    "image_url": f"data:image/png;base64,{img_b64}",
+                })
+            if msg.get("content"):
+                content.append({"type": "input_text", "text": msg["content"]})
+            msgs.append({"role": role, "content": content})
+        else:
+            msgs.append({"role": role, "content": msg.get("content", "")})
+    return msgs
+
+
+def _parse_responses_text(data: dict) -> str:
+    """Extract text from an OpenAI Responses API (non-streaming) response."""
+    if "output_text" in data:
+        return data["output_text"]
+    for item in data.get("output", []):
+        for part in item.get("content", []):
+            if part.get("type") == "output_text":
+                return part.get("text", "")
+    return ""
 
 
 def _parse_locate_json(content: str) -> dict:
@@ -300,7 +391,10 @@ class _ChatThread(QThread):
             else:
                 self._run_ollama()
         except Exception as e:
-            self.error.emit(str(e))
+            msg = str(e)
+            if provider == "openai":
+                msg += f"\n[URL: {_get_openai_url()}  model: {_get_openai_model()}]"
+            self.error.emit(msg)
 
     def _run_ollama(self):
         payload = json.dumps({
@@ -327,7 +421,7 @@ class _ChatThread(QThread):
         self.finished.emit()
 
     def _run_anthropic(self):
-        key = _api_keys.get("anthropic", "")
+        key = _get_key("anthropic") or ""
         sys_msgs = [m for m in self.messages if m.get("role") == "system"]
         system = sys_msgs[0]["content"] if sys_msgs else ""
         payload = json.dumps({
@@ -363,33 +457,46 @@ class _ChatThread(QThread):
         self.finished.emit()
 
     def _run_openai(self):
-        key = _api_keys.get("openai", "")
-        payload = json.dumps({
-            "model": _active_model,
-            "stream": True,
-            "messages": _history_to_openai(self.messages),
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OPENAI_API_URL, data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            for line in resp:
-                line = line.strip()
-                if not line or line == b"data: [DONE]":
-                    continue
-                if line.startswith(b"data: "):
-                    line = line[6:]
-                try:
-                    chunk = json.loads(line)
-                    content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    if content:
-                        self.token.emit(content)
-                except json.JSONDecodeError:
-                    pass
+        key = _get_key("openai") or ""
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
+        if "openai" in _api_urls:
+            # NSLS-II APIM — Responses API
+            sys_msgs = [m for m in self.messages if m.get("role") == "system"]
+            payload_dict = {
+                "model": _get_openai_model(),
+                "input": _history_to_responses_input(self.messages),
+            }
+            if sys_msgs:
+                payload_dict["instructions"] = sys_msgs[0]["content"]
+            payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            text = _parse_responses_text(data)
+            if text:
+                self.token.emit(text)
+        else:
+            # Standard OpenAI — Chat Completions with streaming
+            payload = json.dumps({
+                "model": _active_model,
+                "stream": True,
+                "messages": _history_to_openai(self.messages),
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for line in resp:
+                    line = line.strip()
+                    if not line or line == b"data: [DONE]":
+                        continue
+                    if line.startswith(b"data: "):
+                        line = line[6:]
+                    try:
+                        chunk = json.loads(line)
+                        content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if content:
+                            self.token.emit(content)
+                    except json.JSONDecodeError:
+                        pass
         self.finished.emit()
 
 
@@ -475,7 +582,7 @@ class _LocateThread(QThread):
         return _parse_locate_json(data.get("message", {}).get("content", "{}"))
 
     def _query_anthropic(self, img_b64: str) -> dict:
-        key = _api_keys.get("anthropic", "")
+        key = _get_key("anthropic") or ""
         payload = json.dumps({
             "model": _active_model,
             "max_tokens": 4096,
@@ -501,29 +608,38 @@ class _LocateThread(QThread):
         return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}"))
 
     def _query_openai(self, img_b64: str) -> dict:
-        key = _api_keys.get("openai", "")
-        payload = json.dumps({
-            "model": _active_model,
-            "messages": [
-                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                    {"type": "text", "text": _LOCATE_USER_PROMPT},
-                ]},
-            ],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OPENAI_API_URL, data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json(
-            data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        )
+        key = _get_key("openai") or ""
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
+        if "openai" in _api_urls:
+            payload = json.dumps({
+                "model": _get_openai_model(),
+                "instructions": LOCATE_SYSTEM_PROMPT,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
+                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
+                ]}],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(_parse_responses_text(data))
+        else:
+            payload = json.dumps({
+                "model": _active_model,
+                "messages": [
+                    {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": _LOCATE_USER_PROMPT},
+                    ]},
+                ],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            )
 
 
 
@@ -553,7 +669,7 @@ class _LocateTileThread(QThread):
         self.dilate_ksize = dilate_ksize
         self._provider = _get_provider(_active_model)
         self._model = _active_model
-        self._key = _api_keys.get(self._provider, "")
+        self._key = _get_key(self._provider) or ""
 
     def run(self):
         try:
@@ -671,28 +787,37 @@ class _LocateTileThread(QThread):
         return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}")).get("features", [])
 
     def _query_openai(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                    {"type": "text", "text": _LOCATE_USER_PROMPT},
-                ]},
-            ],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OPENAI_API_URL, data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._key}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json(
-            data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        ).get("features", [])
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
+        if "openai" in _api_urls:
+            payload = json.dumps({
+                "model": _get_openai_model(),
+                "instructions": LOCATE_SYSTEM_PROMPT,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
+                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
+                ]}],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
+        else:
+            payload = json.dumps({
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": _LOCATE_USER_PROMPT},
+                    ]},
+                ],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            ).get("features", [])
 
     @staticmethod
     def _dedup(features: list, iou_thresh: float = 0.3) -> list:
@@ -717,7 +842,7 @@ class _ChatTab(QWidget):
         self._attached_images = []
         self._assistant_reply = ""
         self._init_ui()
-        self._check_status()
+        self._set_ready()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -741,23 +866,9 @@ class _ChatTab(QWidget):
         description.setStyleSheet("color: #666; padding: 5px;")
         layout.addWidget(description)
 
-        status_row = QHBoxLayout()
-        self.status_label = QLabel("Checking Ollama...")
+        self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        status_row.addWidget(self.status_label, 1)
-        self.download_btn = QPushButton(f"Download {_active_model}")
-        self.download_btn.setVisible(False)
-        self.download_btn.clicked.connect(self._start_pull)
-        status_row.addWidget(self.download_btn)
-        layout.addLayout(status_row)
-
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setVisible(False)
-        self.log_box.setFixedHeight(120)
-        self.log_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.log_box.setStyleSheet("font-family: monospace; font-size: 11px;")
-        layout.addWidget(self.log_box)
+        layout.addWidget(self.status_label)
 
         self.chat_area = QTextEdit()
         self.chat_area.setReadOnly(True)
@@ -790,104 +901,13 @@ class _ChatTab(QWidget):
         self.input_widget.setVisible(False)
         layout.addWidget(self.input_widget)
 
-        # cloud API key entry (shown only when provider is cloud and key not found)
-        self._key_widget = QWidget()
-        key_row = QHBoxLayout(self._key_widget)
-        key_row.setContentsMargins(0, 4, 0, 0)
-        self._key_label = QLabel("API Key:")
-        key_row.addWidget(self._key_label)
-        self._key_input = QLineEdit()
-        self._key_input.setPlaceholderText("Paste your API key here...")
-        self._key_input.setEchoMode(QLineEdit.Password)
-        key_row.addWidget(self._key_input, 1)
-        self._key_gpg_btn = QPushButton("Load from GPG")
-        self._key_gpg_btn.setToolTip("Try to decrypt ~/.private.env.gpg and load key automatically")
-        self._key_gpg_btn.clicked.connect(self._try_gpg)
-        key_row.addWidget(self._key_gpg_btn)
-        self._key_save_btn = QPushButton("Use Key")
-        self._key_save_btn.clicked.connect(self._save_key)
-        key_row.addWidget(self._key_save_btn)
-        self._key_widget.setVisible(False)
-        layout.addWidget(self._key_widget)
-
     def refresh_model(self):
-        self.download_btn.setText(f"Download {_active_model}")
-        self.download_btn.setVisible(False)
-        self._key_widget.setVisible(False)
-        self.chat_area.setVisible(False)
-        self.file_btn.setVisible(False)
-        self.input_widget.setVisible(False)
         self._history.clear()
-        self._check_status()
-
-    def _check_status(self):
-        provider = _get_provider(_active_model)
-        if provider == "ollama":
-            self._check_ollama_status()
-        else:
-            self._check_cloud_status(provider)
-
-    def _check_ollama_status(self):
-        if not shutil.which("ollama"):
-            self.status_label.setText(
-                "Ollama is not installed. Install it from https://ollama.com and restart."
-            )
-            self.status_label.setStyleSheet("color: #c0392b; padding: 5px;")
-            return
-        try:
-            result = subprocess.run(
-                ["ollama", "list"], capture_output=True, text=True, timeout=5
-            )
-            if _active_model in result.stdout:
-                self._set_ready()
-            else:
-                self.status_label.setText(f"Model {_active_model} is not downloaded yet.")
-                self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
-                self.download_btn.setVisible(True)
-        except Exception as e:
-            self.status_label.setText(f"Could not reach Ollama: {e}")
-            self.status_label.setStyleSheet("color: #c0392b; padding: 5px;")
-
-    def _check_cloud_status(self, provider: str):
-        key = _get_key(provider)
-        if key:
-            self._set_ready()
-        else:
-            provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
-            env_var = _ENV_VAR[provider]
-            self.status_label.setText(
-                f"No {env_var} found. Click 'Load from GPG' or paste your {provider_name} key below."
-            )
-            self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
-            self._key_label.setText(f"{provider_name} API Key:")
-            self._key_widget.setVisible(True)
-
-    def _try_gpg(self):
-        provider = _get_provider(_active_model)
-        key = _try_load_key(provider)
-        if key:
-            self._set_ready()
-        else:
-            self.status_label.setText(
-                "GPG decrypt did not find the key. Enter it manually below."
-            )
-            self.status_label.setStyleSheet("color: #e67e22; padding: 5px;")
-
-    def _save_key(self):
-        provider = _get_provider(_active_model)
-        key = self._key_input.text().strip()
-        if not key:
-            return
-        _api_keys[provider] = key
-        self._key_input.clear()
         self._set_ready()
 
     def _set_ready(self):
-        self.status_label.setText(f"Model {_active_model} is ready.")
+        self.status_label.setText(f"Model: {_active_model}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 5px;")
-        self.download_btn.setVisible(False)
-        self._key_widget.setVisible(False)
-        self.log_box.setVisible(False)
         self.chat_area.setVisible(True)
         self.file_btn.setVisible(True)
         self.input_widget.setVisible(True)
@@ -908,29 +928,6 @@ class _ChatTab(QWidget):
             self.file_btn.setText(f"Attach Image  [{names}]")
         else:
             self.file_btn.setText("Attach Image")
-
-    def _start_pull(self):
-        self.download_btn.setEnabled(False)
-        self.log_box.clear()
-        self.log_box.setVisible(True)
-        self.status_label.setText(f"Downloading {_active_model}... (this may take a few minutes)")
-        self.status_label.setStyleSheet("color: #2980b9; padding: 5px;")
-        self._pull_thread = _PullThread()
-        self._pull_thread.log.connect(self._append_log)
-        self._pull_thread.finished.connect(self._on_pull_finished)
-        self._pull_thread.start()
-
-    def _append_log(self, line):
-        self.log_box.append(line)
-        self.log_box.verticalScrollBar().setValue(self.log_box.verticalScrollBar().maximum())
-
-    def _on_pull_finished(self, success):
-        self.download_btn.setEnabled(True)
-        if success:
-            self._set_ready()
-        else:
-            self.status_label.setText("Download failed. Check the log above.")
-            self.status_label.setStyleSheet("color: #c0392b; padding: 5px;")
 
     def _send(self):
         raw = self.input_box.text().strip()
@@ -1122,7 +1119,7 @@ class _LocateTab(QWidget):
             )
             if _active_model not in result.stdout:
                 self.model_status.setText(
-                    f"{_active_model} not downloaded — use the Chat tab to download it first."
+                    f"{_active_model} not downloaded — use the Model tab to download it first."
                 )
                 self.model_status.setStyleSheet("color: #e67e22; padding: 4px;")
                 self._model_ok = False
@@ -1140,7 +1137,7 @@ class _LocateTab(QWidget):
         else:
             provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
             self.model_status.setText(
-                f"No API key for {provider_name} — configure it in the Chat tab first."
+                f"No API key for {provider_name} — configure it in the Model tab first."
             )
             self.model_status.setStyleSheet("color: #e67e22; padding: 4px;")
             self._model_ok = False
@@ -1285,6 +1282,185 @@ class _LocateTab(QWidget):
         self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
 
 
+# ── model selector tab ────────────────────────────────────────────────────────
+
+class _ModelTab(QWidget):
+    model_changed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pull_thread: "_PullThread | None" = None
+        self._radio_by_model: "dict[str, QRadioButton]" = {}
+        self._init_ui()
+        QTimer.singleShot(0, self._check_current)
+
+    def _init_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignTop)
+
+        self._btn_grp = QButtonGroup(self)
+        self._btn_grp.setExclusive(True)
+
+        sections = [
+            ("Local (Ollama)", "ollama"),
+            ("Anthropic", "anthropic"),
+            ("OpenAI", "openai"),
+        ]
+        for title, prov in sections:
+            box = QGroupBox(title)
+            bl = QVBoxLayout(box)
+            bl.setSpacing(2)
+            for model in KNOWN_MODELS:
+                if _get_provider(model) != prov:
+                    continue
+                rb = QRadioButton(model)
+                if model == _active_model:
+                    rb.setChecked(True)
+                rb.toggled.connect(lambda checked, m=model: checked and self._select(m))
+                bl.addWidget(rb)
+                self._btn_grp.addButton(rb)
+                self._radio_by_model[model] = rb
+            outer.addWidget(box)
+
+        custom_row = QHBoxLayout()
+        custom_row.addWidget(QLabel("Custom model:"))
+        self._custom = QLineEdit()
+        self._custom.setPlaceholderText("e.g. qwen2.5vl:14b or claude-opus-5")
+        self._custom.returnPressed.connect(self._use_custom)
+        custom_row.addWidget(self._custom, 1)
+        use_btn = QPushButton("Use")
+        use_btn.clicked.connect(self._use_custom)
+        custom_row.addWidget(use_btn)
+        outer.addLayout(custom_row)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        outer.addWidget(self._status)
+
+        self._key_widget = QWidget()
+        kr = QHBoxLayout(self._key_widget)
+        kr.setContentsMargins(0, 4, 0, 0)
+        self._key_label = QLabel("API Key:")
+        kr.addWidget(self._key_label)
+        self._key_input = QLineEdit()
+        self._key_input.setEchoMode(QLineEdit.Password)
+        self._key_input.setPlaceholderText("Paste API key here…")
+        kr.addWidget(self._key_input, 1)
+        save_btn = QPushButton("Use Key")
+        save_btn.clicked.connect(self._save_key)
+        kr.addWidget(save_btn)
+        self._key_widget.setVisible(False)
+        outer.addWidget(self._key_widget)
+
+        self._dl_btn = QPushButton(f"Download {_active_model}")
+        self._dl_btn.setVisible(False)
+        self._dl_btn.clicked.connect(self._start_pull)
+        outer.addWidget(self._dl_btn)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setVisible(False)
+        self._log.setFixedHeight(100)
+        self._log.setStyleSheet("font-family: monospace; font-size: 11px;")
+        outer.addWidget(self._log)
+
+        outer.addStretch()
+
+    def _select(self, model: str):
+        global _active_model
+        _active_model = model
+        self._dl_btn.setText(f"Download {model}")
+        self.model_changed.emit(model)
+        self._check_current()
+
+    def _use_custom(self):
+        m = self._custom.text().strip()
+        if m:
+            self._select(m)
+
+    def _check_current(self):
+        self._key_widget.setVisible(False)
+        self._dl_btn.setVisible(False)
+        self._log.setVisible(False)
+        provider = _get_provider(_active_model)
+        if provider == "ollama":
+            self._check_ollama()
+        else:
+            self._check_cloud(provider)
+
+    def _check_ollama(self):
+        if not shutil.which("ollama"):
+            self._set_status("Ollama not installed. Get it at https://ollama.com then restart.", "#c0392b")
+            return
+        try:
+            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=5)
+            if _active_model in result.stdout:
+                self._set_status(f"{_active_model} is ready.", "#27ae60")
+            else:
+                self._set_status(f"{_active_model} is not downloaded yet.", "#e67e22")
+                self._dl_btn.setVisible(True)
+        except Exception as exc:
+            self._set_status(f"Could not reach Ollama: {exc}", "#c0392b")
+
+    def _check_cloud(self, provider: str):
+        key, diag = _try_load_key(provider)
+        if key:
+            effective = _get_openai_model() if provider == "openai" else _active_model
+            extra = f" (gateway model: {effective})" if effective != _active_model else ""
+            self._set_status(f"{_active_model} is ready.{extra}", "#27ae60")
+        else:
+            provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
+            env_var = _ENV_VAR[provider]
+            msg = diag or f"No {env_var} found."
+            self._set_status(msg, "#e67e22")
+            self._key_label.setText(f"{provider_name} API Key:")
+            self._key_widget.setVisible(True)
+
+    def _save_key(self):
+        provider = _get_provider(_active_model)
+        key = self._key_input.text().strip()
+        if not key:
+            return
+        _api_keys[provider] = key
+        self._key_input.clear()
+        self._key_widget.setVisible(False)
+        self._set_status(f"{_active_model} is ready.", "#27ae60")
+
+    def _set_status(self, msg: str, color: str):
+        self._status.setText(msg)
+        self._status.setStyleSheet(f"color: {color}; padding: 5px;")
+
+    def _start_pull(self):
+        if self._pull_thread and self._pull_thread.isRunning():
+            return
+        self._dl_btn.setVisible(False)
+        self._log.clear()
+        self._log.setVisible(True)
+        self._set_status(f"Downloading {_active_model}…", "#e67e22")
+        self._pull_thread = _PullThread()
+        self._pull_thread.log.connect(self._log.append)
+        self._pull_thread.finished.connect(self._on_pull_done)
+        self._pull_thread.start()
+
+    def _on_pull_done(self, ok: bool):
+        if ok:
+            self._log.setVisible(False)
+            self._set_status(f"{_active_model} downloaded and ready.", "#27ae60")
+            self.model_changed.emit(_active_model)
+        else:
+            self._set_status("Download failed. See log above.", "#c0392b")
+            self._dl_btn.setVisible(True)
+
+    def refresh_model(self):
+        model = _active_model
+        if model in self._radio_by_model:
+            rb = self._radio_by_model[model]
+            if not rb.isChecked():
+                rb.setChecked(True)
+        self._dl_btn.setText(f"Download {model}")
+        self._check_current()
+
+
 # ── public widget ─────────────────────────────────────────────────────────────
 
 class LLMJsonMakerWidget(QWidget):
@@ -1294,26 +1470,17 @@ class LLMJsonMakerWidget(QWidget):
         layout.setContentsMargins(4, 4, 4, 0)
         layout.setSpacing(4)
 
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model:"))
-        self._model_combo = QComboBox()
-        self._model_combo.setEditable(True)
-        for m in KNOWN_MODELS:
-            self._model_combo.addItem(m)
-        self._model_combo.setCurrentText(MODEL)
-        self._model_combo.setToolTip(
-            "Select or type a model name. Changes take effect on the next send or locate."
-        )
-        self._model_combo.currentTextChanged.connect(self._on_model_changed)
-        model_row.addWidget(self._model_combo, 1)
-        layout.addLayout(model_row)
-
-        tabs = QTabWidget()
+        self._model_tab = _ModelTab()
         self._chat_tab = _ChatTab()
         self._locate_tab = _LocateTab()
+
+        tabs = QTabWidget()
+        tabs.addTab(self._model_tab, "Model")
         tabs.addTab(self._chat_tab, "Chat")
         tabs.addTab(self._locate_tab, "Feature Locator")
         layout.addWidget(tabs)
+
+        self._model_tab.model_changed.connect(self._on_model_changed)
 
     def _on_model_changed(self, text: str) -> None:
         global _active_model
