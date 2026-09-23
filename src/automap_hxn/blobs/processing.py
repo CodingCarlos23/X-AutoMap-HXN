@@ -49,28 +49,88 @@ def _union_overlap(u1, u2):
     return iou, frac1, frac2
 
 
-def _dedup_unions(union_objects, overlap_thresh):
-    """Remove redundant unions — keeps larger box when:
-    - IoU > overlap_thresh, OR
-    - the smaller union is fully contained inside the larger one.
+def _merge_two_unions(u1, u2):
+    """Return a new union box that is the bounding box of u1 and u2 in both pixel and real space."""
+    cx1, cy1 = u1['center']
+    l1 = u1['length'] / 2
+    cx2, cy2 = u2['center']
+    l2 = u2['length'] / 2
+
+    px_x1 = min(cx1 - l1, cx2 - l2)
+    px_x2 = max(cx1 + l1, cx2 + l2)
+    px_y1 = min(cy1 - l1, cy2 - l2)
+    px_y2 = max(cy1 + l1, cy2 + l2)
+    new_length = float(max(px_x2 - px_x1, px_y2 - px_y1))
+    new_cx = (px_x1 + px_x2) / 2
+    new_cy = (px_y1 + px_y2) / 2
+    new_area = new_length * new_length
+
+    tl1 = u1['real_top_left_um']
+    br1 = u1['real_bottom_right_um']
+    tl2 = u2['real_top_left_um']
+    br2 = u2['real_bottom_right_um']
+    rx1 = min(tl1[0], tl2[0])
+    rx2 = max(br1[0], br2[0])
+    ry1 = min(tl1[1], tl2[1])
+    ry2 = max(br1[1], br2[1])
+    real_cx = (rx1 + rx2) / 2
+    real_cy = (ry1 + ry2) / 2
+    real_lx = rx2 - rx1
+    real_ly = ry2 - ry1
+
+    return {
+        'center': [new_cx, new_cy], 'length': new_length, 'area': new_area,
+        'image_center': [new_cx, new_cy], 'image_length': new_length, 'image_area_px²': new_area,
+        'real_center_um': [real_cx, real_cy],
+        'real_size_um': [real_lx, real_ly],
+        'real_area_um²': real_lx * real_ly,
+        'real_top_left_um': [rx1, ry1],
+        'real_bottom_right_um': [rx2, ry2],
+    }
+
+
+def _merge_unions(union_objects, overlap_thresh):
+    """Iteratively merge union boxes whose IoU exceeds overlap_thresh into one encompassing box.
+
+    Repeats until every remaining pair is under the threshold, so chains of
+    3+ overlapping boxes collapse fully in successive passes.
     """
     if not union_objects:
         return union_objects
-    sorted_keys = sorted(union_objects, key=lambda k: union_objects[k]['area'], reverse=True)
-    kept = []
-    for k in sorted_keys:
-        u = union_objects[k]
-        discard = False
-        for j in kept:
-            v = union_objects[j]
-            iou, frac_u, frac_v = _union_overlap(u, v)
-            # u is the smaller one (sorted desc); frac_u = how much of u is inside v
-            if frac_u >= 0.9 or iou > overlap_thresh:
-                discard = True
-                break
-        if not discard:
-            kept.append(k)
-    return {new_idx + 1: union_objects[k] for new_idx, k in enumerate(kept)}
+
+    boxes = list(union_objects.values())
+    pass_num = 0
+    total_merges = 0
+
+    changed = True
+    while changed:
+        changed = False
+        pass_num += 1
+        new_boxes = []
+        used = set()
+
+        for i in range(len(boxes)):
+            if i in used:
+                continue
+            current = boxes[i]
+            for j in range(i + 1, len(boxes)):
+                if j in used:
+                    continue
+                iou, _, _ = _union_overlap(current, boxes[j])
+                if iou > overlap_thresh:
+                    current = _merge_two_unions(current, boxes[j])
+                    used.add(j)
+                    changed = True
+                    total_merges += 1
+            used.add(i)
+            new_boxes.append(current)
+        boxes = new_boxes
+
+    if total_merges:
+        print(f"[UNION] Merged {total_merges} overlapping pair(s) over {pass_num} pass(es) "
+              f"(IoU thresh={overlap_thresh}) → {len(boxes)} box(es) remain")
+
+    return {idx + 1: box for idx, box in enumerate(boxes)}
 
 
 def find_union_blobs(blobs, microns_per_pixel_x, microns_per_pixel_y, true_origin_x, true_origin_y, overlap_thresh=0.5):
@@ -127,10 +187,10 @@ def find_union_blobs(blobs, microns_per_pixel_x, microns_per_pixel_y, true_origi
         print(f"[UNION] 2-element pairs checked: {len(reds) * len(greens)}, raw unions before dedup: {len(union_objects)}")
 
     before = len(union_objects)
-    union_objects = _dedup_unions(union_objects, overlap_thresh)
+    union_objects = _merge_unions(union_objects, overlap_thresh)
     after = len(union_objects)
     if before != after:
-        print(f"[UNION] Dedup removed {before - after} redundant unions ({before} → {after}, IoU thresh={overlap_thresh}, containment always on)")
+        print(f"[UNION] {before} raw union(s) → {after} after merging (IoU thresh={overlap_thresh})")
 
     return union_objects
 
