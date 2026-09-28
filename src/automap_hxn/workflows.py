@@ -266,7 +266,8 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     except Exception as e:
                         print(f"[MOSAIC] DB check failed: {e}")
                 if scan_id is None:
-                    scan_id = tile_params.get('scan_id')
+                    base_id = int(tile_params.get('scan_params', {}).get('scan_id'))
+                    scan_id = base_id + (tile_num - 1)
 
                 out_dir = os.path.join(data_wd, f"automap_{scan_id}")
                 os.makedirs(out_dir, exist_ok=True)

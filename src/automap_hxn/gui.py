@@ -48,6 +48,7 @@ from .blobs.processing import find_union_blobs
 from .json_maker import JSONMakerWidget
 from .coarse_scan_widget import CoarseScanWidget
 from .llm_json_maker import LLMJsonMakerWidget
+from .live_scan_viewer import LiveScanViewerWidget
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -261,6 +262,9 @@ class MainWindow(QWidget):
 
         self.coarse_scan_tab = CoarseScanWidget()
         self.tab_widget.addTab(self.coarse_scan_tab, "Area Scan")
+
+        self.live_scan_tab = LiveScanViewerWidget()
+        self.tab_widget.addTab(self.live_scan_tab, "Live View")
 
         self.llm_json_maker_tab = LLMJsonMakerWidget()
         self.tab_widget.addTab(self.llm_json_maker_tab, "LLM JSON Maker")
