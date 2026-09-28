@@ -138,12 +138,6 @@ class CoarseScanWidget(QWidget):
             "  margin-top: 18px;"
             "  padding-top: 12px;"
             "}"
-            "QGroupBox::title {"
-            "  subcontrol-origin: margin;"
-            "  subcontrol-position: top left;"
-            "  left: 8px;"
-            "  top: 2px;"
-            "}"
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

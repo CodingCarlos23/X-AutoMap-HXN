@@ -73,6 +73,35 @@ not a command-line launcher: its execution call is commented out. Use
 are appropriate. A dedicated, safe simulation command is planned but is not
 yet provided.
 
+## Troubleshooting
+
+**Segmentation fault / core dump on startup**
+
+If the app crashes immediately with `Segmentation fault (core dumped)`, try these in order:
+
+```bash
+# 1. Reinstall the pixi environment (picks up any dependency changes)
+pixi install
+
+# 2. Rebuild the fontconfig cache (fixes crashes caused by a stale font cache
+#    after pixi modifies the environment)
+pixi run fc-cache -fv
+```
+
+Then run `pixi run automap` again. The font cache can go stale whenever `pixi install` swaps libraries in the environment, and a bad cache causes Qt to crash when rendering certain Unicode characters.
+
+**"No space left on device" / inotify limit**
+
+If you see `inotify_add_watch failed: No space left on device` before the crash, your system has hit the inotify watch limit (commonly caused by VS Code watching large directories). Raise it:
+
+```bash
+sudo sysctl fs.inotify.max_user_watches=524288
+```
+
+To persist across reboots: `echo "fs.inotify.max_user_watches=524288" | sudo tee /etc/sysctl.d/60-inotify.conf`
+
+---
+
 ## GUI Workflow
 
 1. **Load images**: Select a directory with XRF element TIFFs, pick 3 elements (mapped to RGB)

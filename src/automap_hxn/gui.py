@@ -252,9 +252,9 @@ class MainWindow(QWidget):
         _header_row.addWidget(_title_lbl)
         self.outer_layout.addLayout(_header_row)
 
+        self.tab_widget.addTab(self.automap_tab, "AutoMap")
         self.setup_widget = self._create_setup_screen()
         self.outer_layout.addWidget(self.setup_widget)
-        self.tab_widget.addTab(self.automap_tab, "AutoMap")
 
         self.json_maker_tab = self._create_json_maker_tab()
         self.tab_widget.addTab(self.json_maker_tab, "JSON Maker")
@@ -277,7 +277,7 @@ class MainWindow(QWidget):
 
         # --- Config section (mandatory) ---
         config_group = QGroupBox("Configuration")
-        config_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        config_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; }")
         config_layout = QVBoxLayout(config_group)
         config_layout.setContentsMargins(10, 20, 10, 10)
 
@@ -294,7 +294,7 @@ class MainWindow(QWidget):
 
         # --- Element mapping row ---
         elem_group = QGroupBox("Elements → TIFF Files")
-        elem_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        elem_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; }")
         elem_layout = QVBoxLayout(elem_group)
         elem_layout.setContentsMargins(10, 20, 10, 10)
         self.elem_mapping_label = QLabel("Load a config to see expected elements.")
@@ -305,7 +305,7 @@ class MainWindow(QWidget):
 
         # --- Directory + file list ---
         dir_group = QGroupBox("TIFF Directory")
-        dir_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; } QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 8px; top: 2px; }")
+        dir_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 18px; padding-top: 12px; }")
         dir_layout = QVBoxLayout(dir_group)
         dir_layout.setContentsMargins(10, 20, 10, 10)
 

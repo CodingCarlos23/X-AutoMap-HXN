@@ -6,11 +6,45 @@ import pandas as pd
 import cv2
 from pathlib import Path
 
-try:
-    from bluesky_queueserver_api.zmq import REManagerAPI
-    RM = REManagerAPI()
-except Exception:
-    RM = None
+class _LazyRM:
+    """Deferred REManagerAPI singleton.
+
+    REManagerAPI() spawns background polling threads immediately on
+    construction.  Doing that at module-import time races with Qt widget
+    initialisation and causes a segfault.  This wrapper delays construction
+    until the first attribute access (i.e. when a plan is actually submitted).
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_rm", None)
+        object.__setattr__(self, "_tried", False)
+
+    def _connect(self):
+        if object.__getattribute__(self, "_tried"):
+            return object.__getattribute__(self, "_rm")
+        object.__setattr__(self, "_tried", True)
+        try:
+            from bluesky_queueserver_api.zmq import REManagerAPI
+            rm = REManagerAPI()
+            object.__setattr__(self, "_rm", rm)
+            return rm
+        except Exception:
+            return None
+
+    def __getattr__(self, name):
+        rm = self._connect()
+        if rm is None:
+            raise RuntimeError(
+                "bluesky_queueserver_api is not available or the queue server "
+                "is not reachable."
+            )
+        return getattr(rm, name)
+
+    def __bool__(self):
+        return self._connect() is not None
+
+
+RM = _LazyRM()
 
 def wait_for_element_tiffs(element_list, watch_dir):
     tiff_paths = {}
