@@ -26,9 +26,9 @@ from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QGraphicsView, QGraphicsScene, QSizePolicy,
     QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem,
-    QScrollArea,
+    QSplitter, QTreeWidget, QTreeWidgetItem, QCheckBox, QGroupBox,
 )
-from qtpy.QtCore import Qt, QTimer, QRectF
+from qtpy.QtCore import Qt, QTimer, QRectF, QPoint
 from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
 
 
@@ -36,11 +36,14 @@ from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
 # Constants
 # ---------------------------------------------------------------------------
 
-CELL_SIZE = 220       # pixels — display size of each tile cell
-CELL_GAP = 14         # pixels — gap between cells
+CELL_SIZE = 220
+CELL_GAP = 14
 PLACEHOLDER_COLOR = QColor(55, 55, 60)
 BORDER_COLOR = QColor(90, 90, 100)
-BOX_COLOR = QColor(255, 255, 255)   # union box overlay color
+BOX_COLOR = QColor(255, 255, 255)
+HIGHLIGHT_COLOR = QColor(255, 220, 0)
+
+ELEM_COLORS = [QColor(255, 80, 80), QColor(80, 220, 80), QColor(80, 150, 255)]
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +74,7 @@ def _grid_dims_from_config(config: dict) -> tuple[int, int]:
 
 
 def _elem_list_from_config(config: dict) -> list[str]:
-    """Return the first element group from export_params.elem_list, e.g. ['Ca','Fe','S']."""
+    """Return the first element group from export_params.elem_list."""
     try:
         groups = config["export_params"]["elem_list"]
         return list(groups[0]) if groups else []
@@ -82,8 +85,7 @@ def _elem_list_from_config(config: dict) -> list[str]:
 def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
     """Load per-element grayscale TIFFs and composite to an RGB QPixmap.
 
-    Up to 3 elements are mapped R→G→B.  Returns (pixmap, tiff_width, tiff_height)
-    or (None, 0, 0) on failure.
+    Returns (pixmap, tiff_width, tiff_height) or (None, 0, 0) on failure.
     """
     try:
         channels = []
@@ -93,11 +95,15 @@ def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
                 arr = arr / arr.max()
             channels.append(arr)
 
-        # Pad to 3 channels if fewer than 3 elements
         while len(channels) < 3:
             channels.append(np.zeros_like(channels[0]))
 
         h, w = channels[0].shape
+        channels = [
+            ch if ch.shape == (h, w)
+            else np.array(Image.fromarray(ch).resize((w, h), Image.BILINEAR))
+            for ch in channels
+        ]
         rgb = np.stack(channels, axis=-1)
         rgb = (rgb * 255).astype(np.uint8)
 
@@ -126,22 +132,32 @@ def _load_union_boxes(results_dir: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Simple non-zoomable QGraphicsView for the grid canvas
+# QGraphicsView — forwards mouse events to the parent viewer
 # ---------------------------------------------------------------------------
 
 class _GridView(QGraphicsView):
-    def __init__(self, scene, parent=None):
+    def __init__(self, scene, live_viewer, parent=None):
         super().__init__(scene, parent)
+        self._live_viewer = live_viewer
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setBackgroundBrush(QBrush(QColor(30, 30, 35)))
+        self.setMouseTracking(True)
 
     def wheelEvent(self, event):
         factor = 1.20 if event.angleDelta().y() > 0 else 1 / 1.20
         self.scale(factor, factor)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._live_viewer.handle_hover(event, self.mapToScene(event.pos()))
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._live_viewer._hover_label.hide()
 
 
 # ---------------------------------------------------------------------------
@@ -157,18 +173,28 @@ class LiveScanViewerWidget(QWidget):
         self._watch_dir: Path | None = None
         self._n_cols: int = 0
         self._n_rows: int = 0
-        self._elements: list[str] = []          # e.g. ['Ca', 'Fe', 'S']
-        self._seen_tiles: set[str] = set()      # scan_ids already drawn
-        self._tile_order: list[str] = []        # arrival order → grid index
-        # scan_id → (grid_idx, tiff_w, results_dir) for tiles drawn without boxes yet
+        self._elements: list[str] = []
+        self._seen_tiles: set[str] = set()
+        self._tile_order: list[str] = []
         self._pending_boxes: dict[str, tuple[int, float, Path]] = {}
+
+        # Box and tile tracking
+        self._box_meta: list[dict] = []          # per-box: coords + scene_item ref
+        self._box_scene_items: list = []          # QGraphicsRectItem refs for toggle
+        self._tile_scene_pos: dict[int, tuple[float, float]] = {}
+        self._tile_highlight: QGraphicsRectItem | None = None
+        self._tile_list_items: dict[int, QTreeWidgetItem] = {}
+
+        # Selection state
+        self._selected_tile_idx: int | None = None
+        self._selected_box_meta_idx: int | None = None
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll)
 
         self._scene = QGraphicsScene(self)
-        self._placeholder_items: dict[int, list] = {}  # idx → [rect, text_label]
+        self._placeholder_items: dict[int, list] = {}
 
         self._setup_ui()
 
@@ -181,7 +207,7 @@ class LiveScanViewerWidget(QWidget):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        # --- Control bar ---
+        # Control bar
         ctrl = QHBoxLayout()
         ctrl.setSpacing(8)
 
@@ -211,15 +237,95 @@ class LiveScanViewerWidget(QWidget):
 
         root.addLayout(ctrl)
 
-        # --- Status bar ---
+        # Status bar
         self._status_lbl = QLabel("Load a config and select a directory to begin.")
         self._status_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
         root.addWidget(self._status_lbl)
 
-        # --- Canvas ---
+        # Floating hover tooltip
+        self._hover_label = QLabel(self)
+        self._hover_label.setWindowFlags(Qt.ToolTip)
+        self._hover_label.setStyleSheet(
+            "QLabel { background: #2a2a2e; color: #eee; border: 1px solid #555; "
+            "border-radius: 4px; padding: 6px; font-size: 12px; }"
+        )
+        self._hover_label.hide()
+
+        # Splitter: canvas (left) | panel (right)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
         self._view = _GridView(self._scene, self)
         self._view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        root.addWidget(self._view, 1)
+        splitter.addWidget(self._view)
+
+        right_panel = self._build_right_panel()
+        splitter.addWidget(right_panel)
+        splitter.setSizes([800, 220])
+
+        root.addWidget(splitter, 1)
+
+    def _build_right_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(180)
+        panel.setMaximumWidth(280)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(10)
+
+        # Element legend
+        legend_group = QGroupBox("Elements")
+        legend_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #ccc; "
+            "margin-top: 14px; padding-top: 8px; }"
+        )
+        legend_layout = QVBoxLayout(legend_group)
+        legend_layout.setSpacing(4)
+        self._legend_labels: list[QLabel] = []
+        for color in ELEM_COLORS:
+            lbl = QLabel("● —")
+            lbl.setStyleSheet(
+                f"color: rgb({color.red()},{color.green()},{color.blue()}); "
+                "font-size: 12px;"
+            )
+            legend_layout.addWidget(lbl)
+            self._legend_labels.append(lbl)
+        layout.addWidget(legend_group)
+
+        # Toggle: union boxes
+        self._boxes_checkbox = QCheckBox("Union Boxes")
+        self._boxes_checkbox.setChecked(True)
+        self._boxes_checkbox.setStyleSheet("color: #ccc; font-size: 12px;")
+        self._boxes_checkbox.stateChanged.connect(self._on_toggle_boxes)
+        layout.addWidget(self._boxes_checkbox)
+
+        # Tile tree
+        tiles_group = QGroupBox("Tiles")
+        tiles_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #ccc; "
+            "margin-top: 14px; padding-top: 8px; }"
+        )
+        tiles_layout = QVBoxLayout(tiles_group)
+        tiles_layout.setContentsMargins(4, 4, 4, 4)
+        self._tile_tree = QTreeWidget()
+        self._tile_tree.setHeaderHidden(True)
+        self._tile_tree.setRootIsDecorated(True)
+        self._tile_tree.setStyleSheet(
+            "QTreeWidget { background: #1e1e22; color: #ccc; border: none; "
+            "font-size: 11px; }"
+            "QTreeWidget::item { padding: 2px 2px; }"
+            "QTreeWidget::item:selected { background: #3a3a50; color: #fff; }"
+        )
+        self._tile_tree.itemClicked.connect(self._on_tree_item_clicked)
+        tiles_layout.addWidget(self._tile_tree)
+        layout.addWidget(tiles_group, 1)
+
+        # Stats
+        self._stats_lbl = QLabel("0 / 0 tiles\n0 boxes total")
+        self._stats_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(self._stats_lbl)
+
+        return panel
 
     # ------------------------------------------------------------------
     # Slot: load config
@@ -256,7 +362,8 @@ class LiveScanViewerWidget(QWidget):
         )
         self._config_lbl.setStyleSheet("")
 
-        # Auto-set watch directory from data_wd in the config
+        self._update_legend()
+
         data_wd = config.get("export_params", {}).get("data_wd", "")
         if data_wd:
             data_wd_path = Path(data_wd)
@@ -267,6 +374,19 @@ class LiveScanViewerWidget(QWidget):
 
         self._reset_grid()
         self._update_toggle_state()
+
+    def _update_legend(self):
+        for i, lbl in enumerate(self._legend_labels):
+            if i < len(self._elements):
+                color = ELEM_COLORS[i]
+                lbl.setText(f"● {self._elements[i]}")
+                lbl.setStyleSheet(
+                    f"color: rgb({color.red()},{color.green()},{color.blue()}); "
+                    "font-size: 12px;"
+                )
+            else:
+                lbl.setText("● —")
+                lbl.setStyleSheet("color: #444; font-size: 12px;")
 
     # ------------------------------------------------------------------
     # Slot: select directory
@@ -304,6 +424,151 @@ class LiveScanViewerWidget(QWidget):
         self._toggle_btn.setEnabled(ready)
 
     # ------------------------------------------------------------------
+    # Slot: toggle union box visibility
+    # ------------------------------------------------------------------
+
+    def _on_toggle_boxes(self, state):
+        visible = bool(state)
+        for item in self._box_scene_items:
+            item.setVisible(visible)
+
+    # ------------------------------------------------------------------
+    # Slot: tree item clicked
+    # ------------------------------------------------------------------
+
+    def _on_tree_item_clicked(self, item: QTreeWidgetItem, _column: int):
+        if item.parent() is None:
+            # Top-level item = tile
+            tile_idx = item.data(0, Qt.UserRole)
+            if tile_idx == self._selected_tile_idx:
+                self._deselect_tile()
+            else:
+                self._select_tile(tile_idx, item)
+        else:
+            # Child item = box
+            meta_idx = item.data(0, Qt.UserRole)
+            self._select_box(meta_idx)
+
+    def _select_tile(self, tile_idx: int, tree_item: QTreeWidgetItem):
+        # Collapse and restore highlight on previously selected tile
+        if self._selected_tile_idx is not None and self._selected_tile_idx != tile_idx:
+            prev_item = self._tile_list_items.get(self._selected_tile_idx)
+            if prev_item:
+                prev_item.setExpanded(False)
+        self._restore_box_highlight()
+        self._remove_tile_highlight()
+
+        self._selected_tile_idx = tile_idx
+        tree_item.setExpanded(True)
+
+        if tile_idx in self._tile_scene_pos:
+            x0, y0 = self._tile_scene_pos[tile_idx]
+            self._tile_highlight = self._scene.addRect(
+                x0 - 3, y0 - 3, CELL_SIZE + 6, CELL_SIZE + 6,
+                QPen(HIGHLIGHT_COLOR, 3),
+                QBrush(Qt.transparent),
+            )
+            self._view.centerOn(x0 + CELL_SIZE / 2, y0 + CELL_SIZE / 2)
+
+    def _deselect_tile(self):
+        self._restore_box_highlight()
+        self._remove_tile_highlight()
+        if self._selected_tile_idx is not None:
+            item = self._tile_list_items.get(self._selected_tile_idx)
+            if item:
+                item.setExpanded(False)
+        self._selected_tile_idx = None
+        self._tile_tree.clearSelection()
+
+    def _select_box(self, meta_idx: int):
+        self._restore_box_highlight()
+        self._selected_box_meta_idx = meta_idx
+        scene_item = self._box_meta[meta_idx].get("scene_item")
+        if scene_item:
+            pen = QPen(HIGHLIGHT_COLOR, 2, Qt.SolidLine)
+            pen.setCosmetic(True)
+            scene_item.setPen(pen)
+
+    def _restore_box_highlight(self):
+        if self._selected_box_meta_idx is not None:
+            scene_item = self._box_meta[self._selected_box_meta_idx].get("scene_item")
+            if scene_item:
+                pen = QPen(BOX_COLOR, 2, Qt.SolidLine)
+                pen.setCosmetic(True)
+                scene_item.setPen(pen)
+        self._selected_box_meta_idx = None
+
+    def _remove_tile_highlight(self):
+        if self._tile_highlight is not None:
+            self._scene.removeItem(self._tile_highlight)
+            self._tile_highlight = None
+
+    # ------------------------------------------------------------------
+    # Hover / tooltip
+    # ------------------------------------------------------------------
+
+    def handle_hover(self, event, scene_pos):
+        if not self._boxes_checkbox.isChecked() or not self._box_meta:
+            self._hover_label.hide()
+            return
+
+        for meta in self._box_meta:
+            rect = QRectF(meta["scene_x"], meta["scene_y"], meta["scene_w"], meta["scene_w"])
+            if rect.contains(scene_pos):
+                self._show_tooltip(event, self._format_box_tooltip(meta))
+                return
+
+        self._hover_label.hide()
+
+    def _show_tooltip(self, event, html: str):
+        self._hover_label.setText(html)
+        self._hover_label.adjustSize()
+        mouse_pos = self._view.mapTo(self, event.pos())
+        new_pos = QPoint(
+            mouse_pos.x() + 16,
+            mouse_pos.y() - self._hover_label.height() - 8,
+        )
+        self._hover_label.move(new_pos)
+        self._hover_label.show()
+
+    def _format_box_tooltip(self, meta: dict) -> str:
+        tile_idx = meta["tile_idx"]
+        col = tile_idx % self._n_cols
+        row = tile_idx // self._n_cols
+        box_idx = meta["box_idx"]
+        cx, cy = meta["cx_px"], meta["cy_px"]
+        side = meta["side_px"]
+        area_px = side ** 2
+
+        lines = [
+            f"<b>Tile {tile_idx + 1} (row {row + 1}, col {col + 1})</b><br>",
+            f"automap_{meta['scan_id']}<br>",
+            f"Union Box #{box_idx + 1}<br><br>",
+            f"Center: ({cx}, {cy}) px<br>",
+            f"Size: {side} × {side} px<br>",
+            f"Area: {area_px} px²",
+        ]
+
+        cal = (self._config or {}).get("calibration_params", {})
+        mpp_x = cal.get("microns_per_pixel_x")
+        mpp_y = cal.get("microns_per_pixel_y")
+        ox = cal.get("true_origin_x", 0)
+        oy = cal.get("true_origin_y", 0)
+        if mpp_x and mpp_y:
+            real_cx = cx * mpp_x + ox
+            real_cy = cy * mpp_y + oy
+            real_w = side * mpp_x
+            real_h = side * mpp_y
+            real_area = real_w * real_h
+            lines += [
+                f"<br><br>Real center: ({real_cx:.2f}, {real_cy:.2f}) µm<br>",
+                f"Real size: {real_w:.2f} × {real_h:.2f} µm<br>",
+                f"Real area: {real_area:.2f} µm²",
+            ]
+
+        return "".join(lines)
+
+    # ------------------------------------------------------------------
     # Grid management
     # ------------------------------------------------------------------
 
@@ -314,7 +579,15 @@ class LiveScanViewerWidget(QWidget):
         self._tile_order.clear()
         self._placeholder_items.clear()
         self._pending_boxes.clear()
+        self._box_meta.clear()
+        self._box_scene_items.clear()
+        self._tile_scene_pos.clear()
+        self._tile_list_items.clear()
+        self._tile_highlight = None
+        self._selected_tile_idx = None
+        self._selected_box_meta_idx = None
         self._scene.clear()
+        self._tile_tree.clear()
 
         n_cols, n_rows = self._n_cols, self._n_rows
         stride = CELL_SIZE + CELL_GAP
@@ -348,6 +621,7 @@ class LiveScanViewerWidget(QWidget):
             self._placeholder_items[idx] = [rect, lbl]
 
         self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+        self._update_stats()
 
     # ------------------------------------------------------------------
     # Polling
@@ -360,10 +634,16 @@ class LiveScanViewerWidget(QWidget):
         total = self._n_cols * self._n_rows
         elements = self._elements or ["Ca", "Fe", "S"]
 
-        # Find all automap_* tile directories
+        # Sort by numeric scan_id so tiles arrive in grid order (1000, 1001, 1002…)
+        def _scan_id_key(d: Path) -> int:
+            try:
+                return int(d.name.replace("automap_", ""))
+            except ValueError:
+                return 0
+
         tile_dirs = sorted(
             (d for d in self._watch_dir.glob("automap_*") if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
+            key=_scan_id_key,
         )
 
         for tile_dir in tile_dirs:
@@ -373,7 +653,6 @@ class LiveScanViewerWidget(QWidget):
             if len(self._tile_order) >= total:
                 break
 
-            # Tile is ready when all per-element TIFFs exist
             elem_paths = [
                 tile_dir / f"scan_{scan_id}_{elem}.tiff" for elem in elements
             ]
@@ -382,32 +661,32 @@ class LiveScanViewerWidget(QWidget):
 
             results_dir = tile_dir / f"automap_{scan_id}_results"
             idx = len(self._tile_order)
-            tiff_w = self._draw_tile(idx, elem_paths, results_dir)
+            tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir)
             self._seen_tiles.add(scan_id)
             self._tile_order.append(scan_id)
-            # If boxes weren't drawn yet (results not ready), queue for later
             if tiff_w > 0 and not _load_union_boxes(results_dir):
                 self._pending_boxes[scan_id] = (idx, tiff_w, results_dir)
 
-        # Check tiles that were drawn without boxes — fill them in once results land
         for scan_id, (idx, tiff_w, results_dir) in list(self._pending_boxes.items()):
             boxes = _load_union_boxes(results_dir)
             if boxes:
-                self._draw_boxes(idx, tiff_w, boxes)
+                self._draw_boxes(idx, scan_id, tiff_w, boxes)
                 del self._pending_boxes[scan_id]
 
         done = len(self._tile_order)
         self._status_lbl.setText(f"Watching…  {done} / {total} tiles complete")
+        self._update_stats()
+
         if done >= total and not self._pending_boxes:
             self._poll_timer.stop()
             self._toggle_btn.setText("Start Watching")
             self._status_lbl.setText(f"Scan complete — all {total} tiles received.")
 
     # ------------------------------------------------------------------
-    # Drawing a tile into the grid
+    # Drawing
     # ------------------------------------------------------------------
 
-    def _draw_tile(self, idx: int, elem_paths: list[Path], results_dir: Path) -> float:
+    def _draw_tile(self, idx: int, scan_id: str, elem_paths: list[Path], results_dir: Path) -> float:
         """Draw image + boxes for a tile. Returns tiff_w (0 on failure)."""
         n_cols = self._n_cols
         col = idx % n_cols
@@ -416,12 +695,12 @@ class LiveScanViewerWidget(QWidget):
         x0 = col * stride
         y0 = row * stride
 
-        # Remove placeholder rect and number label
+        self._tile_scene_pos[idx] = (x0, y0)
+
         if idx in self._placeholder_items:
             for item in self._placeholder_items.pop(idx):
                 self._scene.removeItem(item)
 
-        # Composite per-element TIFFs to RGB pixmap
         pm, tiff_w, tiff_h = _composite_to_pixmap(elem_paths, CELL_SIZE)
         if pm is None:
             return 0
@@ -430,21 +709,25 @@ class LiveScanViewerWidget(QWidget):
         pix_item.setPos(x0, y0)
         self._scene.addItem(pix_item)
 
-        # Border around the tile
         self._scene.addRect(
             x0, y0, pm.width(), pm.height(),
             QPen(BORDER_COLOR, 1),
             QBrush(Qt.transparent),
         )
 
-        # Draw boxes if results are already available
+        # Add top-level tree item (collapsed, no children yet)
+        tree_item = QTreeWidgetItem(self._tile_tree)
+        tree_item.setText(0, f"Tile {idx + 1}  (r{row + 1}, c{col + 1})")
+        tree_item.setData(0, Qt.UserRole, idx)
+        self._tile_list_items[idx] = tree_item
+
         boxes = _load_union_boxes(results_dir)
         if boxes:
-            self._draw_boxes(idx, tiff_w, boxes)
+            self._draw_boxes(idx, scan_id, tiff_w, boxes)
 
         return tiff_w
 
-    def _draw_boxes(self, idx: int, tiff_w: float, boxes: list[dict]):
+    def _draw_boxes(self, idx: int, scan_id: str, tiff_w: float, boxes: list[dict]):
         """Overlay union boxes onto an already-drawn tile cell."""
         col = idx % self._n_cols
         row = idx // self._n_cols
@@ -452,10 +735,65 @@ class LiveScanViewerWidget(QWidget):
         x0 = col * stride
         y0 = row * stride
         scale = CELL_SIZE / tiff_w
+        show = self._boxes_checkbox.isChecked()
+
         pen = QPen(BOX_COLOR, 2, Qt.SolidLine)
         pen.setCosmetic(True)
-        for box in boxes:
-            bx = (box["cx_px"] - box["side_px"] / 2) * scale + x0
-            by = (box["cy_px"] - box["side_px"] / 2) * scale + y0
-            bw = box["side_px"] * scale
-            self._scene.addRect(bx, by, bw, bw, pen)
+
+        tree_item = self._tile_list_items.get(idx)
+
+        for box_idx, box in enumerate(boxes):
+            cx_px = box["cx_px"]
+            cy_px = box["cy_px"]
+            side_px = box["side_px"]
+
+            bx = (cx_px - side_px / 2) * scale + x0
+            by = (cy_px - side_px / 2) * scale + y0
+            bw = side_px * scale
+
+            rect_item = self._scene.addRect(bx, by, bw, bw, pen)
+            rect_item.setVisible(show)
+            self._box_scene_items.append(rect_item)
+
+            meta_idx = len(self._box_meta)
+            self._box_meta.append({
+                "tile_idx": idx,
+                "box_idx": box_idx,
+                "scan_id": scan_id,
+                "cx_px": cx_px,
+                "cy_px": cy_px,
+                "side_px": side_px,
+                "scene_x": bx,
+                "scene_y": by,
+                "scene_w": bw,
+                "scene_item": rect_item,
+            })
+
+            # Add child item to tile's tree entry
+            if tree_item is not None:
+                child = QTreeWidgetItem(tree_item)
+                child.setText(0, f"Box #{box_idx + 1}  ({cx_px}, {cy_px}) px")
+                child.setData(0, Qt.UserRole, meta_idx)
+
+        # Update tile label with box count
+        if tree_item is not None:
+            n = len(boxes)
+            tree_item.setText(
+                0,
+                f"Tile {idx + 1}  (r{row + 1}, c{col + 1}) — {n} box{'es' if n != 1 else ''}"
+            )
+            # If this tile is currently selected, expand to show new children
+            if self._selected_tile_idx == idx:
+                tree_item.setExpanded(True)
+
+        self._update_stats()
+
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
+
+    def _update_stats(self):
+        total = self._n_cols * self._n_rows
+        done = len(self._tile_order)
+        boxes = len(self._box_meta)
+        self._stats_lbl.setText(f"{done} / {total} tiles\n{boxes} boxes total")

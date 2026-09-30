@@ -3,6 +3,7 @@ import tqdm
 import json
 import time
 import os
+from pathlib import Path
 from .queue import submit_and_export, submit_fine_scans_to_queue, run_fine_scans, wait_for_queue_done, build_coarse_scan_requests, export_xrf_roi_data, export_scan_params
 from .loading import load_and_queue, load_params_from_json
 from .utils import RM
@@ -199,6 +200,12 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
     fine_x = "dssx" if mll else "zpssx"
     fine_y = "dssy" if mll else "zpssy"
 
+    # Track the last coarse-scan ID used so the offline fallback can find the
+    # next available folder rather than assuming sequential IDs (fine scans
+    # between coarse tiles consume IDs, e.g. 1000 → 1006 → 1015).
+    _base_scan_id = int(tile_params.get('scan_params', {}).get('scan_id', 0) or 0)
+    _last_tile_scan_id = _base_scan_id - 1
+
     # 3. Iterate over the relative steps
     for y_rel in tqdm.tqdm(y_steps, desc="Y-axis"):
         for x_rel in tqdm.tqdm(x_steps, desc="X-axis"):
@@ -266,10 +273,55 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
                     except Exception as e:
                         print(f"[MOSAIC] DB check failed: {e}")
                 if scan_id is None:
-                    base_id = int(tile_params.get('scan_params', {}).get('scan_id'))
-                    scan_id = base_id + (tile_num - 1)
+                    # DB offline — require scan_id in config to locate folders.
+                    if not _base_scan_id:
+                        raise RuntimeError(
+                            "[MOSAIC] DB offline and no scan_id set in scan_params. "
+                            "Set scan_id in the JSON config to use offline folder detection."
+                        )
+                    # Find the next automap_* folder in data_wd with an ID
+                    # higher than the last tile — handles non-sequential IDs
+                    # where fine scans consume IDs in between coarse tiles.
+                    def _next_candidates():
+                        return sorted(
+                            int(d.name.replace("automap_", ""))
+                            for d in Path(data_wd).glob("automap_*")
+                            if d.is_dir()
+                            and d.name.replace("automap_", "").isdigit()
+                            and int(d.name.replace("automap_", "")) > _last_tile_scan_id
+                        )
+
+                    candidates = _next_candidates()
+                    while not candidates:
+                        if abort_event is not None and abort_event.is_set():
+                            print("[MOSAIC] Abort requested while waiting for next scan folder.")
+                            return
+                        print(
+                            f"[MOSAIC] Waiting for next scan ID folder... "
+                            f"(Tile {tile_num}/{total_tiles}, above ID {_last_tile_scan_id})",
+                            flush=True,
+                        )
+                        time.sleep(2)
+                        candidates = _next_candidates()
+
+                    scan_id = candidates[0]
+                    _last_tile_scan_id = scan_id
 
                 out_dir = os.path.join(data_wd, f"automap_{scan_id}")
+                _out_path = Path(out_dir)
+                if not _out_path.exists():
+                    print(
+                        f"[MOSAIC] Waiting for automap_{scan_id} "
+                        f"(Tile {tile_num}/{total_tiles}, scan_id={scan_id})...",
+                        flush=True,
+                    )
+                    while not _out_path.exists():
+                        if abort_event is not None and abort_event.is_set():
+                            print("[MOSAIC] Abort requested while waiting for scan folder.")
+                            return
+                        time.sleep(2)
+                        print(f"[MOSAIC] Still waiting for automap_{scan_id}...", flush=True)
+                    print(f"[MOSAIC] automap_{scan_id} found — continuing.", flush=True)
                 os.makedirs(out_dir, exist_ok=True)
                 tile_params['out_dir'] = out_dir
 
