@@ -54,6 +54,8 @@ Behavior is controlled by `execution_params.mode` in the JSON config:
 - `offline` — analyzes existing TIFFs from a local folder; no beamline connection needed. Good for local testing.
 - `real` — submits coarse and fine scan plans to QueueServer. Beamline use only.
 
+## QueueServer Workflow (Beamline)
+
 For authorized beamline sessions that also need mosaic/piezo orchestration,
 `scripts/remote.py` wraps the headless workflow with those extra steps:
 
@@ -61,9 +63,12 @@ For authorized beamline sessions that also need mosaic/piezo orchestration,
 pixi run python scripts/remote.py
 ```
 
-> **Warning:** `scripts/remote.py` connects to Tiled and can submit scan plans
-> to QueueServer. Do not run it on a development machine or against a production
-> QueueServer without reviewing the configuration.
+> **Warning:** `scripts/remote.py` is intended for an authorized beamline
+> session. It connects to Tiled and runs the mosaic/headless workflow. Its
+> current configuration, `configs/initial_scan_sim.json`, is named like a
+> simulation file but presently sets `execution_params.mode` to `real`; it can
+> submit scan plans to QueueServer. Do not run it on a development machine or
+> against a production QueueServer without reviewing the configuration.
 
 ## Troubleshooting
 
