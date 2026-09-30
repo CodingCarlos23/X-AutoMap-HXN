@@ -33,10 +33,9 @@ class MosaicScanThread(QThread):
     finished = Signal(str)
     error = Signal(str)
 
-    def __init__(self, json_path, params, tiled_uri=None, parent=None):
+    def __init__(self, json_path, tiled_uri=None, parent=None):
         super().__init__(parent)
         self._json_path = json_path
-        self._params = params  # kwargs forwarded to mosaic_overlap_scan_auto_relative
         self._tiled_uri = tiled_uri
         self._abort_event = threading.Event()
 
@@ -47,26 +46,10 @@ class MosaicScanThread(QThread):
         try:
             from automap_hxn.workflows import mosaic_overlap_scan_auto_relative
 
-            params = dict(self._params)
-
-            # Auto-create Tiled client from URI if remote_seg is enabled
-            if params.get("remote_seg") and self._tiled_uri:
-                try:
-                    from tiled.client import from_uri
-                    params["tiled_client"] = from_uri(self._tiled_uri)
-                except Exception as err:
-                    print(f"[ERROR] Could not connect to Tiled at '{self._tiled_uri}': {err}")
-                    self.error.emit(
-                        f"Could not connect to Tiled at '{self._tiled_uri}':\n{err}\n\n"
-                        "Check tiled_uri in export_params or disable remote_seg."
-                    )
-                    return
-
             mosaic_overlap_scan_auto_relative(
                 beamline_params=self._json_path,
                 initial_scan_path=self._json_path,
                 abort_event=self._abort_event,
-                **params,
             )
             if self._abort_event.is_set():
                 self.finished.emit("Mosaic scan aborted — no more tiles will be queued.")
@@ -119,6 +102,7 @@ class CoarseScanWidget(QWidget):
     """
 
     log_message = Signal(str)
+    scan_started = Signal(str)   # emits json_path when scan thread launches
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -334,23 +318,6 @@ class CoarseScanWidget(QWidget):
     # Collect params from JSON (no widget overrides)
     # ------------------------------------------------------------------
 
-    def _collect_params(self):
-        mp = self._json_params.get("mosaic_params", {})
-        ref = mp.get("ref_scan_id")
-        return {
-            "xlen": mp.get("xlen", 100),
-            "ylen": mp.get("ylen", 100),
-            "overlap_per": mp.get("overlap_per", 0),
-            "step_size": mp.get("step_size", 0.25),
-            "dwell": mp.get("dwell", 0.01),
-            "mll": mp.get("mll", False),
-            "remote_seg": mp.get("remote_seg", True),
-            "followup_fine_scan": mp.get("followup_fine_scan", False),
-            "ref_scan_id": ref if ref else None,
-            "dets": None,
-            "tiled_client": None,
-        }
-
     def _validate(self):
         if not self._json_path:
             QMessageBox.warning(self, "Missing Input", "Please load a JSON config file first.")
@@ -367,7 +334,6 @@ class CoarseScanWidget(QWidget):
         payload = {
             "beamline_params": self._json_path,
             "initial_scan_path": self._json_path,
-            **self._collect_params(),
         }
         self._preview_text.setPlainText(json.dumps(payload, indent=2, default=str))
 
@@ -458,11 +424,12 @@ class CoarseScanWidget(QWidget):
 
         tiled_uri = self._json_params.get("export_params", {}).get("tiled_uri") or None
         self._scan_thread = MosaicScanThread(
-            self._json_path, self._collect_params(), tiled_uri=tiled_uri, parent=self
+            self._json_path, tiled_uri=tiled_uri, parent=self
         )
         self._scan_thread.finished.connect(self._on_scan_finished)
         self._scan_thread.error.connect(self._on_scan_error)
         self._scan_thread.start()
+        self.scan_started.emit(self._json_path)
 
         self._send_btn.setEnabled(False)
         self._send_btn.setText("Scanning…")

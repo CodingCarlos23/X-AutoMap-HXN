@@ -339,18 +339,22 @@ class LiveScanViewerWidget(QWidget):
         )
         if not path:
             return
+        self.load_config_from_path(path)
+
+    def load_config_from_path(self, path: str) -> bool:
+        """Load a JSON config by path. Returns True on success. Safe to call programmatically."""
         try:
             config = json.loads(Path(path).read_text())
         except Exception as exc:
             self._status_lbl.setText(f"Error reading config: {exc}")
-            return
+            return False
 
         n_cols, n_rows = _grid_dims_from_config(config)
         if n_cols == 0 or n_rows == 0:
             self._status_lbl.setText(
                 "Could not compute grid size — check mosaic_params in the config."
             )
-            return
+            return False
 
         self._config = config
         self._n_cols = n_cols
@@ -374,6 +378,18 @@ class LiveScanViewerWidget(QWidget):
 
         self._reset_grid()
         self._update_toggle_state()
+        return True
+
+    def start_watching(self):
+        """Start the poll timer if config and directory are ready."""
+        if self._config is None or self._watch_dir is None:
+            return
+        if self._poll_timer.isActive():
+            return
+        self._reset_grid()
+        self._poll_timer.start()
+        self._toggle_btn.setText("Stop")
+        self._status_lbl.setText("Watching…")
 
     def _update_legend(self):
         for i, lbl in enumerate(self._legend_labels):

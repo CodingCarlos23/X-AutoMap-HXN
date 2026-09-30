@@ -266,9 +266,18 @@ class MainWindow(QWidget):
         self.live_scan_tab = LiveScanViewerWidget()
         self.tab_widget.addTab(self.live_scan_tab, "Live View")
 
+        self.coarse_scan_tab.scan_started.connect(self._on_area_scan_started)
+
         self.llm_json_maker_tab = LLMJsonMakerWidget()
         self.tab_widget.addTab(self.llm_json_maker_tab, "LLM JSON Maker")
 
+
+    def _on_area_scan_started(self, json_path: str):
+        """Switch to Live View, load the same config, and start watching."""
+        live_view_idx = self.tab_widget.indexOf(self.live_scan_tab)
+        self.tab_widget.setCurrentIndex(live_view_idx)
+        if self.live_scan_tab.load_config_from_path(json_path):
+            self.live_scan_tab.start_watching()
 
     def _create_json_maker_tab(self):
         return JSONMakerWidget()

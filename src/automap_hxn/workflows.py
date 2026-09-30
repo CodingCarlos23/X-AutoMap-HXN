@@ -88,11 +88,8 @@ def headless_send_queue_coarse_scan(params_path, remote_seg=True, tiled_client =
                    tiled_client=tiled_client)
 
 
-def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overlap_per = 5, dwell = 0.01,
-                         step_size = 0.25, plot_elem = ["Cr"], mll = False,
-                         beamline_params=None, initial_scan_path=None,
-                         remote_seg=True, followup_fine_scan=False,tiled_client=None,
-                         ref_scan_id = None, abort_event=None):
+def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=None,
+                                      abort_event=None):
     '''
     # 1. Define the step size for the mosaic grid
     # Since you requested 25 um steps for the grid iteration:
@@ -120,6 +117,7 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
             raise
     _mode = str(_early_params.get('execution_params', {}).get('mode', 'simulation')).lower()
     _is_real_or_offline = _mode in ('real', 'offline')
+    ref_scan_id = _early_params.get('mosaic_params', {}).get('ref_scan_id')
 
     if _is_real_or_offline:
         status = RM.status()
@@ -174,8 +172,14 @@ def mosaic_overlap_scan_auto_relative(dets = None, ylen = 100, xlen = 100, overl
 
     _bp_mp = beamline_params_dict.get('mosaic_params', {})
     _bp_sp = beamline_params_dict.get('scan_params', {})
+    xlen = float(_bp_mp.get('xlen', 100))
+    ylen = float(_bp_mp.get('ylen', 100))
+    overlap_per = float(_bp_mp.get('overlap_per', 0))
+    step_size = float(_bp_mp.get('step_size', 0.25))
+    dwell = float(_bp_mp.get('dwell', 0.01))
+    mll = bool(_bp_mp.get('mll', False))
     grid_step = (_bp_mp.get("mot1_e") or _bp_sp.get("mot1_e")) - (_bp_mp.get("mot1_s") or _bp_sp.get("mot1_s"))
-    grid_step = grid_step*(1-(overlap_per*0.01))
+    grid_step = grid_step * (1 - (overlap_per * 0.01))
 
     # 2. Generate the relative step lists
     # This creates a list of positions starting at 0 up to the length
