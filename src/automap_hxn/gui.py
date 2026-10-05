@@ -1283,8 +1283,9 @@ class MainWindow(QWidget):
                 return
             self.progress_bar.hide()
             if self.app_state.selected_directory and self.app_state.precomputed_blobs:
-                output_path = Path(self.app_state.selected_directory) / "precomputed_blobs.pkl"
-                with open(output_path, "wb") as f:
+                cache_dir = Path(self.app_state.selected_directory) / "automap_cache"
+                cache_dir.mkdir(exist_ok=True)
+                with open(cache_dir / "precomputed_blobs.pkl", "wb") as f:
                     pickle.dump(self.app_state.precomputed_blobs, f)
             self.update_boxes()
 
@@ -1576,9 +1577,10 @@ f"Length: {ub['length']} px<br>"
             self.custom_box_number += 1
 
             if self.app_state.selected_directory:
-                output_path = Path(self.app_state.selected_directory) / "union_blobs.json"
+                cache_dir = Path(self.app_state.selected_directory) / "automap_cache"
+                cache_dir.mkdir(exist_ok=True)
                 serializable_dict = make_json_serializable(self.graphics_view.union_dict)
-                with open(output_path, "w") as f:
+                with open(cache_dir / "union_blobs.json", "w") as f:
                     json.dump(serializable_dict, f, indent=4)
 
             self.update_boxes()
@@ -1627,11 +1629,12 @@ f"Length: {ub['length']} px<br>"
             self.union_list_widget.addItem(item)
 
         if self.app_state.selected_directory:
-            output_path = Path(self.app_state.selected_directory) / "union_blobs.json"
+            cache_dir = Path(self.app_state.selected_directory) / "automap_cache"
+            cache_dir.mkdir(exist_ok=True)
             serializable_dict = make_json_serializable(self.graphics_view.union_dict)
-            with open(output_path, "w") as f:
+            with open(cache_dir / "union_blobs.json", "w") as f:
                 json.dump(serializable_dict, f, indent=4)
-        
+
         self.update_boxes()
 
     def send_to_list(self):

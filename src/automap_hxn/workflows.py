@@ -207,8 +207,9 @@ def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=No
     # Track the last coarse-scan ID used so the offline fallback can find the
     # next available folder rather than assuming sequential IDs (fine scans
     # between coarse tiles consume IDs, e.g. 1000 → 1006 → 1015).
-    _base_scan_id = int(tile_params.get('scan_params', {}).get('scan_id', 0) or 0)
-    _last_tile_scan_id = _base_scan_id - 1
+    _config_scan_id = tile_params.get('scan_params', {}).get('scan_id')
+    _base_scan_id = int(_config_scan_id) if _config_scan_id is not None else None
+    _last_tile_scan_id = (_base_scan_id - 1) if _base_scan_id is not None else -1
 
     # 3. Iterate over the relative steps
     for y_rel in tqdm.tqdm(y_steps, desc="Y-axis"):
@@ -278,7 +279,7 @@ def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=No
                         print(f"[MOSAIC] DB check failed: {e}")
                 if scan_id is None:
                     # DB offline — require scan_id in config to locate folders.
-                    if not _base_scan_id:
+                    if _base_scan_id is None:
                         raise RuntimeError(
                             "[MOSAIC] DB offline and no scan_id set in scan_params. "
                             "Set scan_id in the JSON config to use offline folder detection."

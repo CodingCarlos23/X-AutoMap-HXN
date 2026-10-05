@@ -90,7 +90,8 @@ def _merge_two_unions(u1, u2):
 
 
 def _merge_unions(union_objects, overlap_thresh):
-    """Iteratively merge union boxes whose IoU exceeds overlap_thresh into one encompassing box.
+    """Iteratively merge union boxes whose IoU exceeds overlap_thresh, or where
+    the smaller box is fully contained within the larger one.
 
     Repeats until every remaining pair is under the threshold, so chains of
     3+ overlapping boxes collapse fully in successive passes.
@@ -116,8 +117,8 @@ def _merge_unions(union_objects, overlap_thresh):
             for j in range(i + 1, len(boxes)):
                 if j in used:
                     continue
-                iou, _, _ = _union_overlap(current, boxes[j])
-                if iou > overlap_thresh:
+                iou, frac_i, frac_j = _union_overlap(current, boxes[j])
+                if iou > overlap_thresh or max(frac_i, frac_j) >= 0.8:
                     current = _merge_two_unions(current, boxes[j])
                     used.add(j)
                     changed = True

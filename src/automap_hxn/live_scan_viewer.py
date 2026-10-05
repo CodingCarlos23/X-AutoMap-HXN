@@ -123,9 +123,9 @@ def _load_union_boxes(results_dir: Path) -> list[dict]:
             data = json.loads(jf.read_text())
             for entry in data.values():
                 ic = entry.get("image_center")
-                il = entry.get("image_length")
+                il = entry.get("image_length") or (entry.get("image_radius", 0) * 2) or None
                 if ic and il:
-                    boxes.append({"cx_px": ic[0], "cy_px": ic[1], "side_px": il})
+                    boxes.append({"cx_px": ic[0], "cy_px": ic[1], "side_px": il, "label": entry.get("text")})
         except Exception as exc:
             print(f"[LiveScan] Could not read {jf}: {exc}")
     return boxes
@@ -556,10 +556,11 @@ class LiveScanViewerWidget(QWidget):
         side = meta["side_px"]
         area_px = side ** 2
 
+        box_label = meta.get("label") or f"Box #{box_idx + 1}"
         lines = [
             f"<b>Tile {tile_idx + 1} (row {row + 1}, col {col + 1})</b><br>",
             f"automap_{meta['scan_id']}<br>",
-            f"Union Box #{box_idx + 1}<br><br>",
+            f"{box_label}<br><br>",
             f"Center: ({cx}, {cy}) px<br>",
             f"Size: {side} × {side} px<br>",
             f"Area: {area_px} px²",
@@ -776,6 +777,7 @@ class LiveScanViewerWidget(QWidget):
                 "tile_idx": idx,
                 "box_idx": box_idx,
                 "scan_id": scan_id,
+                "label": box.get("label"),
                 "cx_px": cx_px,
                 "cy_px": cy_px,
                 "side_px": side_px,
