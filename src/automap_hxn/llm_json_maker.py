@@ -18,7 +18,7 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, QThread, Signal, QTimer
 from qtpy.QtGui import (
-    QTextCursor, QPixmap, QImage, QPainter, QPen, QColor, QFont,
+    QTextCursor, QPixmap, QImage, QPainter, QPen, QColor, QFont, QCursor,
 )
 
 
@@ -107,22 +107,29 @@ def _try_load_key(provider: str) -> "tuple[str | None, str]":
             if env_var in env and env[env_var]:
                 _api_keys[provider] = env[env_var]
                 return env[env_var], ""
-            # Fallback: AIFAPIM_API_KEY + AIFAPIM_HOST for OpenAI-compatible proxy
-            if provider == "openai":
-                apim_key = env.get("AIFAPIM_API_KEY", "").strip()
-                apim_host = env.get("AIFAPIM_HOST", "").strip()
-                if apim_key and apim_host:
-                    _api_keys[provider] = apim_key
-                    host = apim_host.rstrip("/")
-                    if not host.startswith("http"):
-                        host = f"https://{host}"
+            # Fallback: AIFAPIM_API_KEY + AIFAPIM_HOST for BNL proxy (OpenAI and Anthropic)
+            apim_key = env.get("AIFAPIM_API_KEY", "").strip()
+            apim_host = env.get("AIFAPIM_HOST", "").strip()
+            if apim_key and apim_host:
+                host = apim_host.rstrip("/")
+                if not host.startswith("http"):
+                    host = f"https://{host}"
+                _api_keys[provider] = apim_key
+                if provider == "openai":
                     _api_urls[provider] = f"{host}/openai/v1/responses"
                     codex_model = env.get("AIFAPIM_CODEX_MODEL", "").strip()
                     if codex_model and codex_model not in KNOWN_MODELS:
                         KNOWN_MODELS.append(codex_model)
                     if codex_model:
                         _api_keys["_apim_model"] = codex_model
-                    return apim_key, ""
+                elif provider == "anthropic":
+                    _api_urls[provider] = f"{host}/anthropic/v1/messages"
+                    claude_model = env.get("AIFAPIM_CLAUDE_MODEL", "").strip()
+                    if claude_model and claude_model not in KNOWN_MODELS:
+                        KNOWN_MODELS.append(claude_model)
+                    if claude_model:
+                        _api_keys["_apim_claude_model"] = claude_model
+                return apim_key, ""
             return None, (
                 f"GPG decrypted {expanded} but '{env_var}' was not found in the output.\n"
                 f"Keys present: {list(env.keys())}"
@@ -144,8 +151,15 @@ def _get_openai_url() -> str:
 
 
 def _get_openai_model() -> str:
-    """When using APIM, use the gateway's registered model name instead of the picker value."""
     return _api_keys.get("_apim_model") or _active_model
+
+
+def _get_anthropic_url() -> str:
+    return _api_urls.get("anthropic", ANTHROPIC_API_URL)
+
+
+def _get_anthropic_model() -> str:
+    return _api_keys.get("_apim_claude_model") or _active_model
 
 
 def _get_openai_auth_headers(key: str) -> dict:
@@ -248,6 +262,20 @@ LOCATE_SYSTEM_PROMPT = (
     "Include every distinct feature you can identify."
 )
 
+LOCATE_XRF_ROI_PROMPT = (
+    "You are analyzing a composite XRF (X-ray fluorescence) scan image where three element channels "
+    "are encoded as RGB: Red = element 1, Green = element 2, Blue = element 3. "
+    "Identify all regions where TWO OR MORE elements show elevated co-localized signal — "
+    "these appear as mixed colors (yellow, cyan, magenta, or white) rather than pure red, green, or blue. "
+    "These co-localized regions are the areas of interest (AOI) for follow-up high-resolution scanning. "
+    "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
+    '{"features": [{"id": 1, "label": "multi-element AOI", "x1": 0.10, "y1": 0.20, '
+    '"x2": 0.45, "y2": 0.60, "description": "co-localized signal from elements 1+2"}], "total_count": 1}\n'
+    "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
+    "where (0,0) is top-left and (1,1) is bottom-right. x1 < x2, y1 < y2. "
+    "Draw boxes tightly around regions of multi-element overlap. Ignore single-element-only regions."
+)
+
 
 BOX_COLORS = [
     QColor(255, 80, 80),
@@ -289,33 +317,14 @@ def _draw_feature_boxes(base_pixmap, features):
     painter.setRenderHint(QPainter.Antialiasing)
     pw, ph = result.width(), result.height()
 
-    font = QFont()
-    font.setPointSize(9)
-    font.setBold(True)
-    painter.setFont(font)
-
     for i, feat in enumerate(features):
         color = BOX_COLORS[i % len(BOX_COLORS)]
         x1 = int(max(0.0, min(1.0, float(feat.get("x1", 0)))) * pw)
         y1 = int(max(0.0, min(1.0, float(feat.get("y1", 0)))) * ph)
         x2 = int(max(0.0, min(1.0, float(feat.get("x2", 1)))) * pw)
         y2 = int(max(0.0, min(1.0, float(feat.get("y2", 1)))) * ph)
-
         painter.setPen(QPen(color, 2))
         painter.drawRect(x1, y1, x2 - x1, y2 - y1)
-
-        label = f"{feat.get('id', i + 1)}: {feat.get('label', '')}"
-        fx1 = max(0.0, min(1.0, float(feat.get("x1", 0))))
-        fy1 = max(0.0, min(1.0, float(feat.get("y1", 0))))
-        fx2 = max(0.0, min(1.0, float(feat.get("x2", 1))))
-        fy2 = max(0.0, min(1.0, float(feat.get("y2", 1))))
-        coords = f"({fx1:.2f},{fy1:.2f}) → ({fx2:.2f},{fy2:.2f})"
-        lx, ly = x1 + 3, max(y1 + 12, 12)
-        for text, dy in ((label, 0), (coords, 13)):
-            painter.setPen(QPen(Qt.black, 1))
-            painter.drawText(lx + 1, ly + dy + 1, text)
-            painter.setPen(QPen(color, 1))
-            painter.drawText(lx, ly + dy, text)
 
     painter.end()
     return result
@@ -327,26 +336,38 @@ class _ImageDisplay(QLabel):
     """QLabel that emits fractional (0–1) mouse coordinates over the displayed pixmap."""
     mouse_moved = Signal(float, float)
     mouse_left = Signal()
+    zoom_scrolled = Signal(int)  # +1 zoom in, -1 zoom out
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
 
-    def mouseMoveEvent(self, event):
+    def _frac_pos(self, event):
         pm = self.pixmap()
         if pm is None or pm.isNull():
-            return
+            return None, None
         ox = (self.width() - pm.width()) / 2
         oy = (self.height() - pm.height()) / 2
         px = event.x() - ox
         py = event.y() - oy
         if 0 <= px <= pm.width() and 0 <= py <= pm.height():
-            self.mouse_moved.emit(px / pm.width(), py / pm.height())
+            return px / pm.width(), py / pm.height()
+        return None, None
+
+    def mouseMoveEvent(self, event):
+        fx, fy = self._frac_pos(event)
+        if fx is not None:
+            self.mouse_moved.emit(fx, fy)
         else:
             self.mouse_left.emit()
 
     def leaveEvent(self, event):
         self.mouse_left.emit()
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta != 0:
+            self.zoom_scrolled.emit(1 if delta > 0 else -1)
 
 
 # ── background threads ────────────────────────────────────────────────────────
@@ -425,14 +446,14 @@ class _ChatThread(QThread):
         sys_msgs = [m for m in self.messages if m.get("role") == "system"]
         system = sys_msgs[0]["content"] if sys_msgs else ""
         payload = json.dumps({
-            "model": _active_model,
+            "model": _get_anthropic_model(),
             "max_tokens": 4096,
             "stream": True,
             "system": system,
             "messages": _history_to_anthropic(self.messages),
         }, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            ANTHROPIC_API_URL, data=payload,
+            _get_anthropic_url(), data=payload,
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": key,
@@ -544,10 +565,11 @@ class _LocateThread(QThread):
     result = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, image_path, dilate_ksize: int = 0):
+    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
+        self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
@@ -567,7 +589,7 @@ class _LocateThread(QThread):
         payload = json.dumps({
             "model": _active_model,
             "messages": [
-                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
             ],
             "stream": False,
@@ -584,9 +606,9 @@ class _LocateThread(QThread):
     def _query_anthropic(self, img_b64: str) -> dict:
         key = _get_key("anthropic") or ""
         payload = json.dumps({
-            "model": _active_model,
+            "model": _get_anthropic_model(),
             "max_tokens": 4096,
-            "system": LOCATE_SYSTEM_PROMPT,
+            "system": self._system_prompt,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -596,7 +618,7 @@ class _LocateThread(QThread):
             }],
         }, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            ANTHROPIC_API_URL, data=payload,
+            _get_anthropic_url(), data=payload,
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": key,
@@ -613,7 +635,7 @@ class _LocateThread(QThread):
         if "openai" in _api_urls:
             payload = json.dumps({
                 "model": _get_openai_model(),
-                "instructions": LOCATE_SYSTEM_PROMPT,
+                "instructions": self._system_prompt,
                 "input": [{"role": "user", "content": [
                     {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
                     {"type": "input_text", "text": _LOCATE_USER_PROMPT},
@@ -627,7 +649,7 @@ class _LocateThread(QThread):
             payload = json.dumps({
                 "model": _active_model,
                 "messages": [
-                    {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                    {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
                         {"type": "text", "text": _LOCATE_USER_PROMPT},
@@ -763,7 +785,7 @@ class _LocateTileThread(QThread):
 
     def _query_anthropic(self, img_b64: str) -> list:
         payload = json.dumps({
-            "model": self._model,
+            "model": _get_anthropic_model(),
             "max_tokens": 4096,
             "system": LOCATE_SYSTEM_PROMPT,
             "messages": [{
@@ -775,7 +797,7 @@ class _LocateTileThread(QThread):
             }],
         }, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            ANTHROPIC_API_URL, data=payload,
+            _get_anthropic_url(), data=payload,
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": self._key,
@@ -1004,7 +1026,12 @@ class _LocateTab(QWidget):
         self._locate_thread = None
         self._orig_pixmap = None
         self._dilated_pixmap = None
+        self._annotated_pixmap = None
+        self._features = []
+        self._zoom = 1.0
         self._model_ok = True
+        self._xrf_paths = [None, None, None]
+        self._xrf_elem_names = ["Element 1", "Element 2", "Element 3"]
         self._init_ui()
         self._check_model()
 
@@ -1012,9 +1039,49 @@ class _LocateTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignTop)
 
+        # Model + prompt header
+        header = QGroupBox()
+        header.setStyleSheet("QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 2px; padding: 4px; }")
+        header_layout = QVBoxLayout(header)
+        header_layout.setSpacing(2)
+        self._header_model_lbl = QLabel(f"Model: <b>{_active_model}</b>")
+        self._header_model_lbl.setStyleSheet("font-size: 12px;")
+        prompt_preview = LOCATE_SYSTEM_PROMPT[:120].rstrip() + "…"
+        self._header_prompt_lbl = QLabel(f"Prompt: {prompt_preview}")
+        self._header_prompt_lbl.setWordWrap(True)
+        self._header_prompt_lbl.setStyleSheet("font-size: 10px; color: #aaa;")
+        self._header_prompt_lbl.setToolTip(LOCATE_SYSTEM_PROMPT)
+        header_layout.addWidget(self._header_model_lbl)
+        header_layout.addWidget(self._header_prompt_lbl)
+        layout.addWidget(header)
+
         self.model_status = QLabel("")
         self.model_status.setWordWrap(True)
         layout.addWidget(self.model_status)
+
+        # Mode selector
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["Single Image", "XRF ROI (3 Elements)"])
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(self._mode_combo)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        # Floating hover tooltip
+        self._hover_tooltip = QLabel(self)
+        self._hover_tooltip.setWindowFlags(Qt.ToolTip)
+        self._hover_tooltip.setStyleSheet(
+            "QLabel { background: #1a1a1a; color: #f0f0f0; border: 1px solid #555;"
+            " border-radius: 6px; padding: 8px; font-size: 13px; }"
+        )
+        self._hover_tooltip.hide()
+
+        # --- Single Image mode controls ---
+        self._single_widget = QWidget()
+        single_layout = QVBoxLayout(self._single_widget)
+        single_layout.setContentsMargins(0, 0, 0, 0)
 
         pick_row = QHBoxLayout()
         self.pick_btn = QPushButton("Pick Image...")
@@ -1023,7 +1090,7 @@ class _LocateTab(QWidget):
         self.image_name_label = QLabel("No image selected")
         self.image_name_label.setStyleSheet("color: #888;")
         pick_row.addWidget(self.image_name_label, 1)
-        layout.addLayout(pick_row)
+        single_layout.addLayout(pick_row)
 
         dilate_row = QHBoxLayout()
         self._dilate_check = QCheckBox("Dilate image")
@@ -1039,7 +1106,7 @@ class _LocateTab(QWidget):
         self._kernel_spin.valueChanged.connect(self._on_dilate_changed)
         dilate_row.addWidget(self._kernel_spin)
         dilate_row.addStretch()
-        layout.addLayout(dilate_row)
+        single_layout.addLayout(dilate_row)
 
         tile_row = QHBoxLayout()
         self._tile_check = QCheckBox("Tile (4-quadrant)")
@@ -1049,7 +1116,31 @@ class _LocateTab(QWidget):
         )
         tile_row.addWidget(self._tile_check)
         tile_row.addStretch()
-        layout.addLayout(tile_row)
+        single_layout.addLayout(tile_row)
+        layout.addWidget(self._single_widget)
+
+        # --- XRF ROI mode controls ---
+        self._xrf_widget = QWidget()
+        self._xrf_widget.setVisible(False)
+        xrf_layout = QVBoxLayout(self._xrf_widget)
+        xrf_layout.setContentsMargins(0, 0, 0, 0)
+        xrf_layout.setSpacing(4)
+
+        colors = ["Red", "Green", "Blue"]
+        self._xrf_pick_btns = []
+        self._xrf_name_labels = []
+        for i, color in enumerate(colors):
+            row = QHBoxLayout()
+            btn = QPushButton(f"Pick {color} Channel (Element {i+1})...")
+            btn.clicked.connect(lambda _, idx=i: self._pick_xrf_image(idx))
+            lbl = QLabel("No file selected")
+            lbl.setStyleSheet("color: #888;")
+            row.addWidget(btn)
+            row.addWidget(lbl, 1)
+            xrf_layout.addLayout(row)
+            self._xrf_pick_btns.append(btn)
+            self._xrf_name_labels.append(lbl)
+        layout.addWidget(self._xrf_widget)
 
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
@@ -1061,14 +1152,24 @@ class _LocateTab(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
+        # Box toggle
+        box_toggle_row = QHBoxLayout()
+        self._show_boxes_check = QCheckBox("Show Boxes")
+        self._show_boxes_check.setChecked(True)
+        self._show_boxes_check.toggled.connect(self._on_boxes_toggled)
+        box_toggle_row.addWidget(self._show_boxes_check)
+        box_toggle_row.addStretch()
+        layout.addLayout(box_toggle_row)
+
         self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidgetResizable(False)
         self.scroll_area.viewport().setMouseTracking(True)
         self.img_display = _ImageDisplay()
         self.img_display.setAlignment(Qt.AlignCenter)
-        self.img_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.img_display.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.img_display.mouse_moved.connect(self._on_mouse_moved)
         self.img_display.mouse_left.connect(self._on_mouse_left)
+        self.img_display.zoom_scrolled.connect(self._on_zoom)
         self.scroll_area.setWidget(self.img_display)
         self.scroll_area.setVisible(False)
 
@@ -1146,9 +1247,79 @@ class _LocateTab(QWidget):
         self._model_ok = True
         self.model_status.setText("")
         self.model_status.setStyleSheet("")
+        self._header_model_lbl.setText(f"Model: <b>{_active_model}</b>")
         self._check_model()
         if self._image_path:
             self.locate_btn.setEnabled(self._model_ok)
+
+    def _on_mode_changed(self, index: int):
+        is_xrf = index == 1
+        self._single_widget.setVisible(not is_xrf)
+        self._xrf_widget.setVisible(is_xrf)
+        prompt = LOCATE_XRF_ROI_PROMPT if is_xrf else LOCATE_SYSTEM_PROMPT
+        self._header_prompt_lbl.setText(f"Prompt: {prompt[:120].rstrip()}…")
+        self._header_prompt_lbl.setToolTip(prompt)
+        self.locate_btn.setText("Find XRF Areas of Interest" if is_xrf else "Get Location of Features")
+        self._reset_image_state()
+        self.locate_btn.setEnabled(False)
+
+    def _reset_image_state(self):
+        self._orig_pixmap = None
+        self._dilated_pixmap = None
+        self._annotated_pixmap = None
+        self._features = []
+        self._zoom = 1.0
+        self.scroll_area.setVisible(False)
+        self.info_panel.setVisible(False)
+
+    def _pick_xrf_image(self, idx: int):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Select Element {idx+1} TIFF", "",
+            "TIFF Files (*.tif *.tiff);;All Files (*)"
+        )
+        if not path:
+            return
+        self._xrf_paths[idx] = path
+        self._xrf_name_labels[idx].setText(os.path.basename(path))
+        self._xrf_name_labels[idx].setStyleSheet("")
+        # Enable run button only when all 3 are selected
+        if all(self._xrf_paths) and self._model_ok:
+            self._build_xrf_composite_display()
+            self.locate_btn.setEnabled(True)
+
+    def _build_xrf_composite_display(self):
+        """Load 3 TIFFs, normalise each, composite as RGB, show in viewer."""
+        try:
+            channels = []
+            for p in self._xrf_paths:
+                arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                if arr is None:
+                    raise ValueError(f"Could not read {p}")
+                arr = arr.astype(np.float32)
+                mn, mx = arr.min(), arr.max()
+                if mx > mn:
+                    arr = (arr - mn) / (mx - mn)
+                channels.append((arr * 255).astype(np.uint8))
+            # Pad to same shape
+            h = max(c.shape[0] for c in channels)
+            w = max(c.shape[1] for c in channels)
+            padded = []
+            for c in channels:
+                p = np.zeros((h, w), dtype=np.uint8)
+                p[:c.shape[0], :c.shape[1]] = c
+                padded.append(p)
+            rgb = np.stack(padded, axis=-1)
+            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+            self._orig_pixmap = QPixmap.fromImage(qimg)
+            self._dilated_pixmap = None
+            self._annotated_pixmap = None
+            self._zoom = 1.0
+            self._show_pixmap(self._orig_pixmap)
+            self.scroll_area.setVisible(True)
+            self.info_panel.setVisible(True)
+        except Exception as e:
+            self.status_label.setText(f"Could not build composite: {e}")
+            self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
 
     def _pick_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1163,6 +1334,9 @@ class _LocateTab(QWidget):
         try:
             self._orig_pixmap, _, _ = _load_image_pixmap(path)
             self._dilated_pixmap = None
+            self._annotated_pixmap = None
+            self._features = []
+            self._zoom = 1.0
             self._update_display()
             self.scroll_area.setVisible(True)
             self.info_panel.setVisible(True)
@@ -1173,27 +1347,80 @@ class _LocateTab(QWidget):
         if self._model_ok:
             self.locate_btn.setEnabled(True)
 
+    def _current_pixmap(self):
+        if self._show_boxes_check.isChecked() and self._annotated_pixmap:
+            return self._annotated_pixmap
+        return self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+
     def _show_pixmap(self, pixmap):
-        max_w = max(400, self.scroll_area.width() - 20)
-        max_h = max(300, self.scroll_area.height() - 20)
-        scaled = pixmap.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        vp_w = max(400, self.scroll_area.viewport().width())
+        vp_h = max(300, self.scroll_area.viewport().height())
+        fit = pixmap.scaled(vp_w, vp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._base_w, self._base_h = fit.width(), fit.height()
+        w = max(1, int(self._base_w * self._zoom))
+        h = max(1, int(self._base_h * self._zoom))
+        scaled = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.img_display.setPixmap(scaled)
+        self.img_display.resize(scaled.width(), scaled.height())
+
+    def _on_zoom(self, direction: int):
+        viewport = self.scroll_area.viewport()
+        cursor_vp = viewport.mapFromGlobal(self.img_display.cursor().pos())
+        old_h = self.scroll_area.horizontalScrollBar().value()
+        old_v = self.scroll_area.verticalScrollBar().value()
+
+        old_zoom = self._zoom
+        self._zoom = max(0.25, min(8.0, self._zoom * (1.15 if direction > 0 else 1 / 1.15)))
+
+        pm = self._current_pixmap()
+        if pm:
+            self._show_pixmap(pm)
+
+        # Scroll so the point under the cursor stays fixed
+        ratio = self._zoom / old_zoom
+        new_h = int((old_h + cursor_vp.x()) * ratio - cursor_vp.x())
+        new_v = int((old_v + cursor_vp.y()) * ratio - cursor_vp.y())
+        self.scroll_area.horizontalScrollBar().setValue(max(0, new_h))
+        self.scroll_area.verticalScrollBar().setValue(max(0, new_v))
+
+    def _on_boxes_toggled(self, checked: bool):
+        pm = self._current_pixmap()
+        if pm:
+            self._show_pixmap(pm)
 
     def _run_locate(self):
-        if not self._image_path or (self._locate_thread and self._locate_thread.isRunning()):
+        if self._locate_thread and self._locate_thread.isRunning():
             return
-        self.locate_btn.setEnabled(False)
-        ksize = self._get_dilate_ksize()
-        use_tile = self._tile_check.isChecked()
-
-        if use_tile:
-            self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
-            self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize)
-            self._locate_thread.progress.connect(self._on_tile_progress)
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf:
+            if not all(self._xrf_paths):
+                return
+            self.locate_btn.setEnabled(False)
+            self.status_label.setText("Analyzing XRF composite... this may take 30–60 seconds.")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            # Save composite to a temp PNG for the thread to load
+            import tempfile
+            buf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            buf.close()
+            pm = self._orig_pixmap
+            if pm:
+                pm.save(buf.name, "PNG")
+            self._xrf_tmp_path = buf.name
+            self._locate_thread = _LocateThread(buf.name, dilate_ksize=0, system_prompt_override=LOCATE_XRF_ROI_PROMPT)
         else:
-            self.status_label.setText("Analyzing... this may take 30–60 seconds.")
-            self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize)
-        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            if not self._image_path:
+                return
+            self.locate_btn.setEnabled(False)
+            ksize = self._get_dilate_ksize()
+            use_tile = self._tile_check.isChecked()
+            if use_tile:
+                self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
+                self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize)
+                self._locate_thread.progress.connect(self._on_tile_progress)
+            else:
+                self.status_label.setText("Analyzing... this may take 30–60 seconds.")
+                self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize)
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
         self._locate_thread.error.connect(self._on_error)
         self._locate_thread.start()
@@ -1201,16 +1428,24 @@ class _LocateTab(QWidget):
     def _on_result(self, data):
         features = data.get("features", [])
         n = len(features)
+        self._features = features
 
-        stem = pathlib.Path(self._image_path).stem
-        json_path = pathlib.Path(self._image_path).with_name(stem + "_features.json")
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf and self._xrf_paths[0]:
+            ref = pathlib.Path(self._xrf_paths[0])
+            json_path = ref.with_name(ref.stem + "_xrf_roi_features.json")
+        else:
+            stem = pathlib.Path(self._image_path).stem
+            json_path = pathlib.Path(self._image_path).with_name(stem + "_features.json")
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
 
         base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
         if base and features:
-            annotated = _draw_feature_boxes(base, features)
-            self._show_pixmap(annotated)
+            self._annotated_pixmap = _draw_feature_boxes(base, features)
+            self._show_pixmap(self._annotated_pixmap)
+        else:
+            self._annotated_pixmap = None
 
         self._populate_info(features, json_path)
         self.locate_btn.setEnabled(True)
@@ -1225,7 +1460,14 @@ class _LocateTab(QWidget):
 
     def _populate_info(self, features, json_path):
         color_names = ["red", "blue", "green", "yellow", "purple", "cyan", "orange"]
-        lines = [f"Found {len(features)} feature(s)  —  {json_path.name}", ""]
+        prompt_preview = LOCATE_SYSTEM_PROMPT[:200].rstrip() + "…"
+        lines = [
+            f"Model: {_active_model}",
+            f"Prompt: {prompt_preview}",
+            "",
+            f"Found {len(features)} feature(s)  —  {json_path.name}",
+            "",
+        ]
         for i, feat in enumerate(features):
             color = color_names[i % len(color_names)]
             fid = feat.get("id", i + 1)
@@ -1255,21 +1497,45 @@ class _LocateTab(QWidget):
         if ksize > 0:
             if self._dilated_pixmap is None:
                 self._dilated_pixmap, _, _ = _load_image_pixmap(self._image_path, dilate_ksize=ksize)
-            self._show_pixmap(self._dilated_pixmap)
-        else:
-            self._show_pixmap(self._orig_pixmap)
+        pm = self._current_pixmap()
+        if pm:
+            self._show_pixmap(pm)
 
     def _on_mouse_moved(self, fx: float, fy: float) -> None:
         self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
-        self.coord_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; padding: 6px;"
-        )
+        self.coord_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 6px;")
+
+        # Hover tooltip: find if cursor is inside any feature bbox
+        hit = None
+        for feat in self._features:
+            if feat.get("x1", 0) <= fx <= feat.get("x2", 0) and feat.get("y1", 0) <= fy <= feat.get("y2", 0):
+                hit = feat
+                break
+
+        if hit:
+            fid = hit.get("id", "?")
+            label = hit.get("label", "")
+            desc = hit.get("description", "")
+            x1, y1, x2, y2 = hit.get("x1", 0), hit.get("y1", 0), hit.get("x2", 0), hit.get("y2", 0)
+            w_pct = (x2 - x1) * 100
+            h_pct = (y2 - y1) * 100
+            lines = [f"<b>Feature #{fid}</b>", label]
+            if desc:
+                lines.append(f"<i>{desc}</i>")
+            lines.append(f"bbox: ({x1:.3f}, {y1:.3f}) → ({x2:.3f}, {y2:.3f})")
+            lines.append(f"size: {w_pct:.1f}% × {h_pct:.1f}% of image")
+            self._hover_tooltip.setText("<br>".join(lines))
+            self._hover_tooltip.adjustSize()
+            gpos = QCursor.pos()
+            self._hover_tooltip.move(gpos.x() + 16, gpos.y() - self._hover_tooltip.height() - 4)
+            self._hover_tooltip.show()
+        else:
+            self._hover_tooltip.hide()
 
     def _on_mouse_left(self) -> None:
         self.coord_label.setText("X: —\nY: —")
-        self.coord_label.setStyleSheet(
-            "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
-        )
+        self.coord_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 6px; color: #888;")
+        self._hover_tooltip.hide()
 
     def _on_tile_progress(self, msg: str) -> None:
         self.status_label.setText(msg)
