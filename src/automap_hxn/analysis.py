@@ -493,34 +493,34 @@ def analyze_data_local(scan_id=None,
                 json.dump(make_json_serializable(all_boxes_formatted), f, indent=2)
             print(f"[ALL BOXES] Saved {len(all_boxes_formatted)} boxes → {all_boxes_json.name}")
 
-    # --- 5. Visualization ---
+        # --- Per-group TIFF visualizations ---
+        if tiff_paths:
+            group_blobs_vis = {}
+            for i, element in enumerate(elem_list):
+                if i >= len(COLOR_ORDER): break
+                orig = element_to_color.get(element)
+                if orig: group_blobs_vis[COLOR_ORDER[i]] = precomputed_blobs[orig]
+
+            create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name)
+            create_all_elements_tiff(tiff_paths, results_dir, elem_list, group_blobs_vis, group_name)
+
+            # For multi-element individual mode, also save a merged/deduped overlay
+            if not unions_only and len(elem_list) > 1:
+                group_fu = all_results.get('groups', {}).get(group_name, {}).get('formatted_unions', {})
+                if group_fu:
+                    create_merged_boxes_tiff(tiff_paths, group_fu, results_dir, elem_list, group_name)
+
+    # --- 5. Plot analysis results (all groups together, once) ---
     if tiff_paths:
-        group_blobs_vis = {}
-        for i, element in enumerate(elem_list):
-            if i >= len(COLOR_ORDER): break
-            orig = element_to_color.get(element)
-            if orig: group_blobs_vis[COLOR_ORDER[i]] = precomputed_blobs[orig]
-
-        create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name)
-        create_all_elements_tiff(tiff_paths, results_dir, elem_list, group_blobs_vis, group_name)
-
-        # For multi-element individual mode, also save a merged/deduped overlay
-        if not unions_only and len(elem_list) > 1:
-            group_fu = all_results.get('groups', {}).get(group_name, {}).get('formatted_unions', {})
-            if group_fu:
-                create_merged_boxes_tiff(tiff_paths, group_fu, results_dir, elem_list, group_name)
-
-        # Plot analysis results with bounding boxes
-        # Collect formatted unions for plotting
         formatted_unions_dict = {}
-        for elem_list in elem_list_of_lists:
-            group_name_plot = "".join(elem_list)
-            # Get formatted_unions from all_results
-            if 'groups' in all_results and group_name_plot in all_results['groups']:
-                formatted_unions_dict[group_name_plot] = all_results['groups'][group_name_plot]['formatted_unions']
+        for _grp_elems in elem_list_of_lists:
+            _gname = "".join(_grp_elems)
+            if 'groups' in all_results and _gname in all_results['groups']:
+                formatted_unions_dict[_gname] = all_results['groups'][_gname]['formatted_unions']
 
         if formatted_unions_dict:
-            plot_analysis_results(tiff_paths, elem_list, formatted_unions_dict, results_dir)
+            _last_elems = elem_list_of_lists[-1]
+            plot_analysis_results(tiff_paths, _last_elems, formatted_unions_dict, results_dir)
 
     print("[ANALYSIS] Done.")
     

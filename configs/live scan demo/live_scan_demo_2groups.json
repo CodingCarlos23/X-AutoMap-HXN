@@ -44,7 +44,8 @@
   },
   "export_params": {
     "elem_list": [
-      ["Ca", "Fe", "S"]
+      ["Ca", "Fe", "S"],
+      ["Al", "Cl", "Cr"]
     ],
     "export_norm": "sclr1_ch4",
     "data_wd": "/home/codingcarlos/Documents/github/automap simulation creator/sim_data",

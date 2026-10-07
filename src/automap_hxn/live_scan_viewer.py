@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QSizePolicy,
     QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem,
     QSplitter, QTreeWidget, QTreeWidgetItem, QCheckBox, QGroupBox,
+    QComboBox,
 )
 from qtpy.QtCore import Qt, QTimer, QRectF, QPoint
 from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
@@ -115,10 +116,25 @@ def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
         return None, 0, 0
 
 
-def _load_union_boxes(results_dir: Path) -> list[dict]:
-    """Return list of {cx_px, cy_px, side_px} from unions_output_*.json files."""
+def _load_union_boxes(results_dir: Path, group_name: str | None = None) -> list[dict]:
+    """Return list of {cx_px, cy_px, side_px} from the group's unions_output JSON.
+
+    When group_name is given only that group's file is read.  Falls back to the
+    unqualified unions_output.json for single-group configs, and to globbing all
+    unions_output_*.json when no group_name is supplied at all.
+    """
     boxes = []
-    for jf in results_dir.glob("unions_output_*.json"):
+
+    if group_name:
+        candidates = [
+            results_dir / f"unions_output_{group_name}.json",
+            results_dir / "unions_output.json",
+        ]
+        files = [p for p in candidates if p.exists()]
+    else:
+        files = list(results_dir.glob("unions_output_*.json"))
+
+    for jf in files:
         try:
             data = json.loads(jf.read_text())
             for entry in data.values():
@@ -174,6 +190,7 @@ class LiveScanViewerWidget(QWidget):
         self._n_cols: int = 0
         self._n_rows: int = 0
         self._elements: list[str] = []
+        self._all_groups: list[list[str]] = []
         self._seen_tiles: set[str] = set()
         self._tile_order: list[str] = []
         self._pending_boxes: dict[str, tuple[int, float, Path]] = {}
@@ -273,6 +290,24 @@ class LiveScanViewerWidget(QWidget):
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(10)
 
+        # Group selector (hidden when config has only one group)
+        group_row = QHBoxLayout()
+        self._group_label = QLabel("Display Group:")
+        self._group_label.setStyleSheet("color: #ccc; font-size: 12px;")
+        self._group_combo = QComboBox()
+        self._group_combo.setStyleSheet(
+            "QComboBox { background: white; color: black; border: 1px solid #aaa; "
+            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
+            "QComboBox QAbstractItemView { background: white; color: black; "
+            "selection-background-color: #1a6fdb; selection-color: white; }"
+        )
+        self._group_combo.currentIndexChanged.connect(self._on_group_changed)
+        group_row.addWidget(self._group_label)
+        group_row.addWidget(self._group_combo, 1)
+        layout.addLayout(group_row)
+        self._group_label.setVisible(False)
+        self._group_combo.setVisible(False)
+
         # Element legend
         legend_group = QGroupBox("Elements")
         legend_group.setStyleSheet(
@@ -359,7 +394,28 @@ class LiveScanViewerWidget(QWidget):
         self._config = config
         self._n_cols = n_cols
         self._n_rows = n_rows
-        self._elements = _elem_list_from_config(config)
+
+        # Extract all element groups
+        raw = config.get("export_params", {}).get("elem_list", [])
+        if raw and isinstance(raw[0], list):
+            self._all_groups = [list(g) for g in raw]
+        elif raw and isinstance(raw[0], str):
+            self._all_groups = [list(raw)]
+        else:
+            self._all_groups = []
+
+        self._group_combo.blockSignals(True)
+        self._group_combo.clear()
+        for i, g in enumerate(self._all_groups):
+            self._group_combo.addItem(f"Group {i + 1}: {', '.join(g)}", i)
+        self._group_combo.setCurrentIndex(0)
+        self._group_combo.blockSignals(False)
+
+        multi = len(self._all_groups) > 1
+        self._group_label.setVisible(multi)
+        self._group_combo.setVisible(multi)
+
+        self._elements = list(self._all_groups[0]) if self._all_groups else []
         elem_str = ", ".join(self._elements) if self._elements else "unknown"
         self._config_lbl.setText(
             f"{Path(path).name}  ({n_cols}×{n_rows} grid  |  {elem_str})"
@@ -403,6 +459,38 @@ class LiveScanViewerWidget(QWidget):
             else:
                 lbl.setText("● —")
                 lbl.setStyleSheet("color: #444; font-size: 12px;")
+
+    def _on_group_changed(self, index: int):
+        if not self._all_groups or index < 0 or index >= len(self._all_groups):
+            return
+        self._elements = list(self._all_groups[index])
+        self._update_legend()
+        self._redraw_all_tiles()
+
+    def _redraw_all_tiles(self):
+        """Clear and redraw all seen tiles using the current self._elements."""
+        if not self._watch_dir:
+            return
+        was_watching = self._poll_timer.isActive()
+        saved_order = list(self._tile_order)
+        self._reset_grid()
+        gname = "".join(self._elements)
+        for scan_id in saved_order:
+            tile_dir = self._watch_dir / f"automap_{scan_id}"
+            elem_paths = [
+                tile_dir / f"scan_{scan_id}_{elem}.tiff" for elem in self._elements
+            ]
+            results_dir = tile_dir / f"automap_{scan_id}_results"
+            idx = len(self._tile_order)
+            tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir, gname)
+            self._seen_tiles.add(scan_id)
+            self._tile_order.append(scan_id)
+            if tiff_w > 0 and not _load_union_boxes(results_dir, gname):
+                self._pending_boxes[scan_id] = (idx, tiff_w, results_dir, gname)
+        if was_watching:
+            self._poll_timer.start()
+            self._toggle_btn.setText("Stop")
+            self._status_lbl.setText("Watching…")
 
     # ------------------------------------------------------------------
     # Slot: select directory
@@ -678,14 +766,15 @@ class LiveScanViewerWidget(QWidget):
 
             results_dir = tile_dir / f"automap_{scan_id}_results"
             idx = len(self._tile_order)
-            tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir)
+            gname = "".join(self._elements)
+            tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir, gname)
             self._seen_tiles.add(scan_id)
             self._tile_order.append(scan_id)
-            if tiff_w > 0 and not _load_union_boxes(results_dir):
-                self._pending_boxes[scan_id] = (idx, tiff_w, results_dir)
+            if tiff_w > 0 and not _load_union_boxes(results_dir, gname):
+                self._pending_boxes[scan_id] = (idx, tiff_w, results_dir, gname)
 
-        for scan_id, (idx, tiff_w, results_dir) in list(self._pending_boxes.items()):
-            boxes = _load_union_boxes(results_dir)
+        for scan_id, (idx, tiff_w, results_dir, gname) in list(self._pending_boxes.items()):
+            boxes = _load_union_boxes(results_dir, gname)
             if boxes:
                 self._draw_boxes(idx, scan_id, tiff_w, boxes)
                 del self._pending_boxes[scan_id]
@@ -703,7 +792,7 @@ class LiveScanViewerWidget(QWidget):
     # Drawing
     # ------------------------------------------------------------------
 
-    def _draw_tile(self, idx: int, scan_id: str, elem_paths: list[Path], results_dir: Path) -> float:
+    def _draw_tile(self, idx: int, scan_id: str, elem_paths: list[Path], results_dir: Path, group_name: str = "") -> float:
         """Draw image + boxes for a tile. Returns tiff_w (0 on failure)."""
         n_cols = self._n_cols
         col = idx % n_cols
@@ -738,7 +827,7 @@ class LiveScanViewerWidget(QWidget):
         tree_item.setData(0, Qt.UserRole, idx)
         self._tile_list_items[idx] = tree_item
 
-        boxes = _load_union_boxes(results_dir)
+        boxes = _load_union_boxes(results_dir, group_name or None)
         if boxes:
             self._draw_boxes(idx, scan_id, tiff_w, boxes)
 
