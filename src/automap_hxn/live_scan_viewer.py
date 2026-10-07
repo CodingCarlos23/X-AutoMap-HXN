@@ -117,11 +117,10 @@ def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
 
 
 def _load_union_boxes(results_dir: Path, group_name: str | None = None) -> list[dict]:
-    """Return list of {cx_px, cy_px, side_px} from the group's unions_output JSON.
+    """Return list of box dicts from the group's unions_output JSON.
 
-    When group_name is given only that group's file is read.  Falls back to the
-    unqualified unions_output.json for single-group configs, and to globbing all
-    unions_output_*.json when no group_name is supplied at all.
+    Each dict has cx_px, cy_px, side_px, label, and mean_intensity (None for
+    geometric union boxes which have no single intensity value).
     """
     boxes = []
 
@@ -141,10 +140,51 @@ def _load_union_boxes(results_dir: Path, group_name: str | None = None) -> list[
                 ic = entry.get("image_center")
                 il = entry.get("image_length") or (entry.get("image_radius", 0) * 2) or None
                 if ic and il:
-                    boxes.append({"cx_px": ic[0], "cy_px": ic[1], "side_px": il, "label": entry.get("text")})
+                    boxes.append({
+                        "cx_px": ic[0],
+                        "cy_px": ic[1],
+                        "side_px": il,
+                        "label": entry.get("text"),
+                        "mean_intensity": entry.get("mean_intensity"),  # None for union boxes
+                    })
         except Exception as exc:
             print(f"[LiveScan] Could not read {jf}: {exc}")
     return boxes
+
+
+def _load_all_boxes(results_dir: Path, group_name: str | None = None) -> list[dict]:
+    """Load all_boxes JSON — returns list of {element, image_center, mean_intensity}.
+
+    Used to show per-element contributing intensities on union/merged box tooltips.
+    """
+    import re
+    if group_name:
+        files = [p for p in [
+            results_dir / f"all_boxes_{group_name}.json",
+            results_dir / "all_boxes.json",
+        ] if p.exists()]
+    else:
+        files = list(results_dir.glob("all_boxes_*.json"))
+
+    entries = []
+    for jf in files:
+        try:
+            data = json.loads(jf.read_text())
+            for entry in data.values():
+                ic = entry.get("image_center")
+                if not ic:
+                    continue
+                text = entry.get("text", "")
+                m = re.match(r"All Box (\S+) #\d+", text)
+                elem = m.group(1) if m else "?"
+                entries.append({
+                    "element": elem,
+                    "image_center": ic,
+                    "mean_intensity": entry.get("mean_intensity") or 0,
+                })
+        except Exception as exc:
+            print(f"[LiveScan] Could not read {jf}: {exc}")
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +234,7 @@ class LiveScanViewerWidget(QWidget):
         self._seen_tiles: set[str] = set()
         self._tile_order: list[str] = []
         self._pending_boxes: dict[str, tuple[int, float, Path]] = {}
+        self._tile_all_boxes: dict[str, list[dict]] = {}  # scan_id -> all_boxes entries
 
         # Box and tile tracking
         self._box_meta: list[dict] = []          # per-box: coords + scene_item ref
@@ -395,12 +436,15 @@ class LiveScanViewerWidget(QWidget):
         self._n_cols = n_cols
         self._n_rows = n_rows
 
-        # Extract all element groups
-        raw = config.get("export_params", {}).get("elem_list", [])
+        # Extract all element groups — supports both elem_list and intensity-filter groups format
+        ep = config.get("export_params", {})
+        raw = ep.get("elem_list", [])
         if raw and isinstance(raw[0], list):
             self._all_groups = [list(g) for g in raw]
         elif raw and isinstance(raw[0], str):
             self._all_groups = [list(raw)]
+        elif ep.get("use_intensity_filter") and ep.get("groups"):
+            self._all_groups = [[e["element"] for e in g["elements"]] for g in ep["groups"]]
         else:
             self._all_groups = []
 
@@ -671,6 +715,38 @@ class LiveScanViewerWidget(QWidget):
                 f"Real area: {real_area:.2f} µm²",
             ]
 
+        # Intensity info
+        mi = meta.get("mean_intensity")
+        label = meta.get("label") or ""
+        is_multi = (mi is None) or label.startswith("Union Box") or label.startswith("Cross-element")
+
+        if not is_multi and mi is not None:
+            # Individual blob — show its own mean intensity directly
+            lines.append(f"<br><br>Mean intensity: {mi:.1f}")
+        else:
+            # Union box, cross-element merge, or any multi-blob box —
+            # look up contributing blobs spatially from all_boxes JSON
+            scan_id = meta["scan_id"]
+            all_boxes = self._tile_all_boxes.get(scan_id, [])
+            if all_boxes:
+                half = side / 2
+                lo_x, hi_x = cx - half, cx + half
+                lo_y, hi_y = cy - half, cy + half
+                elem_intensities: dict[str, list[float]] = {}
+                for entry in all_boxes:
+                    ic = entry["image_center"]
+                    if lo_x <= ic[0] <= hi_x and lo_y <= ic[1] <= hi_y:
+                        elem = entry["element"]
+                        elem_intensities.setdefault(elem, []).append(entry["mean_intensity"])
+                if elem_intensities:
+                    lines.append("<br><br><b>Contributing blobs:</b>")
+                    for elem, vals in sorted(elem_intensities.items()):
+                        avg = sum(vals) / len(vals)
+                        lines.append(f"<br>{elem}: {avg:.1f} (n={len(vals)})")
+            elif mi is not None:
+                # Fallback: all_boxes not available, show averaged intensity
+                lines.append(f"<br><br>Mean intensity: {mi:.1f}")
+
         return "".join(lines)
 
     # ------------------------------------------------------------------
@@ -684,6 +760,7 @@ class LiveScanViewerWidget(QWidget):
         self._tile_order.clear()
         self._placeholder_items.clear()
         self._pending_boxes.clear()
+        self._tile_all_boxes.clear()
         self._box_meta.clear()
         self._box_scene_items.clear()
         self._tile_scene_pos.clear()
@@ -827,6 +904,8 @@ class LiveScanViewerWidget(QWidget):
         tree_item.setData(0, Qt.UserRole, idx)
         self._tile_list_items[idx] = tree_item
 
+        self._tile_all_boxes[scan_id] = _load_all_boxes(results_dir, group_name or None)
+
         boxes = _load_union_boxes(results_dir, group_name or None)
         if boxes:
             self._draw_boxes(idx, scan_id, tiff_w, boxes)
@@ -870,6 +949,7 @@ class LiveScanViewerWidget(QWidget):
                 "cx_px": cx_px,
                 "cy_px": cy_px,
                 "side_px": side_px,
+                "mean_intensity": box.get("mean_intensity"),
                 "scene_x": bx,
                 "scene_y": by,
                 "scene_w": bw,

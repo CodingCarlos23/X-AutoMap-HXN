@@ -212,13 +212,27 @@ def analyze_data_local(scan_id=None,
         print(f"[ANALYSIS] Using calibration params: step_size={step_size}, x_start={x_start}, y_start={y_start}")
 
     # --- 2. Prepare Elements ---
-    elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
-    if not elem_list_of_lists:
-        print("elem_list is empty.")
-        return
+    use_intensity_filter = params.get("export_params", {}).get("use_intensity_filter", False)
+    intensity_ranges = {}  # {element: (lo, hi)} for mean_intensity filtering
 
-    if isinstance(elem_list_of_lists[0], str):
-        elem_list_of_lists = [elem_list_of_lists]
+    if use_intensity_filter:
+        groups_data = params.get("export_params", {}).get("groups", [])
+        elem_list_of_lists = [[e["element"] for e in g["elements"]] for g in groups_data]
+        for group in groups_data:
+            for entry in group.get("elements", []):
+                lo = entry["intensity"] - entry["offset"]
+                hi = entry["intensity"] + entry["offset"]
+                intensity_ranges[entry["element"]] = (lo, hi)
+        if not elem_list_of_lists:
+            print("groups is empty in intensity filter mode.")
+            return
+    else:
+        elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
+        if not elem_list_of_lists:
+            print("elem_list is empty.")
+            return
+        if isinstance(elem_list_of_lists[0], str):
+            elem_list_of_lists = [elem_list_of_lists]
 
     # Flatten to get unique elements for loading
     all_elements = sorted(list(set(elem for sublist in elem_list_of_lists for elem in sublist)))
@@ -336,14 +350,30 @@ def analyze_data_local(scan_id=None,
         print(f"\n--- Processing Group: {group_name} (Elements: {len(elem_list)}) ---")
 
         group_blobs_for_union = {}
+        _color_to_elem = {}
         for i, element in enumerate(elem_list):
             if i >= 3: break
             original_color = element_to_color.get(element)
             if not original_color: continue
-            
+
             new_color = ['red', 'green', 'blue'][i]
+            _color_to_elem[new_color] = element
             if original_color in precomputed_blobs:
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+
+        # Apply per-element intensity range filter if enabled
+        if use_intensity_filter and intensity_ranges:
+            for color, blob_data in list(group_blobs_for_union.items()):
+                elem_name = _color_to_elem.get(color)
+                if elem_name not in intensity_ranges:
+                    continue
+                lo, hi = intensity_ranges[elem_name]
+                filtered = {}
+                for key, blobs in blob_data.items():
+                    kept = [b for b in blobs if lo <= b.get("mean_intensity", 0) <= hi]
+                    if kept:
+                        filtered[key] = kept
+                group_blobs_for_union[color] = filtered
 
         # Collect all individual blobs regardless of union results — always saved as all_boxes JSON
         all_boxes_formatted = {}

@@ -548,6 +548,30 @@ class JSONMakerWidget(QWidget):
             self.json_maker_fields["export_params"][key] = (field_widget, default)
         layout.addWidget(export_group)
 
+        # --- Intensity Filter ---
+        self._intensity_filter_checkbox = QCheckBox("Use Intensity Filter (per-element mean intensity range)")
+        self._intensity_filter_checkbox.setStyleSheet("color: #000000; font-size: 13px; font-weight: bold; padding: 4px 0;")
+        self._intensity_filter_checkbox.stateChanged.connect(self._on_intensity_filter_toggled)
+        layout.addWidget(self._intensity_filter_checkbox)
+
+        self._intensity_filter_group = QGroupBox("Intensity Filter Groups")
+        self._intensity_filter_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #ccc; margin-top: 14px; padding-top: 8px; }"
+        )
+        self._intensity_filter_group.setVisible(False)
+        ifg_outer = QVBoxLayout(self._intensity_filter_group)
+        ifg_outer.setSpacing(6)
+        self._intensity_groups_layout = QVBoxLayout()
+        self._intensity_groups_layout.setSpacing(6)
+        ifg_outer.addLayout(self._intensity_groups_layout)
+        add_group_btn = QPushButton("+ Add Group")
+        add_group_btn.setFixedWidth(110)
+        add_group_btn.clicked.connect(lambda: self._add_intensity_group())
+        ifg_outer.addWidget(add_group_btn)
+        layout.addWidget(self._intensity_filter_group)
+
+        self._intensity_group_data: list[dict] = []
+
         calib_group = QGroupBox("calibration_params")
         calib_form = QFormLayout(calib_group)
         calib_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -718,6 +742,15 @@ class JSONMakerWidget(QWidget):
                 for key, (field_widget, default) in fields.items()
             }
 
+        # Intensity filter: inject groups / strip elem_list
+        if self._intensity_filter_checkbox.isChecked():
+            groups = self._read_intensity_filter_groups()  # raises ValueError on bad input
+            config["export_params"]["use_intensity_filter"] = True
+            config["export_params"]["groups"] = groups
+            config["export_params"].pop("elem_list", None)
+        else:
+            config["export_params"]["use_intensity_filter"] = False
+
         if "segmentation_params" not in config:
             config["segmentation_params"] = {}
         config["segmentation_params"]["blob_detection_method"] = active_method
@@ -833,6 +866,158 @@ class JSONMakerWidget(QWidget):
                 parts.append(f"t{thresh}_a{area}")
 
         return "_".join(parts) + ".json"
+
+    # ------------------------------------------------------------------
+    # Intensity filter UI helpers
+    # ------------------------------------------------------------------
+
+    def _on_intensity_filter_toggled(self, state):
+        checked = bool(state)
+        self._intensity_filter_group.setVisible(checked)
+        if checked and not self._intensity_group_data:
+            self._seed_intensity_groups_from_elem_list()
+
+    def _seed_intensity_groups_from_elem_list(self):
+        """Pre-populate intensity groups from the current elem_list field."""
+        try:
+            elem_field, _ = self.json_maker_fields["export_params"]["elem_list"]
+            raw = json.loads(elem_field.text().strip())
+            if raw and isinstance(raw[0], str):
+                raw = [raw]
+        except Exception:
+            raw = []
+        for group_elems in raw:
+            gd = self._add_intensity_group()
+            for elem in group_elems:
+                self._add_intensity_element_row(gd, elem_name=elem)
+
+    def _add_intensity_group(self) -> dict:
+        """Add a new group box to the intensity filter UI. Returns the group data dict."""
+        idx = len(self._intensity_group_data) + 1
+        group_box = QGroupBox(f"Group {idx}")
+        group_box.setStyleSheet(
+            "QGroupBox { color: #bbb; margin-top: 12px; padding-top: 6px; }"
+        )
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
+
+        # Header row labels
+        header = QHBoxLayout()
+        for lbl_text, w in [("Element", 80), ("Intensity", 70), ("Offset", 60)]:
+            lbl = QLabel(lbl_text)
+            lbl.setFixedWidth(w)
+            lbl.setStyleSheet("color: #999; font-size: 11px;")
+            header.addWidget(lbl)
+        header.addStretch()
+        group_layout.addLayout(header)
+
+        rows_layout = QVBoxLayout()
+        rows_layout.setSpacing(2)
+        group_layout.addLayout(rows_layout)
+
+        gd = {"box": group_box, "rows_layout": rows_layout, "rows": []}
+        self._intensity_group_data.append(gd)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        add_elem_btn = QPushButton("+ Add Element")
+        add_elem_btn.setFixedWidth(110)
+        add_elem_btn.clicked.connect(lambda: self._add_intensity_element_row(gd))
+        remove_group_btn = QPushButton("Remove Group")
+        remove_group_btn.setFixedWidth(110)
+        remove_group_btn.clicked.connect(lambda: self._remove_intensity_group(gd))
+        btn_row.addWidget(add_elem_btn)
+        btn_row.addWidget(remove_group_btn)
+        btn_row.addStretch()
+        group_layout.addLayout(btn_row)
+
+        self._intensity_groups_layout.addWidget(group_box)
+        return gd
+
+    def _remove_intensity_group(self, gd: dict):
+        if gd in self._intensity_group_data:
+            self._intensity_group_data.remove(gd)
+        gd["box"].setParent(None)
+        gd["box"].deleteLater()
+
+    def _add_intensity_element_row(self, gd: dict, elem_name: str = "", intensity: int = 0, offset: int = 0):
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        _input_style = (
+            "background: #1e1e22; color: #eee; border: 1px solid #555; "
+            "border-radius: 3px; padding: 2px 4px; font-size: 12px;"
+        )
+
+        elem_edit = QLineEdit(elem_name)
+        elem_edit.setPlaceholderText("e.g. Ca")
+        elem_edit.setFixedWidth(80)
+        elem_edit.setStyleSheet(_input_style)
+
+        intens_spin = QSpinBox()
+        intens_spin.setRange(0, 100000)
+        intens_spin.setValue(intensity)
+        intens_spin.setFixedWidth(70)
+        intens_spin.setStyleSheet(_input_style)
+
+        offset_spin = QSpinBox()
+        offset_spin.setRange(0, 100000)
+        offset_spin.setValue(offset)
+        offset_spin.setFixedWidth(60)
+        offset_spin.setStyleSheet(_input_style)
+
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedWidth(28)
+        rd = {"elem": elem_edit, "intensity": intens_spin, "offset": offset_spin, "widget": row_widget}
+        remove_btn.clicked.connect(lambda: self._remove_intensity_element_row(gd, rd))
+
+        row_layout.addWidget(elem_edit)
+        row_layout.addWidget(intens_spin)
+        row_layout.addWidget(offset_spin)
+        row_layout.addWidget(remove_btn)
+        row_layout.addStretch()
+
+        gd["rows_layout"].addWidget(row_widget)
+        gd["rows"].append(rd)
+
+    def _remove_intensity_element_row(self, gd: dict, rd: dict):
+        if rd in gd["rows"]:
+            gd["rows"].remove(rd)
+        rd["widget"].setParent(None)
+        rd["widget"].deleteLater()
+
+    def _read_intensity_filter_groups(self) -> list[dict]:
+        """Read the intensity group form and return the groups list for JSON output.
+        Raises ValueError if any group or element entry is invalid.
+        """
+        if not self._intensity_group_data:
+            raise ValueError(
+                "Intensity Filter is enabled but no groups have been defined.\n"
+                "Add at least one group with elements, or uncheck Use Intensity Filter."
+            )
+        groups = []
+        for g_idx, gd in enumerate(self._intensity_group_data, 1):
+            if not gd["rows"]:
+                raise ValueError(
+                    f"Intensity Filter Group {g_idx} has no elements.\n"
+                    "Add at least one element row or remove the empty group."
+                )
+            elements = []
+            for r_idx, rd in enumerate(gd["rows"], 1):
+                elem = rd["elem"].text().strip()
+                if not elem:
+                    raise ValueError(
+                        f"Intensity Filter Group {g_idx}, row {r_idx}: element name is blank."
+                    )
+                elements.append({
+                    "element": elem,
+                    "intensity": rd["intensity"].value(),
+                    "offset": rd["offset"].value(),
+                })
+            groups.append({"elements": elements})
+        return groups
 
     def on_create_json_clicked(self):
         """Write a new initial-scan JSON from the form values."""
