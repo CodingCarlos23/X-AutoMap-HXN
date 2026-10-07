@@ -172,16 +172,26 @@ def create_all_elements_tiff(tiff_paths, output_dir, element_list, precomputed_b
 
         # --- Draw individual blob boxes ---
         color_map = {
-            'red':    (0, 0, 255),   # Red
-            'green':  (0, 255, 0),   # Green
-            'blue':   (255, 0, 0),   # Blue
+            'red':    (0, 0, 255),
+            'green':  (0, 255, 0),
+            'blue':   (255, 0, 0),
             'orange': (0, 165, 255),
             'purple': (128, 0, 128),
             'cyan':   (255, 255, 0),
             'olive':  (0, 128, 128),
             'yellow': (0, 255, 255),
             'brown':  (42, 42, 165),
-            'pink':   (203, 192, 255)
+            'pink':   (203, 192, 255),
+            'teal':   (128, 128, 0),
+            'coral':  (80, 127, 255),
+            'indigo': (130, 0, 75),
+            'lime':   (0, 255, 128),
+            'maroon': (0, 0, 128),
+            'gold':   (0, 215, 255),
+            'navy':   (128, 0, 0),
+            'salmon': (114, 128, 250),
+            'violet': (226, 43, 138),
+            'khaki':  (107, 183, 240),
         }
 
         print("Drawing individual element boxes...")

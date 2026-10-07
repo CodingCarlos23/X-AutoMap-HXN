@@ -231,7 +231,8 @@ def analyze_data_local(scan_id=None,
     _shapes = [tiff.imread(str(tiff_paths[e])).shape for e in all_elements if e in tiff_paths]
     target_shape = Counter(_shapes).most_common(1)[0][0] if _shapes else None
 
-    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink',
+                   'teal', 'coral', 'indigo', 'lime', 'maroon', 'gold', 'navy', 'salmon', 'violet', 'khaki']
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
 
@@ -670,7 +671,8 @@ def analyze_data_from_arrays(element_arrays, params):
     method_params = {k: v for k, v in method_params.items() if v is not None}
     
     # Prepare colors
-    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink',
+                   'teal', 'coral', 'indigo', 'lime', 'maroon', 'gold', 'navy', 'salmon', 'violet', 'khaki']
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
@@ -869,7 +871,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     # Load Tiff Paths
     tiff_paths = wait_for_element_tiffs(all_elements, out_dir)
 
-    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink']
+    COLOR_ORDER = ['red', 'green', 'blue', 'orange', 'purple', 'cyan', 'olive', 'yellow', 'brown', 'pink',
+                   'teal', 'coral', 'indigo', 'lime', 'maroon', 'gold', 'navy', 'salmon', 'violet', 'khaki']
     precomputed_blobs = {color: {} for color in COLOR_ORDER}
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
     
