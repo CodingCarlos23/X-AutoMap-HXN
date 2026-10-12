@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def main():
     )
 
     print("\n[HEADLESS] All scans done.")
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -262,6 +262,27 @@ LOCATE_SYSTEM_PROMPT = (
     "Include every distinct feature you can identify."
 )
 
+LOCATE_SPARSE_XRF_PROMPT = (
+    "You are analyzing a sparse XRF (X-ray fluorescence) scan image. "
+    "XRF images are characteristically sparse: most of the image is near-zero dark background, "
+    "with a small number of isolated bright clusters or particles scattered across the field. "
+    "Pixel intensity directly encodes elemental signal strength — brighter means stronger signal. "
+    "CRITICAL: Many particles will be very small — just a few pixels across. "
+    "Do not overlook tiny bright specks; treat every localized bright point as a candidate particle. "
+    "Your task is to identify every bright isolated particle, cluster, or region of elevated signal "
+    "against the dark background. Ignore only pure noise (single-pixel random specks at noise floor). "
+    "Focus on localized bright spots that stand clearly above the background level, regardless of size. "
+    "Each feature may be a single tiny particle, an aggregate, or a compact cluster. "
+    "There is no limit on how many features you can return — report ALL of them. "
+    "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
+    '{"features": [{"id": 1, "label": "XRF particle", "x1": 0.10, "y1": 0.20, '
+    '"x2": 0.45, "y2": 0.60, "description": "bright isolated particle cluster"}], "total_count": 1}\n'
+    "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
+    "where (0,0) is top-left and (1,1) is bottom-right. x1 < x2, y1 < y2. "
+    "Draw boxes tightly around the bright core of each feature — exclude surrounding dark background. "
+    "For very small particles, the box may only span 0.01–0.05 in each dimension — that is fine."
+)
+
 LOCATE_XRF_ROI_PROMPT = (
     "You are analyzing a composite XRF (X-ray fluorescence) scan image where three element channels "
     "are encoded as RGB: Red = element 1, Green = element 2, Blue = element 3. "
@@ -288,23 +309,28 @@ BOX_COLORS = [
 ]
 
 
-def _load_image_pixmap(path, dilate_ksize: int = 0):
+def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False):
     """Load any image (including 16/32-bit TIFF) and return (QPixmap, width, height)."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
         raise ValueError(f"Could not read image: {path}")
     arr = arr.astype(np.float32)
-    mn, mx = arr.min(), arr.max()
-    if mx > mn:
-        arr = (arr - mn) / (mx - mn)
-    arr = (arr * 255).astype(np.uint8)
+    if normalize:
+        mn, mx = arr.min(), arr.max()
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        arr = (arr * 255).astype(np.uint8)
+    else:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
-    if arr.ndim == 3:
-        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-    else:
+    if arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
+    else:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+    if grid_overlay:
+        arr = _draw_coordinate_grid(arr)
     h, w = arr.shape[:2]
     qimg = QImage(arr.data, w, h, w * 3, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimg), w, h
@@ -333,7 +359,7 @@ def _draw_feature_boxes(base_pixmap, features):
 # ── image display with mouse coord tracking ───────────────────────────────────
 
 class _ImageDisplay(QLabel):
-    """QLabel that emits fractional (0–1) mouse coordinates over the displayed pixmap."""
+    """QLabel that emits fractional (0–1) mouse coordinates and supports drag-to-pan."""
     mouse_moved = Signal(float, float)
     mouse_left = Signal()
     zoom_scrolled = Signal(int)  # +1 zoom in, -1 zoom out
@@ -341,6 +367,8 @@ class _ImageDisplay(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._drag_start = None
+        self._scroll_start = None
 
     def _frac_pos(self, event):
         pm = self.pixmap()
@@ -354,7 +382,39 @@ class _ImageDisplay(QLabel):
             return px / pm.width(), py / pm.height()
         return None, None
 
+    def _scroll_area(self):
+        p = self.parent()
+        while p:
+            if isinstance(p, QScrollArea):
+                return p
+            p = p.parent()
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.globalPos()
+            sa = self._scroll_area()
+            if sa:
+                self._scroll_start = (
+                    sa.horizontalScrollBar().value(),
+                    sa.verticalScrollBar().value(),
+                )
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = None
+            self._scroll_start = None
+            self.setCursor(Qt.ArrowCursor)
+
     def mouseMoveEvent(self, event):
+        if self._drag_start is not None and self._scroll_start is not None:
+            delta = event.globalPos() - self._drag_start
+            sa = self._scroll_area()
+            if sa:
+                sa.horizontalScrollBar().setValue(self._scroll_start[0] - delta.x())
+                sa.verticalScrollBar().setValue(self._scroll_start[1] - delta.y())
+            return
         fx, fy = self._frac_pos(event)
         if fx is not None:
             self.mouse_moved.emit(fx, fy)
@@ -524,16 +584,58 @@ class _ChatThread(QThread):
 _VLM_MAX_DIM = 1024
 
 
-def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0):
-    """Load image, optionally dilate, downsample to max_dim, return base64-PNG string."""
+def _draw_coordinate_grid(arr: np.ndarray, steps: int = 10) -> np.ndarray:
+    """Draw a coordinate grid with fractional labels onto a BGR uint8 image."""
+    arr = arr.copy()
+    h, w = arr.shape[:2]
+    line_color = (160, 160, 160)
+    label_bg   = (0, 0, 0)
+    label_fg   = (255, 255, 60)
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.35, min(0.55, w / 900))
+    thickness  = 1
+
+    for i in range(steps + 1):
+        frac = i / steps
+        x = int(frac * (w - 1))
+        y = int(frac * (h - 1))
+        cv2.line(arr, (x, 0), (x, h - 1), line_color, 1)
+        cv2.line(arr, (0, y), (w - 1, y), line_color, 1)
+
+        # Only label every 2nd line (0.0, 0.2, 0.4 ...) to avoid crowding
+        if i % 2 != 0:
+            continue
+        label = f"{frac:.1f}"
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+
+        # x-axis label: centred above the line, 16px from top
+        lx = max(0, min(x - tw // 2, w - tw - 1))
+        ly = th + 4
+        cv2.rectangle(arr, (lx - 1, 1), (lx + tw + 1, ly + 2), label_bg, -1)
+        cv2.putText(arr, label, (lx, ly), font, font_scale, label_fg, thickness, cv2.LINE_AA)
+
+        # y-axis label: 4px to right of left edge, vertically centred on line
+        rx = 4
+        ry = max(th, min(y + th // 2, h - 2))
+        cv2.rectangle(arr, (rx - 1, ry - th - 1), (rx + tw + 1, ry + 2), label_bg, -1)
+        cv2.putText(arr, label, (rx, ry), font, font_scale, label_fg, thickness, cv2.LINE_AA)
+
+    return arr
+
+
+def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False):
+    """Load image, optionally normalize and dilate, downsample to max_dim, return base64-PNG string."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
         raise ValueError(f"Could not read image: {path}")
     arr = arr.astype(np.float32)
-    mn, mx = arr.min(), arr.max()
-    if mx > mn:
-        arr = (arr - mn) / (mx - mn)
-    arr = (arr * 255).astype(np.uint8)
+    if normalize:
+        mn, mx = arr.min(), arr.max()
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        arr = (arr * 255).astype(np.uint8)
+    else:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
@@ -546,6 +648,8 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0):
         lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
         lab[:, :, 0] = clahe.apply(lab[:, :, 0])
         arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    if grid_overlay:
+        arr = _draw_coordinate_grid(arr)
     h, w = arr.shape[:2]
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
@@ -565,15 +669,17 @@ class _LocateThread(QThread):
     result = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None):
+    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True, grid_overlay: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
+        self.normalize = normalize
+        self.grid_overlay = grid_overlay
         self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
-            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize)
+            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize, grid_overlay=self.grid_overlay)
             provider = _get_provider(_active_model)
             if provider == "anthropic":
                 parsed = self._query_anthropic(img_b64)
@@ -685,13 +791,16 @@ class _LocateTileThread(QThread):
     error = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, image_path, dilate_ksize: int = 0):
+    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True, grid_overlay: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
+        self.normalize = normalize
+        self.grid_overlay = grid_overlay
         self._provider = _get_provider(_active_model)
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
+        self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
@@ -699,10 +808,13 @@ class _LocateTileThread(QThread):
             if arr is None:
                 raise ValueError(f"Could not read: {self.image_path}")
             arr = arr.astype(np.float32)
-            mn, mx = arr.min(), arr.max()
-            if mx > mn:
-                arr = (arr - mn) / (mx - mn)
-            arr = (arr * 255).astype(np.uint8)
+            if self.normalize:
+                mn, mx = arr.min(), arr.max()
+                if mx > mn:
+                    arr = (arr - mn) / (mx - mn)
+                arr = (arr * 255).astype(np.uint8)
+            else:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
             if self.dilate_ksize > 0:
                 kernel = np.ones((self.dilate_ksize, self.dilate_ksize), np.uint8)
                 arr = cv2.dilate(arr, kernel)
@@ -710,11 +822,14 @@ class _LocateTileThread(QThread):
             h, w = arr.shape[:2]
             h2, w2 = h // 2, w // 2
 
+            def _prep_quad(q):
+                return _draw_coordinate_grid(q) if self.grid_overlay else q
+
             quads = [
-                ("TL", arr[0:h2,  0:w2],  0.0,    0.0,    w2/w,       h2/h),
-                ("TR", arr[0:h2,  w2:w],  w2/w,   0.0,    (w-w2)/w,   h2/h),
-                ("BL", arr[h2:h,  0:w2],  0.0,    h2/h,   w2/w,       (h-h2)/h),
-                ("BR", arr[h2:h,  w2:w],  w2/w,   h2/h,   (w-w2)/w,   (h-h2)/h),
+                ("TL", _prep_quad(arr[0:h2,  0:w2].copy()),  0.0,    0.0,    w2/w,       h2/h),
+                ("TR", _prep_quad(arr[0:h2,  w2:w].copy()),  w2/w,   0.0,    (w-w2)/w,   h2/h),
+                ("BL", _prep_quad(arr[h2:h,  0:w2].copy()),  0.0,    h2/h,   w2/w,       (h-h2)/h),
+                ("BR", _prep_quad(arr[h2:h,  w2:w].copy()),  w2/w,   h2/h,   (w-w2)/w,   (h-h2)/h),
             ]
 
             all_features = []
@@ -769,7 +884,7 @@ class _LocateTileThread(QThread):
         payload = json.dumps({
             "model": self._model,
             "messages": [
-                {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
             ],
             "stream": False,
@@ -787,7 +902,7 @@ class _LocateTileThread(QThread):
         payload = json.dumps({
             "model": _get_anthropic_model(),
             "max_tokens": 4096,
-            "system": LOCATE_SYSTEM_PROMPT,
+            "system": self._system_prompt,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -813,7 +928,7 @@ class _LocateTileThread(QThread):
         if "openai" in _api_urls:
             payload = json.dumps({
                 "model": _get_openai_model(),
-                "instructions": LOCATE_SYSTEM_PROMPT,
+                "instructions": self._system_prompt,
                 "input": [{"role": "user", "content": [
                     {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
                     {"type": "input_text", "text": _LOCATE_USER_PROMPT},
@@ -827,7 +942,7 @@ class _LocateTileThread(QThread):
             payload = json.dumps({
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": LOCATE_SYSTEM_PROMPT},
+                    {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
                         {"type": "text", "text": _LOCATE_USER_PROMPT},
@@ -1069,6 +1184,29 @@ class _LocateTab(QWidget):
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
+        # Prompt preset selector (Single Image mode only)
+        self._preset_row = QHBoxLayout()
+        self._preset_row.addWidget(QLabel("Prompt:"))
+        self._preset_combo = QComboBox()
+        self._preset_combo.addItems([
+            "Standard — detect all features",
+            "Sparse XRF aware — particle detection",
+        ])
+        self._PRESETS = [LOCATE_SYSTEM_PROMPT, LOCATE_SPARSE_XRF_PROMPT]
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self._preset_row.addWidget(self._preset_combo, 1)
+        view_prompt_btn = QPushButton("View")
+        view_prompt_btn.setFixedWidth(50)
+        view_prompt_btn.setToolTip("View full prompt text")
+        view_prompt_btn.clicked.connect(self._show_prompt_popup)
+        self._preset_row.addWidget(view_prompt_btn)
+        preset_container = QWidget()
+        preset_container.setLayout(self._preset_row)
+        self._preset_widget = preset_container
+        layout.addWidget(self._preset_widget)
+
+        self._active_prompt = LOCATE_SYSTEM_PROMPT
+
         # Floating hover tooltip
         self._hover_tooltip = QLabel(self)
         self._hover_tooltip.setWindowFlags(Qt.ToolTip)
@@ -1091,6 +1229,30 @@ class _LocateTab(QWidget):
         self.image_name_label.setStyleSheet("color: #888;")
         pick_row.addWidget(self.image_name_label, 1)
         single_layout.addLayout(pick_row)
+
+        norm_row = QHBoxLayout()
+        self._normalize_check = QCheckBox("Normalize image (0–255)")
+        self._normalize_check.setChecked(True)
+        self._normalize_check.setToolTip(
+            "Stretch pixel values to fill the full 0–255 range before sending to the VLM.\n"
+            "Recommended for XRF images which often have a narrow raw intensity range."
+        )
+        self._normalize_check.toggled.connect(self._on_image_options_changed)
+        norm_row.addWidget(self._normalize_check)
+        norm_row.addStretch()
+        single_layout.addLayout(norm_row)
+
+        grid_row = QHBoxLayout()
+        self._grid_check = QCheckBox("Grid overlay (coordinate reference)")
+        self._grid_check.setChecked(True)
+        self._grid_check.setToolTip(
+            "Draw a 10×10 coordinate grid with labels on the image before sending to the VLM.\n"
+            "Gives the model visual reference points to improve bounding box accuracy."
+        )
+        self._grid_check.toggled.connect(self._on_image_options_changed)
+        grid_row.addWidget(self._grid_check)
+        grid_row.addStretch()
+        single_layout.addLayout(grid_row)
 
         dilate_row = QHBoxLayout()
         self._dilate_check = QCheckBox("Dilate image")
@@ -1188,12 +1350,19 @@ class _LocateTab(QWidget):
         self.info_panel.setVisible(False)
 
         image_col = QVBoxLayout()
-        image_col.setSpacing(0)
+        image_col.setSpacing(2)
         image_row = QHBoxLayout()
         image_row.setSpacing(0)
         image_row.addWidget(self.scroll_area, 1)
         image_row.addWidget(self.coord_label)
         image_col.addLayout(image_row)
+
+        self._send_status_label = QLabel("")
+        self._send_status_label.setStyleSheet(
+            "font-size: 10px; color: #aaa; font-family: monospace; padding: 2px 4px;"
+        )
+        self._send_status_label.setVisible(False)
+        image_col.addWidget(self._send_status_label)
 
         content_row = QHBoxLayout()
         content_row.setSpacing(6)
@@ -1252,11 +1421,36 @@ class _LocateTab(QWidget):
         if self._image_path:
             self.locate_btn.setEnabled(self._model_ok)
 
+    def _on_preset_changed(self, index: int):
+        self._active_prompt = self._PRESETS[index]
+        self._header_prompt_lbl.setText(f"Prompt: {self._active_prompt[:120].rstrip()}…")
+        self._header_prompt_lbl.setToolTip(self._active_prompt)
+
+    def _show_prompt_popup(self):
+        from qtpy.QtWidgets import QDialog, QTextEdit, QVBoxLayout, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Prompt — {self._preset_combo.currentText()}")
+        dlg.resize(640, 400)
+        layout = QVBoxLayout(dlg)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(self._active_prompt)
+        text.setStyleSheet("font-size: 12px; font-family: monospace;")
+        layout.addWidget(text)
+        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns.rejected.connect(dlg.close)
+        layout.addWidget(btns)
+        dlg.exec_()
+
     def _on_mode_changed(self, index: int):
         is_xrf = index == 1
         self._single_widget.setVisible(not is_xrf)
         self._xrf_widget.setVisible(is_xrf)
-        prompt = LOCATE_XRF_ROI_PROMPT if is_xrf else LOCATE_SYSTEM_PROMPT
+        self._preset_widget.setVisible(not is_xrf)
+        if is_xrf:
+            prompt = LOCATE_XRF_ROI_PROMPT
+        else:
+            prompt = self._active_prompt
         self._header_prompt_lbl.setText(f"Prompt: {prompt[:120].rstrip()}…")
         self._header_prompt_lbl.setToolTip(prompt)
         self.locate_btn.setText("Find XRF Areas of Interest" if is_xrf else "Get Location of Features")
@@ -1412,14 +1606,20 @@ class _LocateTab(QWidget):
                 return
             self.locate_btn.setEnabled(False)
             ksize = self._get_dilate_ksize()
+            normalize = self._normalize_check.isChecked()
+            grid = self._grid_check.isChecked()
             use_tile = self._tile_check.isChecked()
             if use_tile:
                 self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
-                self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize)
+                self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize,
+                                                        system_prompt_override=self._active_prompt,
+                                                        normalize=normalize, grid_overlay=grid)
                 self._locate_thread.progress.connect(self._on_tile_progress)
             else:
                 self.status_label.setText("Analyzing... this may take 30–60 seconds.")
-                self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize)
+                self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize,
+                                                    system_prompt_override=self._active_prompt,
+                                                    normalize=normalize, grid_overlay=grid)
             self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
         self._locate_thread.error.connect(self._on_error)
@@ -1491,15 +1691,44 @@ class _LocateTab(QWidget):
         self._dilated_pixmap = None
         if self._image_path and self._orig_pixmap:
             self._update_display()
+        else:
+            self._refresh_send_status()
+
+    def _on_image_options_changed(self) -> None:
+        self._orig_pixmap = None
+        self._dilated_pixmap = None
+        if self._image_path:
+            self._update_display()
 
     def _update_display(self) -> None:
+        normalize = self._normalize_check.isChecked()
+        grid = self._grid_check.isChecked()
         ksize = self._get_dilate_ksize()
+        self._orig_pixmap, _, _ = _load_image_pixmap(
+            self._image_path, dilate_ksize=0, normalize=normalize, grid_overlay=grid)
         if ksize > 0:
-            if self._dilated_pixmap is None:
-                self._dilated_pixmap, _, _ = _load_image_pixmap(self._image_path, dilate_ksize=ksize)
+            self._dilated_pixmap, _, _ = _load_image_pixmap(
+                self._image_path, dilate_ksize=ksize, normalize=normalize, grid_overlay=grid)
         pm = self._current_pixmap()
         if pm:
             self._show_pixmap(pm)
+        self._refresh_send_status()
+
+    def _refresh_send_status(self) -> None:
+        if not self._image_path:
+            self._send_status_label.setVisible(False)
+            return
+        parts = []
+        if self._normalize_check.isChecked():
+            parts.append("Normalize ✓")
+        if self._grid_check.isChecked():
+            parts.append("Grid overlay ✓")
+        ksize = self._get_dilate_ksize()
+        if ksize > 0:
+            parts.append(f"Dilate {ksize}px ✓")
+        text = "Sending to Claude:  " + "  |  ".join(parts) if parts else "Sending to Claude: raw image"
+        self._send_status_label.setText(text)
+        self._send_status_label.setVisible(True)
 
     def _on_mouse_moved(self, fx: float, fy: float) -> None:
         self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
