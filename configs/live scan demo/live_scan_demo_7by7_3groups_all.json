@@ -1,17 +1,42 @@
 {
   "segmentation_params": {
     "overlap_thresh": 0.5,
-    "unions_only": true,
+    "unions_only": false,
     "blob_detection_method": "simple",
-    "min_threshold_intensity": 60,
-    "min_threshold_area": 60
+    "min_threshold_intensity": 0,
+    "min_threshold_area": 100
   },
   "scan_params": {
-    "label": "simple_test",
-    "scan_id": "111111",
+    "label": "live_scan_demo",
+    "scan_id": "0",
     "zp_move_flag": 0,
     "smar_move_flag": 0,
     "roi_positions_file": null
+  },
+  "export_params": {
+    "use_intensity_filter": false,
+    "elem_list": [
+      [
+        "Ca",
+        "Fe",
+        "S"
+      ],
+      [
+        "Al",
+        "Cl",
+        "K"
+      ],
+      [
+        "Mg",
+        "P",
+        "Ti"
+      ]
+    ],
+    "export_norm": "sclr1_ch4",
+    "data_wd": "/home/codingcarlos/Desktop/Carlos Selected Grid Scans/7by7_automap",
+    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
+    "tiled_uri": null
   },
   "mosaic_params": {
     "dets": "dets_fast",
@@ -28,8 +53,8 @@
     "mot2_e": 12.5,
     "exp_t": 0.005,
     "step_size": 0.25,
-    "xlen": 50,
-    "ylen": 25,
+    "xlen": 162.5,
+    "ylen": 162.5,
     "overlap_per": 0,
     "dwell": 0.01,
     "mll": false,
@@ -41,19 +66,6 @@
     "step_size_fine": 0.1,
     "exp_t_fine": 0.005,
     "fine_scan_pad_ratio": 0.3
-  },
-  "export_params": {
-    "elem_list": [
-      [
-        "Ca",
-        "S"
-      ]
-    ],
-    "export_norm": "sclr1_ch4",
-    "data_wd": "/home/codingcarlos/mosaic_175um_stitched",
-    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
-    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
-    "tiled_uri": null
   },
   "calibration_params": {
     "microns_per_pixel_x": 1.5,
@@ -88,10 +100,14 @@
       "filter_by_color": false,
       "filter_by_circularity": false,
       "gui_threshold_values": [
-        60
+        0,
+        10,
+        100
       ],
       "gui_min_area_values": [
-        60
+        100,
+        200,
+        300
       ]
     }
   }

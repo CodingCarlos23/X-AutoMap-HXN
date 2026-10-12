@@ -3,15 +3,44 @@
     "overlap_thresh": 0.5,
     "unions_only": true,
     "blob_detection_method": "simple",
-    "min_threshold_intensity": 50,
+    "min_threshold_intensity": 0,
     "min_threshold_area": 100
   },
   "scan_params": {
-    "label": "live_scan_demo",
-    "scan_id": "1000",
+    "label": "simple_test",
+    "scan_id": "0",
     "zp_move_flag": 0,
     "smar_move_flag": 0,
     "roi_positions_file": null
+  },
+  "export_params": {
+    "export_norm": "sclr1_ch4",
+    "data_wd": "/home/codingcarlos/Desktop/Carlos Selected Grid Scans/7by7_automap",
+    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
+    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
+    "tiled_uri": null,
+    "use_intensity_filter": true,
+    "groups": [
+      {
+        "elements": [
+          {
+            "element": "Ca",
+            "intensity": 100,
+            "offset": 50
+          },
+          {
+            "element": "Fe",
+            "intensity": 100,
+            "offset": 50
+          },
+          {
+            "element": "S",
+            "intensity": 100,
+            "offset": 50
+          }
+        ]
+      }
+    ]
   },
   "mosaic_params": {
     "dets": "dets_fast",
@@ -29,7 +58,7 @@
     "exp_t": 0.005,
     "step_size": 0.25,
     "xlen": 50,
-    "ylen": 50,
+    "ylen": 25,
     "overlap_per": 0,
     "dwell": 0.01,
     "mll": false,
@@ -41,16 +70,6 @@
     "step_size_fine": 0.1,
     "exp_t_fine": 0.005,
     "fine_scan_pad_ratio": 0.3
-  },
-  "export_params": {
-    "elem_list": [
-      ["Ca", "Fe", "S"]
-    ],
-    "export_norm": "sclr1_ch4",
-    "data_wd": "/home/codingcarlos/Documents/github/automap simulation creator/sim_data",
-    "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
-    "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
-    "tiled_uri": null
   },
   "calibration_params": {
     "microns_per_pixel_x": 1.5,
@@ -85,10 +104,14 @@
       "filter_by_color": false,
       "filter_by_circularity": false,
       "gui_threshold_values": [
-        10
+        0,
+        10,
+        100
       ],
       "gui_min_area_values": [
-        50
+        100,
+        200,
+        300
       ]
     }
   }

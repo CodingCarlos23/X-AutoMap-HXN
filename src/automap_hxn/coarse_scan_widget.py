@@ -258,6 +258,24 @@ class CoarseScanWidget(QWidget):
             QMessageBox.critical(self, "Error Loading JSON", str(err))
             return
 
+        ep = params.get("export_params", {})
+        use_intensity_filter = ep.get("use_intensity_filter", False)
+        config_name = Path(path).name
+
+        if use_intensity_filter:
+            groups = ep.get("groups", [])
+            if not groups or not all(g.get("elements") for g in groups):
+                QMessageBox.warning(self, "Invalid Configuration",
+                                    f"{config_name}: use_intensity_filter is true but "
+                                    f"'groups' with elements is missing or empty.")
+                return
+        else:
+            if not ep.get("elem_list"):
+                QMessageBox.warning(self, "Invalid Configuration",
+                                    f"{config_name}: use_intensity_filter is false but "
+                                    f"'elem_list' is missing or empty in export_params.")
+                return
+
         self._json_path = path
         self._json_params = params
         self._json_path_edit.setText(path)

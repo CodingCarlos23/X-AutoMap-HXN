@@ -588,19 +588,36 @@ class MainWindow(QWidget):
                                 f"Could not read {config_path.name}:\n{error}")
             return
 
-        elem_list_nested = config.get("export_params", {}).get("elem_list", [])
-        if not elem_list_nested:
+        ep = config.get("export_params", {})
+        use_intensity_filter = ep.get("use_intensity_filter", False)
+
+        if use_intensity_filter:
+            groups = ep.get("groups", [])
+            has_elements = groups and all(g.get("elements") for g in groups)
+            if not has_elements:
+                QMessageBox.warning(self, "Invalid Configuration",
+                                    f"{config_path.name}: use_intensity_filter is true but "
+                                    f"'groups' with elements is missing or empty.")
+                return
+            unique_elements = list(dict.fromkeys(
+                e["element"] for g in groups for e in g.get("elements", [])
+            ))
+        else:
+            elem_list_nested = ep.get("elem_list", [])
+            if not elem_list_nested:
+                QMessageBox.warning(self, "Invalid Configuration",
+                                    f"{config_path.name}: use_intensity_filter is false but "
+                                    f"'elem_list' is missing or empty in export_params.")
+                return
+            if isinstance(elem_list_nested[0], str):
+                elem_list_nested = [elem_list_nested]
+            unique_elements = list(dict.fromkeys(
+                e for group in elem_list_nested for e in group
+            ))
+
+        if not unique_elements:
             QMessageBox.warning(self, "Invalid Configuration",
-                                f"{config_path.name} has no elem_list in export_params.")
-            return
-        if isinstance(elem_list_nested[0], str):
-            elem_list_nested = [elem_list_nested]
-        unique_elements = list(dict.fromkeys(
-            e for group in elem_list_nested for e in group
-        ))
-        if not unique_elements or len(unique_elements) > 3:
-            QMessageBox.warning(self, "Invalid Configuration",
-                                f"elem_list must have 1–3 unique elements, got {unique_elements}")
+                                f"{config_path.name}: no elements found in config.")
             return
 
         # Load detection settings from the config

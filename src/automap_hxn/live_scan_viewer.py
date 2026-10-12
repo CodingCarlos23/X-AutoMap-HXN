@@ -853,6 +853,7 @@ class LiveScanViewerWidget(QWidget):
         for scan_id, (idx, tiff_w, results_dir, gname) in list(self._pending_boxes.items()):
             boxes = _load_union_boxes(results_dir, gname)
             if boxes:
+                self._tile_all_boxes[scan_id] = _load_all_boxes(results_dir, gname or None)
                 self._draw_boxes(idx, scan_id, tiff_w, boxes)
                 del self._pending_boxes[scan_id]
 

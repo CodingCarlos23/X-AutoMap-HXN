@@ -12,7 +12,7 @@ from .blobs.detection import detect_blobs
 from .blobs.processing import find_union_blobs
 from .plotting import plot_analysis_results
 from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict, resize_if_needed
-from .export import create_rgb_tiff, create_all_elements_tiff, create_merged_boxes_tiff, save_each_blob_as_individual_scan
+from .export import create_rgb_tiff, create_all_elements_tiff, create_merged_boxes_tiff
 
 
 def _dedup_formatted_blobs(formatted_unions, overlap_thresh):
@@ -224,13 +224,15 @@ def analyze_data_local(scan_id=None,
                 hi = entry["intensity"] + entry["offset"]
                 intensity_ranges[entry["element"]] = (lo, hi)
         if not elem_list_of_lists:
-            print("groups is empty in intensity filter mode.")
-            return
+            raise ValueError(
+                "use_intensity_filter is true but 'groups' with elements is missing or empty in the config."
+            )
     else:
         elem_list_of_lists = params.get("export_params", {}).get("elem_list", []) or params.get("elem_list", [])
         if not elem_list_of_lists:
-            print("elem_list is empty.")
-            return
+            raise ValueError(
+                "use_intensity_filter is false but 'elem_list' is missing or empty in export_params."
+            )
         if isinstance(elem_list_of_lists[0], str):
             elem_list_of_lists = [elem_list_of_lists]
 
@@ -407,6 +409,12 @@ def analyze_data_local(scan_id=None,
             print(f"[SKIP] No valid blobs found for group {group_name}")
             continue
         elif len(group_blobs_for_union) >= 2 and unions_only:
+            # Strict: all elements in the group must have blobs — no 2-element fallback for 3-element groups
+            if len(group_blobs_for_union) < len(elem_list):
+                color_keys = ['red', 'green', 'blue']
+                missing = [elem_list[i] for i, c in enumerate(color_keys[:len(elem_list)]) if c not in group_blobs_for_union]
+                print(f"[SKIP] {group_name}: only {len(group_blobs_for_union)}/{len(elem_list)} elements have blobs — skipping unions (missing: {missing})")
+                continue
             # Multiple elements with unions_only=True: create union boxes (intersections only)
             print(f"[UNION MODE] Creating union boxes for {group_name}")
             overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
@@ -482,10 +490,6 @@ def analyze_data_local(scan_id=None,
             with open(out_json, "w") as f:
                 json.dump(serializable_unions, f, indent=2)
 
-            # Save the INDIVIDUAL JSONs (Headless finds these)
-            # This function must create files that do NOT start with "unions_output"
-            save_each_blob_as_individual_scan(formatted_unions, results_dir)
-            
             # Initialize results dictionary for this group
             all_results['groups'][group_name] = {
                 'formatted_unions': formatted_unions,

@@ -515,6 +515,41 @@ class JSONMakerWidget(QWidget):
             self.json_maker_fields["scan_params"][key] = (field_widget, default)
         layout.addWidget(scan_group)
 
+        export_group = QGroupBox("export_params")
+        export_outer = QVBoxLayout(export_group)
+        export_outer.setContentsMargins(10, 22, 10, 10)
+        export_outer.setSpacing(6)
+        self._export_form = QFormLayout()
+        self._export_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.json_maker_fields["export_params"] = {}
+        for key, default in JSON_MAKER_COMMON_SECTIONS["export_params"].items():
+            field_widget = self._make_json_maker_field(key, default)
+            self._export_form.addRow(key, field_widget)
+            self.json_maker_fields["export_params"][key] = (field_widget, default)
+        self._intensity_filter_checkbox = QCheckBox()
+        self._intensity_filter_checkbox.stateChanged.connect(self._on_intensity_filter_toggled)
+        self._export_form.addRow("Use Intensity Filter", self._intensity_filter_checkbox)
+        export_outer.addLayout(self._export_form)
+
+        self._intensity_filter_group = QGroupBox("Intensity Filter Groups")
+        self._intensity_filter_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #000; margin-top: 14px; padding-top: 8px; }"
+        )
+        self._intensity_filter_group.setVisible(False)
+        ifg_outer = QVBoxLayout(self._intensity_filter_group)
+        ifg_outer.setSpacing(6)
+        self._intensity_groups_layout = QVBoxLayout()
+        self._intensity_groups_layout.setSpacing(6)
+        ifg_outer.addLayout(self._intensity_groups_layout)
+        add_group_btn = QPushButton("+ Add Group")
+        add_group_btn.setFixedWidth(110)
+        add_group_btn.clicked.connect(lambda: self._add_intensity_group())
+        ifg_outer.addWidget(add_group_btn)
+        export_outer.addWidget(self._intensity_filter_group)
+        layout.addWidget(export_group)
+
+        self._intensity_group_data: list[dict] = []
+
         mosaic_group = QGroupBox("mosaic_params")
         mosaic_form = QFormLayout(mosaic_group)
         mosaic_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -536,41 +571,6 @@ class JSONMakerWidget(QWidget):
             fine_form.addRow(_row_label("fine_scan_params", key), field_widget)
             self.json_maker_fields["fine_scan_params"][key] = (field_widget, default)
         layout.addWidget(fine_group)
-
-        export_group = QGroupBox("export_params")
-        export_form = QFormLayout(export_group)
-        export_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        export_form.setContentsMargins(10, 22, 10, 10)
-        self.json_maker_fields["export_params"] = {}
-        for key, default in JSON_MAKER_COMMON_SECTIONS["export_params"].items():
-            field_widget = self._make_json_maker_field(key, default)
-            export_form.addRow(key, field_widget)
-            self.json_maker_fields["export_params"][key] = (field_widget, default)
-        layout.addWidget(export_group)
-
-        # --- Intensity Filter ---
-        self._intensity_filter_checkbox = QCheckBox("Use Intensity Filter (per-element mean intensity range)")
-        self._intensity_filter_checkbox.setStyleSheet("color: #000000; font-size: 13px; font-weight: bold; padding: 4px 0;")
-        self._intensity_filter_checkbox.stateChanged.connect(self._on_intensity_filter_toggled)
-        layout.addWidget(self._intensity_filter_checkbox)
-
-        self._intensity_filter_group = QGroupBox("Intensity Filter Groups")
-        self._intensity_filter_group.setStyleSheet(
-            "QGroupBox { font-weight: bold; color: #ccc; margin-top: 14px; padding-top: 8px; }"
-        )
-        self._intensity_filter_group.setVisible(False)
-        ifg_outer = QVBoxLayout(self._intensity_filter_group)
-        ifg_outer.setSpacing(6)
-        self._intensity_groups_layout = QVBoxLayout()
-        self._intensity_groups_layout.setSpacing(6)
-        ifg_outer.addLayout(self._intensity_groups_layout)
-        add_group_btn = QPushButton("+ Add Group")
-        add_group_btn.setFixedWidth(110)
-        add_group_btn.clicked.connect(lambda: self._add_intensity_group())
-        ifg_outer.addWidget(add_group_btn)
-        layout.addWidget(self._intensity_filter_group)
-
-        self._intensity_group_data: list[dict] = []
 
         calib_group = QGroupBox("calibration_params")
         calib_form = QFormLayout(calib_group)
@@ -874,6 +874,11 @@ class JSONMakerWidget(QWidget):
     def _on_intensity_filter_toggled(self, state):
         checked = bool(state)
         self._intensity_filter_group.setVisible(checked)
+        elem_field, _ = self.json_maker_fields["export_params"]["elem_list"]
+        elem_label = self._export_form.labelForField(elem_field)
+        elem_field.setVisible(not checked)
+        if elem_label:
+            elem_label.setVisible(not checked)
         if checked and not self._intensity_group_data:
             self._seed_intensity_groups_from_elem_list()
 
@@ -896,7 +901,7 @@ class JSONMakerWidget(QWidget):
         idx = len(self._intensity_group_data) + 1
         group_box = QGroupBox(f"Group {idx}")
         group_box.setStyleSheet(
-            "QGroupBox { color: #bbb; margin-top: 12px; padding-top: 6px; }"
+            "QGroupBox { color: #000; margin-top: 12px; padding-top: 6px; }"
         )
         group_layout = QVBoxLayout(group_box)
         group_layout.setSpacing(4)
@@ -906,7 +911,7 @@ class JSONMakerWidget(QWidget):
         for lbl_text, w in [("Element", 80), ("Intensity", 70), ("Offset", 60)]:
             lbl = QLabel(lbl_text)
             lbl.setFixedWidth(w)
-            lbl.setStyleSheet("color: #999; font-size: 11px;")
+            lbl.setStyleSheet("color: #000; font-size: 11px;")
             header.addWidget(lbl)
         header.addStretch()
         group_layout.addLayout(header)
@@ -941,13 +946,16 @@ class JSONMakerWidget(QWidget):
         gd["box"].deleteLater()
 
     def _add_intensity_element_row(self, gd: dict, elem_name: str = "", intensity: int = 0, offset: int = 0):
+        if len(gd["rows"]) >= 3:
+            QMessageBox.warning(None, "Limit Reached", "Each group supports a maximum of 3 elements.")
+            return
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
 
         _input_style = (
-            "background: #1e1e22; color: #eee; border: 1px solid #555; "
+            "background: #ffffff; color: #000; border: 1px solid #000; "
             "border-radius: 3px; padding: 2px 4px; font-size: 12px;"
         )
 
@@ -956,26 +964,24 @@ class JSONMakerWidget(QWidget):
         elem_edit.setFixedWidth(80)
         elem_edit.setStyleSheet(_input_style)
 
-        intens_spin = QSpinBox()
-        intens_spin.setRange(0, 100000)
-        intens_spin.setValue(intensity)
-        intens_spin.setFixedWidth(70)
-        intens_spin.setStyleSheet(_input_style)
+        intens_edit = QLineEdit(str(intensity) if intensity else "")
+        intens_edit.setPlaceholderText("e.g. 100")
+        intens_edit.setFixedWidth(70)
+        intens_edit.setStyleSheet(_input_style)
 
-        offset_spin = QSpinBox()
-        offset_spin.setRange(0, 100000)
-        offset_spin.setValue(offset)
-        offset_spin.setFixedWidth(60)
-        offset_spin.setStyleSheet(_input_style)
+        offset_edit = QLineEdit(str(offset) if offset else "")
+        offset_edit.setPlaceholderText("e.g. 50")
+        offset_edit.setFixedWidth(60)
+        offset_edit.setStyleSheet(_input_style)
 
         remove_btn = QPushButton("✕")
         remove_btn.setFixedWidth(28)
-        rd = {"elem": elem_edit, "intensity": intens_spin, "offset": offset_spin, "widget": row_widget}
+        rd = {"elem": elem_edit, "intensity": intens_edit, "offset": offset_edit, "widget": row_widget}
         remove_btn.clicked.connect(lambda: self._remove_intensity_element_row(gd, rd))
 
         row_layout.addWidget(elem_edit)
-        row_layout.addWidget(intens_spin)
-        row_layout.addWidget(offset_spin)
+        row_layout.addWidget(intens_edit)
+        row_layout.addWidget(offset_edit)
         row_layout.addWidget(remove_btn)
         row_layout.addStretch()
 
@@ -1011,10 +1017,18 @@ class JSONMakerWidget(QWidget):
                     raise ValueError(
                         f"Intensity Filter Group {g_idx}, row {r_idx}: element name is blank."
                     )
+                try:
+                    intensity_val = int(rd["intensity"].text().strip())
+                    offset_val = int(rd["offset"].text().strip())
+                except ValueError:
+                    raise ValueError(
+                        f"Intensity Filter Group {g_idx}, row {r_idx}: "
+                        "intensity and offset must be whole numbers."
+                    )
                 elements.append({
                     "element": elem,
-                    "intensity": rd["intensity"].value(),
-                    "offset": rd["offset"].value(),
+                    "intensity": intensity_val,
+                    "offset": offset_val,
                 })
             groups.append({"elements": elements})
         return groups
