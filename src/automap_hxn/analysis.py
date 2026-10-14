@@ -339,6 +339,34 @@ def analyze_data_local(scan_id=None,
                         **method_params)
         precomputed_blobs[color][(min_thresh, min_area)] = b
 
+    # --- 3b. Save master raw-detections JSON (pre-filter, all elements) ---
+    color_to_element = {v: k for k, v in element_to_color.items()}
+    master_raw = {}
+    _raw_counter = 1
+    for _color, _thresh_dict in precomputed_blobs.items():
+        _elem = color_to_element.get(_color, _color)
+        for _blobs in _thresh_dict.values():
+            for _blob in _blobs:
+                _rx = x_start + (_blob['center'][0] * step_size)
+                _ry = y_start + (_blob['center'][1] * step_size)
+                _sz = _blob.get('box_size', _blob['radius'] * 2) * step_size
+                _name = f"Raw {_elem} #{_raw_counter}"
+                master_raw[_name] = {
+                    "text": _name,
+                    "element": _elem,
+                    "cx": _rx, "cy": _ry, "num_x": _sz, "num_y": _sz,
+                    "image_center": _blob['center'],
+                    "image_radius": _blob['radius'],
+                    "color": _blob['color'],
+                    "max_intensity": _blob.get('max_intensity', 0),
+                    "mean_intensity": _blob.get('mean_intensity', 0),
+                }
+                _raw_counter += 1
+    master_raw_path = Path(results_dir) / "raw_detections_master.json"
+    with open(master_raw_path, "w") as f:
+        json.dump(make_json_serializable(master_raw), f, indent=2)
+    print(f"[RAW MASTER] Saved {len(master_raw)} raw blobs → {master_raw_path.name}")
+
     # --- 4. Union & Export Loop ---
     all_results = {
         'scan_id': scan_id,

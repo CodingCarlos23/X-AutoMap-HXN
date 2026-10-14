@@ -175,7 +175,7 @@ def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=No
     xlen = float(_bp_mp.get('xlen', 100))
     ylen = float(_bp_mp.get('ylen', 100))
     overlap_per = float(_bp_mp.get('overlap_per', 0))
-    step_size = float(_bp_mp.get('step_size', 0.25))
+    step_size = float(_bp_sp.get('step_size', 0.25))
     dwell = float(_bp_mp.get('dwell', 0.01))
     mll = bool(_bp_mp.get('mll', False))
     grid_step = (_bp_mp.get("mot1_e") or _bp_sp.get("mot1_e")) - (_bp_mp.get("mot1_s") or _bp_sp.get("mot1_s"))
@@ -238,6 +238,7 @@ def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=No
                 RM.item_add(BPlan("move_relative", mot_x, x_rel))
                 RM.item_add(BPlan("move_relative", mot_y, y_rel))
                 for req in coarse_requests:
+                    print(f"[MOSAIC] Queuing: {req['plan_name']} {req['plan_args']}")
                     RM.item_add(BPlan(req["plan_name"], *req["plan_args"]))
                     print(f"[MOSAIC] Queued: {req['plan_name']} {req['plan_args']}")
                 RM.queue_start()

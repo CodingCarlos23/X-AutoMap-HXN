@@ -31,7 +31,6 @@
     "xlen": 50,
     "ylen": 25,
     "overlap_per": 0,
-    "step_size": 250,
     "dwell": 0.01,
     "mll": false,
     "remote_seg": false,

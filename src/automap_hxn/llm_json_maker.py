@@ -43,6 +43,7 @@ KNOWN_MODELS = [
     "gpt-4.1",
     "gpt-5.5",
     "gpt-5.6-terra",
+    "gpt-5.6-sol",
 ]
 
 _active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget

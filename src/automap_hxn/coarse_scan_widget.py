@@ -296,7 +296,7 @@ class CoarseScanWidget(QWidget):
         xlen = mp.get("xlen", "?")
         ylen = mp.get("ylen", "?")
         overlap = mp.get("overlap_per", 0)
-        step = mp.get("step_size", "?")
+        step = sp.get("step_size", "?")
         dwell = mp.get("dwell", "?")
         optics = "MLL" if mp.get("mll", False) else "ZP"
         remote = mp.get("remote_seg", True)
@@ -369,7 +369,7 @@ class CoarseScanWidget(QWidget):
                 float(mp.get("xlen", 100)),
                 float(mp.get("ylen", 100)),
                 float(mp.get("overlap_per", 0)),
-                float(mp.get("step_size", 0.25)),
+                float(sp.get("step_size", 0.25)),
                 float(mp.get("dwell", 0.01)),
             )
         except (TypeError, ValueError) as err:
@@ -392,7 +392,7 @@ class CoarseScanWidget(QWidget):
             f"Tiles: {x_tiles} × {y_tiles} = {x_tiles * y_tiles} total",
             f"Per-tile scan: {mp.get('mot1', sp.get('mot1','?'))} / {mp.get('mot2', sp.get('mot2','?'))}  "
             f"[{mot1_s:.2f} → {mot1_e:.2f}]",
-            f"Step size: {mp.get('step_size')} µm   Dwell: {mp.get('dwell')} s",
+            f"Step size: {sp.get('step_size')} µm   Dwell: {mp.get('dwell')} s",
             f"Est. total time: {display_time:.1f} {unit}",
             f"Remote seg: {mp.get('remote_seg', True)}   "
             f"Follow-up fine scan: {mp.get('followup_fine_scan', False)}",
@@ -419,7 +419,7 @@ class CoarseScanWidget(QWidget):
             x_tiles, y_tiles, est_min = _calc_tile_info(
                 float(mp.get("mot1_s", sp.get("mot1_s", 0))), float(mp.get("mot1_e", sp.get("mot1_e", 0))),
                 float(mp.get("xlen", 100)), float(mp.get("ylen", 100)),
-                float(mp.get("overlap_per", 0)), float(mp.get("step_size", 0.25)),
+                float(mp.get("overlap_per", 0)), float(sp.get("step_size", 0.25)),
                 float(mp.get("dwell", 0.01)),
             )
         except (TypeError, ValueError) as err:

@@ -11,18 +11,31 @@
     "scan_id": "111111",
     "zp_move_flag": 0,
     "smar_move_flag": 0,
-    "roi_positions_file": null
+    "roi_positions_file": null,
+    "step_size": "ERROR_TEST"
   },
   "mosaic_params": {
     "dets": "dets_fast",
-    "det_names": ["fs", "eiger2", "xspress3"],
-    "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
-    "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
+    "det_names": [
+      "fs",
+      "eiger2",
+      "xspress3"
+    ],
+    "mot1": "zpssx",
+    "mot1_s": -12.5,
+    "mot1_e": 12.5,
+    "mot2": "zpssy",
+    "mot2_s": -12.5,
+    "mot2_e": 12.5,
     "exp_t": 0.005,
-    "step_size": "ERROR_TEST",
-    "xlen": 50, "ylen": 25, "overlap_per": 0,
-    "dwell": 0.01, "mll": false,
-    "remote_seg": false, "followup_fine_scan": false, "ref_scan_id": null
+    "xlen": 50,
+    "ylen": 25,
+    "overlap_per": 0,
+    "dwell": 0.01,
+    "mll": false,
+    "remote_seg": false,
+    "followup_fine_scan": false,
+    "ref_scan_id": null
   },
   "fine_scan_params": {
     "step_size_fine": 0.1,
@@ -30,7 +43,13 @@
     "fine_scan_pad_ratio": 0.3
   },
   "export_params": {
-    "elem_list": [["Ca", "Fe", "S"]],
+    "elem_list": [
+      [
+        "Ca",
+        "Fe",
+        "S"
+      ]
+    ],
     "export_norm": "sclr1_ch4",
     "data_wd": "/home/codingcarlos/mosaic_175um_stitched",
     "tiled_reconstructions": null,
@@ -48,9 +67,15 @@
     "proceed_with_fine_scan": false
   },
   "morphology_params": {
-    "normalize_kernel_size": [3, 3],
+    "normalize_kernel_size": [
+      3,
+      3
+    ],
     "dilate_iterations": 2,
-    "blur_kernel": [3, 3]
+    "blur_kernel": [
+      3,
+      3
+    ]
   },
   "analysis_params": {
     "analysis": true,
@@ -63,8 +88,12 @@
       "threshold_step": 5,
       "filter_by_color": false,
       "filter_by_circularity": false,
-      "gui_threshold_values": [10],
-      "gui_min_area_values": [50]
+      "gui_threshold_values": [
+        10
+      ],
+      "gui_min_area_values": [
+        50
+      ]
     }
   }
 }

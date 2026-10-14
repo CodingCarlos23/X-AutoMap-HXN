@@ -134,7 +134,7 @@ def build_coarse_scan_requests(json_path):
     y_motor = _sp("mot2", "zpssy")
     x_start, x_end = float(_sp("mot1_s", 0)), float(_sp("mot1_e", 0))
     y_start, y_end = float(_sp("mot2_s", 0)), float(_sp("mot2_e", 0))
-    step_size = _sp("step_size_coarse", _sp("step_size", 0.25))
+    step_size = scan_params.get("step_size_coarse", scan_params.get("step_size", 0.25))
     if step_size <= 0:
         raise ValueError("scan_params.step_size must be greater than zero")
 

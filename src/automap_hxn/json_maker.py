@@ -116,6 +116,7 @@ JSON_MAKER_COMMON_SECTIONS = {
     "scan_params": {
         "label": "universal_test", "scan_id": None,
         "zp_move_flag": 0, "smar_move_flag": 0, "roi_positions_file": None,
+        "step_size": 0.25,
     },
     "fine_scan_params": {
         "step_size_fine": 0.1, "exp_t_fine": 0.005, "fine_scan_pad_ratio": 0.3,
@@ -145,7 +146,7 @@ JSON_MAKER_COMMON_SECTIONS = {
         "dets": "dets_fast", "det_names": ["fs", "eiger2", "xspress3"],
         "mot1": "zpssx", "mot1_s": -12.5, "mot1_e": 12.5,
         "mot2": "zpssy", "mot2_s": -12.5, "mot2_e": 12.5,
-        "exp_t": 0.005, "step_size": 0.25,
+        "exp_t": 0.005,
         "xlen": 50, "ylen": 25, "overlap_per": 0,
         "dwell": 0.01, "mll": False,
         "remote_seg": False, "followup_fine_scan": False, "ref_scan_id": None,
@@ -168,7 +169,7 @@ _FIELD_UNITS = {
     ("mosaic_params",     "mot2_s"):              "µm",
     ("mosaic_params",     "mot2_e"):              "µm",
     ("mosaic_params",     "exp_t"):               "s",
-    ("mosaic_params",     "step_size"):           "µm",
+    ("scan_params",       "step_size"):            "µm",
     ("mosaic_params",     "xlen"):                "µm",
     ("mosaic_params",     "ylen"):                "µm",
     ("mosaic_params",     "overlap_per"):         "%",
