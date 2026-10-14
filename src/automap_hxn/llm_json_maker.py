@@ -38,9 +38,11 @@ KNOWN_MODELS = [
     # ── Anthropic (via NSLS-II APIM or direct) ──────
     "claude-sonnet-4-6",
     "claude-opus-4-5",
+    "claude-fable-5",
     # ── OpenAI (via NSLS-II APIM) ───────────────────
     "gpt-4.1",
     "gpt-5.5",
+    "gpt-5.6-terra",
 ]
 
 _active_model = MODEL  # updated by the model picker in LLMJsonMakerWidget
@@ -309,7 +311,8 @@ BOX_COLORS = [
 ]
 
 
-def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False):
+def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False,
+                       upscale: bool = False, colormap: bool = False):
     """Load any image (including 16/32-bit TIFF) and return (QPixmap, width, height)."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
@@ -322,10 +325,18 @@ def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid
         arr = (arr * 255).astype(np.uint8)
     else:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if upscale:
+        h, w = arr.shape[:2]
+        if min(h, w) < 1092:
+            scale = 1092 / min(h, w)
+            arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
-    if arr.ndim == 2:
+    if colormap and arr.ndim == 2:
+        arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+    elif arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
     else:
         arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
@@ -623,7 +634,8 @@ def _draw_coordinate_grid(arr: np.ndarray, steps: int = 10) -> np.ndarray:
     return arr
 
 
-def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False):
+def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True,
+                          grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
     """Load image, optionally normalize and dilate, downsample to max_dim, return base64-PNG string."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
@@ -636,6 +648,11 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, nor
         arr = (arr * 255).astype(np.uint8)
     else:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if upscale:
+        h, w = arr.shape[:2]
+        if min(h, w) < 1092:
+            scale = 1092 / min(h, w)
+            arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
@@ -643,7 +660,10 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, nor
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     if arr.ndim == 2:
         arr = clahe.apply(arr)
-        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        if colormap:
+            arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
+        else:
+            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
     else:
         lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
         lab[:, :, 0] = clahe.apply(lab[:, :, 0])
@@ -669,17 +689,21 @@ class _LocateThread(QThread):
     result = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True, grid_overlay: bool = False):
+    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True,
+                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
         self.normalize = normalize
         self.grid_overlay = grid_overlay
+        self.upscale = upscale
+        self.colormap = colormap
         self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
-            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize, grid_overlay=self.grid_overlay)
+            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize,
+                                             grid_overlay=self.grid_overlay, upscale=self.upscale, colormap=self.colormap)
             provider = _get_provider(_active_model)
             if provider == "anthropic":
                 parsed = self._query_anthropic(img_b64)
@@ -791,12 +815,15 @@ class _LocateTileThread(QThread):
     error = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True, grid_overlay: bool = False):
+    def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True,
+                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
         self.normalize = normalize
         self.grid_overlay = grid_overlay
+        self.upscale = upscale
+        self.colormap = colormap
         self._provider = _get_provider(_active_model)
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
@@ -815,6 +842,11 @@ class _LocateTileThread(QThread):
                 arr = (arr * 255).astype(np.uint8)
             else:
                 arr = np.clip(arr, 0, 255).astype(np.uint8)
+            if self.upscale:
+                h, w = arr.shape[:2]
+                if min(h, w) < 1092:
+                    scale = 1092 / min(h, w)
+                    arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
             if self.dilate_ksize > 0:
                 kernel = np.ones((self.dilate_ksize, self.dilate_ksize), np.uint8)
                 arr = cv2.dilate(arr, kernel)
@@ -837,7 +869,7 @@ class _LocateTileThread(QThread):
             for qi, (name, crop, xoff, yoff, xscale, yscale) in enumerate(quads):
                 self.progress.emit(f"Quadrant {qi + 1}/4 ({name})...")
                 try:
-                    img_b64 = self._encode_crop(crop)
+                    img_b64 = self._encode_crop(crop, colormap=self.colormap)
                     features = self._query(img_b64)
                 except Exception as e:
                     features = []
@@ -863,9 +895,12 @@ class _LocateTileThread(QThread):
             self.error.emit(str(e))
 
     @staticmethod
-    def _encode_crop(crop: np.ndarray) -> str:
+    def _encode_crop(crop: np.ndarray, colormap: bool = False) -> str:
         if crop.ndim == 2:
-            bgr = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+            if colormap:
+                bgr = cv2.applyColorMap(crop, cv2.COLORMAP_INFERNO)
+            else:
+                bgr = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
         else:
             bgr = crop.copy()
         ok, buf = cv2.imencode(".png", bgr)
@@ -1279,6 +1314,31 @@ class _LocateTab(QWidget):
         tile_row.addWidget(self._tile_check)
         tile_row.addStretch()
         single_layout.addLayout(tile_row)
+
+        upscale_row = QHBoxLayout()
+        self._upscale_check = QCheckBox("Upscale to 1092px min")
+        self._upscale_check.setChecked(True)
+        self._upscale_check.setToolTip(
+            "If the shortest image dimension is below 1092px, upscale before sending to the VLM.\n"
+            "1092px matches Claude's native vision encoder resolution; GPT-4o tiles at similar sizes.\n"
+            "Your 150×150 XRF scans become 1092×1092 — particles are visible and boxable."
+        )
+        self._upscale_check.toggled.connect(self._on_image_options_changed)
+        upscale_row.addWidget(self._upscale_check)
+        upscale_row.addStretch()
+        single_layout.addLayout(upscale_row)
+
+        colormap_row = QHBoxLayout()
+        self._colormap_check = QCheckBox("Inferno colormap")
+        self._colormap_check.setToolTip(
+            "Render grayscale XRF images with the inferno colormap (black → red → yellow → white).\n"
+            "Makes bright particles visually pop for better VLM localization."
+        )
+        self._colormap_check.toggled.connect(self._on_image_options_changed)
+        colormap_row.addWidget(self._colormap_check)
+        colormap_row.addStretch()
+        single_layout.addLayout(colormap_row)
+
         layout.addWidget(self._single_widget)
 
         # --- XRF ROI mode controls ---
@@ -1608,18 +1668,22 @@ class _LocateTab(QWidget):
             ksize = self._get_dilate_ksize()
             normalize = self._normalize_check.isChecked()
             grid = self._grid_check.isChecked()
+            upscale = self._upscale_check.isChecked()
+            colormap = self._colormap_check.isChecked()
             use_tile = self._tile_check.isChecked()
             if use_tile:
                 self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
                 self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize,
                                                         system_prompt_override=self._active_prompt,
-                                                        normalize=normalize, grid_overlay=grid)
+                                                        normalize=normalize, grid_overlay=grid,
+                                                        upscale=upscale, colormap=colormap)
                 self._locate_thread.progress.connect(self._on_tile_progress)
             else:
                 self.status_label.setText("Analyzing... this may take 30–60 seconds.")
                 self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize,
                                                     system_prompt_override=self._active_prompt,
-                                                    normalize=normalize, grid_overlay=grid)
+                                                    normalize=normalize, grid_overlay=grid,
+                                                    upscale=upscale, colormap=colormap)
             self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
         self._locate_thread.error.connect(self._on_error)
@@ -1703,12 +1767,16 @@ class _LocateTab(QWidget):
     def _update_display(self) -> None:
         normalize = self._normalize_check.isChecked()
         grid = self._grid_check.isChecked()
+        upscale = self._upscale_check.isChecked()
+        colormap = self._colormap_check.isChecked()
         ksize = self._get_dilate_ksize()
         self._orig_pixmap, _, _ = _load_image_pixmap(
-            self._image_path, dilate_ksize=0, normalize=normalize, grid_overlay=grid)
+            self._image_path, dilate_ksize=0, normalize=normalize, grid_overlay=grid,
+            upscale=upscale, colormap=colormap)
         if ksize > 0:
             self._dilated_pixmap, _, _ = _load_image_pixmap(
-                self._image_path, dilate_ksize=ksize, normalize=normalize, grid_overlay=grid)
+                self._image_path, dilate_ksize=ksize, normalize=normalize, grid_overlay=grid,
+                upscale=upscale, colormap=colormap)
         pm = self._current_pixmap()
         if pm:
             self._show_pixmap(pm)
@@ -1726,6 +1794,10 @@ class _LocateTab(QWidget):
         ksize = self._get_dilate_ksize()
         if ksize > 0:
             parts.append(f"Dilate {ksize}px ✓")
+        if self._upscale_check.isChecked():
+            parts.append("Upscale ✓")
+        if self._colormap_check.isChecked():
+            parts.append("Inferno ✓")
         text = "Sending to Claude:  " + "  |  ".join(parts) if parts else "Sending to Claude: raw image"
         self._send_status_label.setText(text)
         self._send_status_label.setVisible(True)
