@@ -758,7 +758,7 @@ class _LocateThread(QThread):
         )
         with urllib.request.urlopen(req, timeout=600) as resp:
             data = json.loads(resp.read())
-        return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}"))
+        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}"))
 
     def _query_openai(self, img_b64: str) -> dict:
         key = _get_key("openai") or ""
@@ -957,7 +957,7 @@ class _LocateTileThread(QThread):
         )
         with urllib.request.urlopen(req, timeout=600) as resp:
             data = json.loads(resp.read())
-        return _parse_locate_json(data.get("content", [{}])[0].get("text", "{}")).get("features", [])
+        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
 
     def _query_openai(self, img_b64: str) -> list:
         headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
@@ -2029,6 +2029,336 @@ class _ModelTab(QWidget):
         self._check_current()
 
 
+# ── Phase ID tab ──────────────────────────────────────────────────────────────
+
+_PHASE_ID_SYSTEM_PROMPT = """\
+You are an XRF (X-ray fluorescence) data analyst. You will receive a JSON of elemental blobs \
+detected in an XRF scan. Each JSON entry represents one detected blob with these fields:
+  - element: chemical symbol (e.g. Al, Fe, Ca, S)
+  - image_center: [x, y] pixel coordinates in the scan image (x = column, y = row)
+  - image_radius: blob radius in pixels
+  - mean_intensity: average XRF signal within the blob (0–255 normalized)
+  - max_intensity: peak XRF signal
+  - cx, cy: physical scan position in microns (for beamline use — ignore for spatial grouping)
+  - num_x, num_y: physical blob size in microns (for beamline use — ignore for spatial grouping)
+  - fx_center: [fx, fy] pre-computed fractional position (image_center / image dimensions, 0–1)
+  - fx_radius: pre-computed fractional radius (image_radius / image dimensions, 0–1)
+
+Use image_center and image_radius for spatial proximity. Use fx_center and fx_radius for boxes.
+
+Go through ALL blobs in the JSON. Group blobs of different elements whose image_center positions \
+are within ~(image_radius_a + image_radius_b + 5) pixels of each other — these are co-located \
+and likely the same particle or phase. For each group, compute elemental ratios:
+  ratio(element) = mean_intensity(element) / sum(mean_intensities in group) × 100%
+
+Record any recognizable elemental compositions or material phases, showing ratio arithmetic. \
+If no known phase matches, still report the elements and their ratios.
+
+For each cluster, derive the bounding box from fx_center and fx_radius of all contributing blobs:
+  x1 = min(fx_center[0] - fx_radius)  ← top-left X
+  y1 = min(fx_center[1] - fx_radius)  ← top-left Y
+  x2 = max(fx_center[0] + fx_radius)  ← bottom-right X
+  y2 = max(fx_center[1] + fx_radius)  ← bottom-right Y
+Clamp all to [0.0, 1.0].
+
+Respond ONLY with valid JSON:
+{
+  "phases": [
+    {
+      "id": 1,
+      "material": "Stainless Steel 304",
+      "x1": 0.47, "y1": 0.45, "x2": 0.63, "y2": 0.61,
+      "elements": {"Fe": 52.0, "Cr": 29.0, "Ni": 19.0},
+      "confidence": 0.75,
+      "reasoning": "Fe at image_center=[83,79] r=8, Cr at [81,81] r=9, Ni at [84,79] r=7 — all within 5px. fx box: x1=0.47, y1=0.45, x2=0.63, y2=0.61. Ratios: Fe=233, Cr=130, Ni=85, sum=448 → Fe=52%, Cr=29%, Ni=19%. Fe-dominant with Cr+Ni — stainless steel family."
+    }
+  ],
+  "summary": "Brief overall summary of what was found across all blobs."
+}
+"""
+
+_PHASE_ID_USER_PROMPT = (
+    "Analyze the XRF elemental blob data below. Group spatially co-located blobs, compute elemental "
+    "ratios as instructed, identify the most likely material phase for each cluster, and return the "
+    "JSON response with bounding boxes and reasoning.\n\nDATA:\n"
+)
+
+
+class _PhaseIDThread(QThread):
+    result = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, json_data: dict, img_w: int, img_h: int,
+                 system_prompt: str, user_note: str = ""):
+        super().__init__()
+        self._json_data = json_data
+        self._img_w = img_w
+        self._img_h = img_h
+        self._system_prompt = system_prompt
+        self._user_note = user_note
+
+    def run(self):
+        try:
+            # Enrich entries with fractional coords before sending
+            enriched = {}
+            for k, v in self._json_data.items():
+                entry = dict(v)
+                cx, cy = entry.get("image_center", [0, 0])
+                r = entry.get("image_radius", 1)
+                entry["fx_center"] = [round(cx / self._img_w, 4), round(cy / self._img_h, 4)]
+                entry["fx_radius"] = round(r / min(self._img_w, self._img_h), 4)
+                enriched[k] = entry
+
+            import json as _json
+            data_str = _json.dumps(enriched, indent=2)
+            note = f"\n\nAdditional focus: {self._user_note}" if self._user_note.strip() else ""
+            user_msg = _PHASE_ID_USER_PROMPT + data_str + note
+
+            provider = _get_provider(_active_model)
+            if provider == "anthropic":
+                parsed = self._query_anthropic(user_msg)
+            elif provider == "openai":
+                parsed = self._query_openai(user_msg)
+            else:
+                parsed = self._query_ollama(user_msg)
+            self.result.emit(parsed)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _query_anthropic(self, user_msg: str) -> dict:
+        import json as _json, urllib.request as _req
+        key = _get_key("anthropic") or ""
+        payload = _json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 8192,
+            "system": self._system_prompt,
+            "messages": [{"role": "user", "content": user_msg}],
+        }, ensure_ascii=False).encode("utf-8")
+        request = _req.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json", "x-api-key": key,
+                     "anthropic-version": ANTHROPIC_API_VERSION},
+        )
+        with _req.urlopen(request, timeout=600) as resp:
+            data = _json.loads(resp.read())
+        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}"))
+
+    def _query_openai(self, user_msg: str) -> dict:
+        import json as _json, urllib.request as _req
+        key = _get_key("openai") or ""
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
+        if "openai" in _api_urls:
+            payload = _json.dumps({
+                "model": _get_openai_model(),
+                "instructions": self._system_prompt,
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": user_msg}]}],
+            }, ensure_ascii=False).encode("utf-8")
+            request = _req.Request(_get_openai_url(), data=payload, headers=headers)
+            with _req.urlopen(request, timeout=600) as resp:
+                data = _json.loads(resp.read())
+            return _parse_locate_json(_parse_responses_text(data))
+        else:
+            payload = _json.dumps({
+                "model": _active_model,
+                "messages": [
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+            }, ensure_ascii=False).encode("utf-8")
+            request = _req.Request(_get_openai_url(), data=payload, headers=headers)
+            with _req.urlopen(request, timeout=600) as resp:
+                data = _json.loads(resp.read())
+            return _parse_locate_json(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "{}"))
+
+    def _query_ollama(self, user_msg: str) -> dict:
+        import json as _json, urllib.request as _req
+        payload = _json.dumps({
+            "model": _active_model,
+            "messages": [
+                {"role": "system", "content": self._system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            "stream": False,
+            "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        request = _req.Request(OLLAMA_URL, data=payload,
+                               headers={"Content-Type": "application/json"})
+        with _req.urlopen(request, timeout=600) as resp:
+            data = _json.loads(resp.read())
+        return _parse_locate_json(data.get("message", {}).get("content", "{}"))
+
+
+def _draw_phase_boxes(base_pixmap, phases):
+    """Draw phase boxes with material label on a copy of base_pixmap."""
+    result = base_pixmap.copy()
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pw, ph = result.width(), result.height()
+    font = painter.font()
+    font.setPointSize(9)
+    font.setBold(True)
+    painter.setFont(font)
+
+    for i, phase in enumerate(phases):
+        color = BOX_COLORS[i % len(BOX_COLORS)]
+        x1 = int(max(0.0, min(1.0, float(phase.get("x1", 0)))) * pw)
+        y1 = int(max(0.0, min(1.0, float(phase.get("y1", 0)))) * ph)
+        x2 = int(max(0.0, min(1.0, float(phase.get("x2", 1)))) * pw)
+        y2 = int(max(0.0, min(1.0, float(phase.get("y2", 1)))) * ph)
+        painter.setPen(QPen(color, 2))
+        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+        label = phase.get("material", f"Phase {phase.get('id', i+1)}")
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(label) + 6
+        th = fm.height() + 2
+        painter.fillRect(x1, y1 - th, tw, th, QColor(0, 0, 0, 160))
+        painter.setPen(color)
+        painter.drawText(x1 + 3, y1 - 3, label)
+
+    painter.end()
+    return result
+
+
+class _PhaseIDTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._json_path = None
+        self._json_data = None
+        self._img_w = 150
+        self._img_h = 150
+        self._thread = None
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # ── prompt box (always visible) ──
+        layout.addWidget(QLabel("System Prompt:"))
+        self._prompt_edit = QTextEdit()
+        self._prompt_edit.setPlainText(_PHASE_ID_SYSTEM_PROMPT)
+        self._prompt_edit.setMinimumHeight(140)
+        self._prompt_edit.setMaximumHeight(180)
+        layout.addWidget(self._prompt_edit)
+
+        # ── JSON file picker ──
+        json_row = QHBoxLayout()
+        json_btn = QPushButton("Pick Blob JSON...")
+        json_btn.clicked.connect(self._pick_json)
+        json_row.addWidget(json_btn)
+        self._json_label = QLabel("No JSON selected  (raw_detections_master.json or all_boxes_*.json)")
+        self._json_label.setStyleSheet("color: #888;")
+        json_row.addWidget(self._json_label, 1)
+        layout.addLayout(json_row)
+
+        # ── optional focus note ──
+        note_row = QHBoxLayout()
+        note_row.addWidget(QLabel("Focus (optional):"))
+        self._note_edit = QLineEdit()
+        self._note_edit.setPlaceholderText(
+            "e.g. 'look for iron-sulfide phases' or 'focus on stainless steel'")
+        note_row.addWidget(self._note_edit, 1)
+        layout.addLayout(note_row)
+
+        # ── run button ──
+        self._run_btn = QPushButton("Identify Phases")
+        self._run_btn.setMinimumHeight(40)
+        self._run_btn.setEnabled(False)
+        self._run_btn.clicked.connect(self._run)
+        layout.addWidget(self._run_btn)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+        # ── results text (main output) ──
+        layout.addWidget(QLabel("Results:"))
+        self._results_text = QTextEdit()
+        self._results_text.setReadOnly(True)
+        self._results_text.setPlaceholderText("Phase analysis results will appear here…")
+        self._results_text.setStyleSheet("font-family: monospace; font-size: 12px;")
+        layout.addWidget(self._results_text, 1)
+
+    def refresh_model(self):
+        pass
+
+    def _pick_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Blob JSON", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        import json as _json
+        try:
+            with open(path) as f:
+                self._json_data = _json.load(f)
+            self._json_path = path
+            self._json_label.setText(os.path.basename(path))
+            self._json_label.setStyleSheet("")
+            self._run_btn.setEnabled(True)
+        except Exception as e:
+            self._status.setText(f"Could not load JSON: {e}")
+            self._status.setStyleSheet("color: #c0392b; padding: 4px;")
+
+    def _run(self):
+        if self._thread and self._thread.isRunning():
+            return
+        if not self._json_data:
+            return
+        self._run_btn.setEnabled(False)
+        self._status.setText("Analyzing elemental data… this may take 30–90 seconds.")
+        self._status.setStyleSheet("color: #2980b9; padding: 4px;")
+        system_prompt = self._prompt_edit.toPlainText().strip() or _PHASE_ID_SYSTEM_PROMPT
+        self._thread = _PhaseIDThread(
+            self._json_data, self._img_w, self._img_h,
+            system_prompt, self._note_edit.text()
+        )
+        self._thread.result.connect(self._on_result)
+        self._thread.error.connect(self._on_error)
+        self._thread.start()
+
+    def _on_result(self, data):
+        self._run_btn.setEnabled(True)
+        try:
+            phases = data.get("phases", [])
+            if not isinstance(phases, list):
+                raise ValueError(f"Expected 'phases' list, got: {type(phases).__name__}")
+        except Exception as e:
+            self._on_error(f"Could not parse response: {e}\n\nRaw: {data}")
+            return
+
+        summary = data.get("summary", "")
+        lines = []
+        if summary:
+            lines.append(f"SUMMARY: {summary}\n")
+        for ph in phases:
+            mat = ph.get("material", "Unknown")
+            conf = ph.get("confidence", "?")
+            conf_str = f"{float(conf)*100:.0f}%" if isinstance(conf, (int, float)) else str(conf)
+            elems = ph.get("elements", {})
+            elem_str = "  |  ".join(f"{el}: {pct}%" for el, pct in sorted(
+                elems.items(), key=lambda x: -float(x[1])))
+            reasoning = ph.get("reasoning", "")
+            lines.append(f"{'─'*60}")
+            lines.append(f"Phase {ph.get('id','?')}: {mat}  (confidence: {conf_str})")
+            if elem_str:
+                lines.append(f"Composition:  {elem_str}")
+            lines.append(f"Reasoning:    {reasoning}")
+            lines.append("")
+        self._results_text.setPlainText("\n".join(lines))
+        n = len(phases)
+        self._status.setText(f"Found {n} phase{'s' if n != 1 else ''}.")
+        self._status.setStyleSheet("color: #27ae60; padding: 4px;")
+
+    def _on_error(self, msg):
+        self._run_btn.setEnabled(True)
+        self._status.setText(f"Error: {msg}")
+        self._status.setStyleSheet("color: #c0392b; padding: 4px;")
+
+
 # ── public widget ─────────────────────────────────────────────────────────────
 
 class LLMJsonMakerWidget(QWidget):
@@ -2041,11 +2371,13 @@ class LLMJsonMakerWidget(QWidget):
         self._model_tab = _ModelTab()
         self._chat_tab = _ChatTab()
         self._locate_tab = _LocateTab()
+        self._phase_id_tab = _PhaseIDTab()
 
         tabs = QTabWidget()
         tabs.addTab(self._model_tab, "Model")
         tabs.addTab(self._chat_tab, "Chat")
         tabs.addTab(self._locate_tab, "Feature Locator")
+        tabs.addTab(self._phase_id_tab, "Phase ID")
         layout.addWidget(tabs)
 
         self._model_tab.model_changed.connect(self._on_model_changed)
@@ -2055,3 +2387,4 @@ class LLMJsonMakerWidget(QWidget):
         _active_model = text.strip()
         self._chat_tab.refresh_model()
         self._locate_tab.refresh_model()
+        self._phase_id_tab.refresh_model()
