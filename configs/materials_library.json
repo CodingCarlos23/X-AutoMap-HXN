@@ -1,0 +1,619 @@
+{
+  "version": "1.0",
+  "description": "XRF elemental ratio reference library for phase identification. All ratios are weight-percent of XRF-detectable elements only (O, C, H, N excluded and renormalized to 100%). Tolerances are ± absolute percentage points per element.",
+  "tolerance_default": 5.0,
+  "materials": [
+    {
+      "name": "Iron (pure)",
+      "formula": "Fe",
+      "category": "pure_element",
+      "elements": { "Fe": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Copper (pure)",
+      "formula": "Cu",
+      "category": "pure_element",
+      "elements": { "Cu": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Nickel (pure)",
+      "formula": "Ni",
+      "category": "pure_element",
+      "elements": { "Ni": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Zinc (pure)",
+      "formula": "Zn",
+      "category": "pure_element",
+      "elements": { "Zn": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Titanium (pure)",
+      "formula": "Ti",
+      "category": "pure_element",
+      "elements": { "Ti": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Chromium (pure)",
+      "formula": "Cr",
+      "category": "pure_element",
+      "elements": { "Cr": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Cobalt (pure)",
+      "formula": "Co",
+      "category": "pure_element",
+      "elements": { "Co": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Manganese (pure)",
+      "formula": "Mn",
+      "category": "pure_element",
+      "elements": { "Mn": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Molybdenum (pure)",
+      "formula": "Mo",
+      "category": "pure_element",
+      "elements": { "Mo": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Vanadium (pure)",
+      "formula": "V",
+      "category": "pure_element",
+      "elements": { "V": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Zirconium (pure)",
+      "formula": "Zr",
+      "category": "pure_element",
+      "elements": { "Zr": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Stainless Steel 304",
+      "formula": "Fe-Cr18-Ni8",
+      "category": "steel",
+      "elements": { "Fe": 72, "Cr": 18, "Ni": 8, "Mn": 2 },
+      "tolerance": 5,
+      "notes": "Common austenitic SS; also matches 304L"
+    },
+    {
+      "name": "Stainless Steel 316",
+      "formula": "Fe-Cr17-Ni12-Mo2.5",
+      "category": "steel",
+      "elements": { "Fe": 67, "Cr": 17, "Ni": 12, "Mo": 3, "Mn": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Stainless Steel 316L",
+      "formula": "Fe-Cr17-Ni12-Mo2-LowC",
+      "category": "steel",
+      "elements": { "Fe": 68, "Cr": 17, "Ni": 12, "Mo": 2, "Mn": 1 },
+      "tolerance": 5,
+      "notes": "Low-carbon variant of 316; common in lab equipment"
+    },
+    {
+      "name": "Stainless Steel 310",
+      "formula": "Fe-Cr25-Ni20",
+      "category": "steel",
+      "elements": { "Fe": 52, "Cr": 25, "Ni": 20, "Mn": 2, "Si": 1 },
+      "tolerance": 5,
+      "notes": "High-temperature austenitic SS"
+    },
+    {
+      "name": "Stainless Steel 410",
+      "formula": "Fe-Cr12",
+      "category": "steel",
+      "elements": { "Fe": 87, "Cr": 12, "Mn": 1 },
+      "tolerance": 5,
+      "notes": "Martensitic SS; magnetic"
+    },
+    {
+      "name": "Stainless Steel 430",
+      "formula": "Fe-Cr17",
+      "category": "steel",
+      "elements": { "Fe": 81, "Cr": 17, "Mn": 1, "Si": 1 },
+      "tolerance": 5,
+      "notes": "Ferritic SS; no Ni"
+    },
+    {
+      "name": "Stainless Steel 347",
+      "formula": "Fe-Cr18-Ni10-Nb",
+      "category": "steel",
+      "elements": { "Fe": 70, "Cr": 18, "Ni": 10, "Nb": 1, "Mn": 1 },
+      "tolerance": 5,
+      "notes": "Nb-stabilized austenitic SS"
+    },
+    {
+      "name": "Stainless Steel 2205 Duplex",
+      "formula": "Fe-Cr22-Ni5-Mo3",
+      "category": "steel",
+      "elements": { "Fe": 68, "Cr": 22, "Ni": 5, "Mo": 3, "Mn": 2 },
+      "tolerance": 5,
+      "notes": "Duplex ferritic-austenitic SS"
+    },
+    {
+      "name": "Low Carbon Steel",
+      "formula": "Fe-Mn0.5",
+      "category": "steel",
+      "elements": { "Fe": 99, "Mn": 1 },
+      "tolerance": 3,
+      "notes": "Mild steel; essentially pure Fe by XRF"
+    },
+    {
+      "name": "Tool Steel M2",
+      "formula": "Fe-W6-Mo5-Cr4-V2-Co1",
+      "category": "steel",
+      "elements": { "Fe": 82, "W": 6, "Mo": 5, "Cr": 4, "V": 2, "Co": 1 },
+      "tolerance": 5,
+      "notes": "High-speed tool steel"
+    },
+    {
+      "name": "Inconel 600",
+      "formula": "Ni-Cr16-Fe8",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 76, "Cr": 16, "Fe": 8 },
+      "tolerance": 5
+    },
+    {
+      "name": "Inconel 625",
+      "formula": "Ni-Cr22-Mo9-Fe5-Nb2",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 62, "Cr": 22, "Mo": 9, "Fe": 5, "Nb": 2 },
+      "tolerance": 5
+    },
+    {
+      "name": "Inconel 718",
+      "formula": "Ni-Cr19-Fe18-Nb5-Mo3",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 53, "Cr": 19, "Fe": 18, "Nb": 5, "Mo": 3, "Ti": 1, "Al": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Hastelloy C-276",
+      "formula": "Ni-Mo16-Cr16-Fe5-W4",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 57, "Mo": 16, "Cr": 16, "Fe": 5, "W": 4, "Co": 2 },
+      "tolerance": 5
+    },
+    {
+      "name": "Hastelloy X",
+      "formula": "Ni-Cr22-Fe18-Mo9",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 47, "Cr": 22, "Fe": 18, "Mo": 9, "Co": 2, "Mn": 1, "W": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Waspaloy",
+      "formula": "Ni-Cr19-Co14-Mo4-Ti3",
+      "category": "nickel_alloy",
+      "elements": { "Ni": 58, "Cr": 19, "Co": 14, "Mo": 4, "Ti": 3, "Al": 1, "Zr": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Brass 70/30",
+      "formula": "Cu70Zn30",
+      "category": "copper_alloy",
+      "elements": { "Cu": 70, "Zn": 30 },
+      "tolerance": 5,
+      "notes": "Cartridge brass"
+    },
+    {
+      "name": "Brass 60/40",
+      "formula": "Cu60Zn40",
+      "category": "copper_alloy",
+      "elements": { "Cu": 60, "Zn": 40 },
+      "tolerance": 5,
+      "notes": "Yellow brass / Muntz metal"
+    },
+    {
+      "name": "Bronze",
+      "formula": "Cu88Sn12",
+      "category": "copper_alloy",
+      "elements": { "Cu": 88, "Sn": 12 },
+      "tolerance": 5
+    },
+    {
+      "name": "Cupronickel 70/30",
+      "formula": "Cu70Ni30",
+      "category": "copper_alloy",
+      "elements": { "Cu": 70, "Ni": 30 },
+      "tolerance": 5
+    },
+    {
+      "name": "Cupronickel 90/10",
+      "formula": "Cu90Ni10",
+      "category": "copper_alloy",
+      "elements": { "Cu": 90, "Ni": 10 },
+      "tolerance": 5
+    },
+    {
+      "name": "Aluminum 2024",
+      "formula": "Al-Cu4-Mg2-Mn1",
+      "category": "aluminum_alloy",
+      "elements": { "Al": 93, "Cu": 4, "Mg": 2, "Mn": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Aluminum 6061",
+      "formula": "Al-Mg1-Si0.6-Cu0.3-Cr0.2",
+      "category": "aluminum_alloy",
+      "elements": { "Al": 96, "Mg": 1, "Si": 1, "Cu": 1, "Cr": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Aluminum 7075",
+      "formula": "Al-Zn5.6-Mg2.5-Cu1.6",
+      "category": "aluminum_alloy",
+      "elements": { "Al": 90, "Zn": 6, "Mg": 3, "Cu": 1 },
+      "tolerance": 5
+    },
+    {
+      "name": "Ti-6Al-4V (Grade 5)",
+      "formula": "Ti-Al6-V4",
+      "category": "titanium_alloy",
+      "elements": { "Ti": 90, "Al": 6, "V": 4 },
+      "tolerance": 5,
+      "notes": "Most common Ti alloy; aerospace / biomedical"
+    },
+    {
+      "name": "Hematite / Magnetite / Wustite",
+      "formula": "FexOy",
+      "category": "oxide",
+      "elements": { "Fe": 100 },
+      "tolerance": 5,
+      "notes": "All iron oxides appear identical by XRF (Fe2O3, Fe3O4, FeO, FeOOH)"
+    },
+    {
+      "name": "Chromite",
+      "formula": "FeCr2O4",
+      "category": "oxide",
+      "elements": { "Fe": 35, "Cr": 65 },
+      "tolerance": 5,
+      "notes": "Fe:Cr = 1:2 molar; ~35:65 by weight"
+    },
+    {
+      "name": "Ilmenite",
+      "formula": "FeTiO3",
+      "category": "oxide",
+      "elements": { "Fe": 54, "Ti": 46 },
+      "tolerance": 5,
+      "notes": "Fe:Ti ~54:46 by weight"
+    },
+    {
+      "name": "Ulvospinel",
+      "formula": "Fe2TiO4",
+      "category": "oxide",
+      "elements": { "Fe": 70, "Ti": 30 },
+      "tolerance": 5,
+      "notes": "Fe:Ti = 2:1 molar; ~70:30 by weight"
+    },
+    {
+      "name": "Franklinite",
+      "formula": "ZnFe2O4",
+      "category": "oxide",
+      "elements": { "Zn": 37, "Fe": 63 },
+      "tolerance": 5
+    },
+    {
+      "name": "Jacobsite",
+      "formula": "MnFe2O4",
+      "category": "oxide",
+      "elements": { "Mn": 33, "Fe": 67 },
+      "tolerance": 5
+    },
+    {
+      "name": "Spinel (Mg end)",
+      "formula": "MgAl2O4",
+      "category": "oxide",
+      "elements": { "Mg": 31, "Al": 69 },
+      "tolerance": 8
+    },
+    {
+      "name": "Chromia",
+      "formula": "Cr2O3",
+      "category": "oxide",
+      "elements": { "Cr": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Rutile / Anatase",
+      "formula": "TiO2",
+      "category": "oxide",
+      "elements": { "Ti": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Zinc Oxide",
+      "formula": "ZnO",
+      "category": "oxide",
+      "elements": { "Zn": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Cuprite",
+      "formula": "Cu2O",
+      "category": "oxide",
+      "elements": { "Cu": 100 },
+      "tolerance": 3
+    },
+    {
+      "name": "Pyrite",
+      "formula": "FeS2",
+      "category": "sulfide",
+      "elements": { "Fe": 47, "S": 53 },
+      "tolerance": 5,
+      "notes": "Fe:S = 1:2 molar; ~47:53 by weight"
+    },
+    {
+      "name": "Pyrrhotite",
+      "formula": "Fe7S8",
+      "category": "sulfide",
+      "elements": { "Fe": 60, "S": 40 },
+      "tolerance": 5
+    },
+    {
+      "name": "Chalcopyrite",
+      "formula": "CuFeS2",
+      "category": "sulfide",
+      "elements": { "Cu": 35, "Fe": 30, "S": 35 },
+      "tolerance": 5,
+      "notes": "Main copper ore mineral"
+    },
+    {
+      "name": "Bornite",
+      "formula": "Cu5FeS4",
+      "category": "sulfide",
+      "elements": { "Cu": 63, "Fe": 11, "S": 26 },
+      "tolerance": 5,
+      "notes": "Peacock ore; Cu-rich sulfide"
+    },
+    {
+      "name": "Covellite",
+      "formula": "CuS",
+      "category": "sulfide",
+      "elements": { "Cu": 67, "S": 33 },
+      "tolerance": 5
+    },
+    {
+      "name": "Sphalerite",
+      "formula": "ZnS",
+      "category": "sulfide",
+      "elements": { "Zn": 67, "S": 33 },
+      "tolerance": 5
+    },
+    {
+      "name": "Galena",
+      "formula": "PbS",
+      "category": "sulfide",
+      "elements": { "Pb": 87, "S": 13 },
+      "tolerance": 5
+    },
+    {
+      "name": "Molybdenite",
+      "formula": "MoS2",
+      "category": "sulfide",
+      "elements": { "Mo": 60, "S": 40 },
+      "tolerance": 5,
+      "notes": "Common Mo ore; lubricant additive"
+    },
+    {
+      "name": "Arsenopyrite",
+      "formula": "FeAsS",
+      "category": "sulfide",
+      "elements": { "Fe": 34, "As": 46, "S": 20 },
+      "tolerance": 5
+    },
+    {
+      "name": "Forsterite / Olivine (Mg end)",
+      "formula": "Mg2SiO4",
+      "category": "silicate",
+      "elements": { "Mg": 63, "Si": 37 },
+      "tolerance": 7
+    },
+    {
+      "name": "Fayalite / Olivine (Fe end)",
+      "formula": "Fe2SiO4",
+      "category": "silicate",
+      "elements": { "Fe": 80, "Si": 20 },
+      "tolerance": 7
+    },
+    {
+      "name": "Enstatite (Mg pyroxene)",
+      "formula": "MgSiO3",
+      "category": "silicate",
+      "elements": { "Mg": 46, "Si": 54 },
+      "tolerance": 7
+    },
+    {
+      "name": "Ferrosilite (Fe pyroxene)",
+      "formula": "FeSiO3",
+      "category": "silicate",
+      "elements": { "Fe": 67, "Si": 33 },
+      "tolerance": 7
+    },
+    {
+      "name": "Diopside",
+      "formula": "CaMgSi2O6",
+      "category": "silicate",
+      "elements": { "Ca": 33, "Mg": 20, "Si": 47 },
+      "tolerance": 7
+    },
+    {
+      "name": "Wollastonite",
+      "formula": "CaSiO3",
+      "category": "silicate",
+      "elements": { "Ca": 59, "Si": 41 },
+      "tolerance": 7
+    },
+    {
+      "name": "Orthoclase / K-Feldspar",
+      "formula": "KAlSi3O8",
+      "category": "silicate",
+      "elements": { "K": 26, "Al": 18, "Si": 56 },
+      "tolerance": 7
+    },
+    {
+      "name": "Anorthite (Ca-Feldspar)",
+      "formula": "CaAl2Si2O8",
+      "category": "silicate",
+      "elements": { "Ca": 27, "Al": 36, "Si": 37 },
+      "tolerance": 7
+    },
+    {
+      "name": "Talc",
+      "formula": "Mg3Si4O10(OH)2",
+      "category": "silicate",
+      "elements": { "Mg": 39, "Si": 61 },
+      "tolerance": 7
+    },
+    {
+      "name": "Titanite / Sphene",
+      "formula": "CaTiSiO5",
+      "category": "silicate",
+      "elements": { "Ca": 34, "Ti": 41, "Si": 24 },
+      "tolerance": 7
+    },
+    {
+      "name": "Zircon",
+      "formula": "ZrSiO4",
+      "category": "silicate",
+      "elements": { "Zr": 76, "Si": 24 },
+      "tolerance": 5,
+      "notes": "Common accessory mineral in geological samples"
+    },
+    {
+      "name": "Hydroxyapatite",
+      "formula": "Ca5(PO4)3OH",
+      "category": "phosphate",
+      "elements": { "Ca": 68, "P": 32 },
+      "tolerance": 6,
+      "notes": "Bone mineral; biological samples"
+    },
+    {
+      "name": "Zinc Phosphate",
+      "formula": "Zn3(PO4)2",
+      "category": "phosphate",
+      "elements": { "Zn": 76, "P": 24 },
+      "tolerance": 6,
+      "notes": "Corrosion-inhibiting primer pigment"
+    },
+    {
+      "name": "Calcite / Aragonite",
+      "formula": "CaCO3",
+      "category": "carbonate",
+      "elements": { "Ca": 100 },
+      "tolerance": 5,
+      "notes": "Ca is the only XRF-detectable element"
+    },
+    {
+      "name": "Dolomite",
+      "formula": "CaMg(CO3)2",
+      "category": "carbonate",
+      "elements": { "Ca": 63, "Mg": 37 },
+      "tolerance": 7
+    },
+    {
+      "name": "Siderite",
+      "formula": "FeCO3",
+      "category": "carbonate",
+      "elements": { "Fe": 100 },
+      "tolerance": 5
+    },
+    {
+      "name": "Rhodochrosite",
+      "formula": "MnCO3",
+      "category": "carbonate",
+      "elements": { "Mn": 100 },
+      "tolerance": 5
+    },
+    {
+      "name": "Smithsonite",
+      "formula": "ZnCO3",
+      "category": "carbonate",
+      "elements": { "Zn": 100 },
+      "tolerance": 5
+    },
+    {
+      "name": "Gypsum / Anhydrite",
+      "formula": "CaSO4",
+      "category": "sulfate",
+      "elements": { "Ca": 56, "S": 44 },
+      "tolerance": 6
+    },
+    {
+      "name": "Barite",
+      "formula": "BaSO4",
+      "category": "sulfate",
+      "elements": { "Ba": 81, "S": 19 },
+      "tolerance": 6
+    },
+    {
+      "name": "Jarosite",
+      "formula": "KFe3(SO4)2(OH)6",
+      "category": "sulfate",
+      "elements": { "K": 14, "Fe": 62, "S": 24 },
+      "tolerance": 7,
+      "notes": "Fe-rich secondary mineral in oxidized ore zones"
+    },
+    {
+      "name": "Zinc Chromate",
+      "formula": "ZnCrO4",
+      "category": "corrosion_product",
+      "elements": { "Zn": 56, "Cr": 44 },
+      "tolerance": 6,
+      "notes": "Anti-corrosion primer; aerospace coatings"
+    },
+    {
+      "name": "Rust / Goethite",
+      "formula": "FeOOH",
+      "category": "corrosion_product",
+      "elements": { "Fe": 100 },
+      "tolerance": 5,
+      "notes": "Same XRF signature as all Fe oxides"
+    },
+    {
+      "name": "Chromium Passivation Layer",
+      "formula": "Cr2O3-rich surface",
+      "category": "corrosion_product",
+      "elements": { "Cr": 75, "Fe": 20, "Ni": 5 },
+      "tolerance": 10,
+      "notes": "Surface oxide on stainless steel; Cr-enriched relative to bulk"
+    },
+    {
+      "name": "Ferritin / Ferrihydrite",
+      "formula": "~5Fe2O3·9H2O",
+      "category": "biological",
+      "elements": { "Fe": 100 },
+      "tolerance": 5,
+      "notes": "Iron storage protein core; appears as pure Fe by XRF"
+    },
+    {
+      "name": "Bone / Tooth Enamel",
+      "formula": "Ca5(PO4)3",
+      "category": "biological",
+      "elements": { "Ca": 68, "P": 32 },
+      "tolerance": 8,
+      "notes": "Bioapatite; same ratio as hydroxyapatite"
+    },
+    {
+      "name": "Zinc Finger Protein (Zn site)",
+      "formula": "Zn-protein",
+      "category": "biological",
+      "elements": { "Zn": 100 },
+      "tolerance": 5,
+      "notes": "Transcription factor Zn coordination site"
+    }
+  ]
+}

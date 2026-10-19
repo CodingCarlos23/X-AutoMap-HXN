@@ -367,6 +367,13 @@ def analyze_data_local(scan_id=None,
         json.dump(make_json_serializable(master_raw), f, indent=2)
     print(f"[RAW MASTER] Saved {len(master_raw)} raw blobs → {master_raw_path.name}")
 
+    # --- 3c. Deterministic phase matching against materials library ---
+    try:
+        from .phase_matching import run_phase_matching
+        run_phase_matching(master_raw, results_dir, groups=elem_list_of_lists)
+    except Exception as _pm_err:
+        print(f"[PHASE] Phase matching failed (non-fatal): {_pm_err}")
+
     # --- 4. Union & Export Loop ---
     all_results = {
         'scan_id': scan_id,
