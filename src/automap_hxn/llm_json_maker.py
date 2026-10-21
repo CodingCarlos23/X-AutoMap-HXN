@@ -2248,7 +2248,7 @@ class _PhaseIDTab(QWidget):
         json_btn = QPushButton("Pick Blob JSON...")
         json_btn.clicked.connect(self._pick_json)
         json_row.addWidget(json_btn)
-        self._json_label = QLabel("No JSON selected  (raw_detections_master.json or all_boxes_*.json)")
+        self._json_label = QLabel("No JSON selected  (MASTER_raw_detections.json or group_all_boxes_*.json)")
         self._json_label.setStyleSheet("color: #888;")
         json_row.addWidget(self._json_label, 1)
         layout.addLayout(json_row)

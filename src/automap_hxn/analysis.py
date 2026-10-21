@@ -384,7 +384,7 @@ def analyze_data_local(scan_id=None,
                     "max_intensity_raw": _blob.get('max_intensity_raw', 0),
                 }
                 _raw_counter += 1
-    master_raw_path = Path(results_dir) / "raw_detections_master.json"
+    master_raw_path = Path(results_dir) / "MASTER_raw_detections.json"
     with open(master_raw_path, "w") as f:
         json.dump(make_json_serializable(master_raw), f, indent=2)
     print(f"[RAW MASTER] Saved {len(master_raw)} raw blobs → {master_raw_path.name}")
@@ -419,6 +419,35 @@ def analyze_data_local(scan_id=None,
             _color_to_elem[new_color] = element
             if original_color in precomputed_blobs:
                 group_blobs_for_union[new_color] = precomputed_blobs[original_color]
+
+        unions_only = params.get("segmentation_params", {}).get("unions_only", True)
+
+        # When intensity filter is active, run unions on unfiltered blobs first and save
+        # for visualization — lets the user see how many unions the filter removed
+        _unfiltered_union_count = None
+        if use_intensity_filter and intensity_ranges and unions_only and len(group_blobs_for_union) >= len(elem_list):
+            overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
+            _unions_raw = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start, overlap_thresh=overlap_thresh)
+            _unfiltered_union_count = len(_unions_raw)
+            _formatted_raw = {}
+            for idx, union in _unions_raw.items():
+                box_name = f"Union Box {group_name} #{idx}"
+                _formatted_raw[box_name] = {
+                    "text": box_name,
+                    "cx": union["real_center_um"][0],
+                    "cy": union["real_center_um"][1],
+                    "num_x": union["real_size_um"][0],
+                    "num_y": union["real_size_um"][1],
+                    "image_center": union["center"],
+                    "image_length": union["length"],
+                    "real_center_um": union["real_center_um"],
+                    "real_size_um": union["real_size_um"],
+                }
+            if _formatted_raw:
+                _raw_json = Path(results_dir) / f"group_unions_{group_name}.json"
+                with open(_raw_json, "w") as f:
+                    json.dump(make_json_serializable(_formatted_raw), f, indent=2)
+                print(f"[FILTER] Unfiltered unions ({_unfiltered_union_count}) saved → {_raw_json.name} (visualization only, not sent to queue)")
 
         # Apply per-element intensity range filter if enabled
         if use_intensity_filter and intensity_ranges:
@@ -462,7 +491,6 @@ def analyze_data_local(scan_id=None,
                 _blob_counter += 1
 
         formatted_unions = {}
-        unions_only = params.get("segmentation_params", {}).get("unions_only", True)
 
         if not group_blobs_for_union:
             print(f"[SKIP] No valid blobs found for group {group_name}")
@@ -544,9 +572,15 @@ def analyze_data_local(scan_id=None,
 
         # Save results if we have any formatted unions/blobs
         if formatted_unions:
-            # Save the "Master" output JSON (Headless ignores this via startswith("unions_output"))
-            out_json = Path(results_dir) / f"unions_output_{group_name}.json"
-            # Convert to JSON-serializable format
+            # Intensity filter active: save filtered result under a distinct name;
+            # the unfiltered unions_output_{group}.json was already saved above for visualization
+            if use_intensity_filter:
+                out_json = Path(results_dir) / f"group_unions_{group_name}_intensity_filtered.json"
+                if _unfiltered_union_count is not None:
+                    removed = _unfiltered_union_count - len(formatted_unions)
+                    print(f"[FILTER] {_unfiltered_union_count} unions (unfiltered) → {len(formatted_unions)} after intensity filter ({removed} removed)")
+            else:
+                out_json = Path(results_dir) / f"group_unions_{group_name}.json"
             serializable_unions = make_json_serializable(formatted_unions)
             with open(out_json, "w") as f:
                 json.dump(serializable_unions, f, indent=2)
@@ -584,7 +618,7 @@ def analyze_data_local(scan_id=None,
 
         # Always save all-boxes JSON (every detected blob, no union filtering)
         if all_boxes_formatted:
-            all_boxes_json = Path(results_dir) / f"all_boxes_{group_name}.json"
+            all_boxes_json = Path(results_dir) / f"group_all_boxes_{group_name}.json"
             with open(all_boxes_json, "w") as f:
                 json.dump(make_json_serializable(all_boxes_formatted), f, indent=2)
             print(f"[ALL BOXES] Saved {len(all_boxes_formatted)} boxes → {all_boxes_json.name}")
@@ -599,6 +633,8 @@ def analyze_data_local(scan_id=None,
 
             create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name)
             create_all_elements_tiff(tiff_paths, results_dir, elem_list, group_blobs_vis, group_name)
+            if use_intensity_filter:
+                create_rgb_tiff(tiff_paths, results_dir, elem_list, group_name, json_suffix="_intensity_filtered")
 
             # For multi-element individual mode, also save a merged/deduped overlay
             if not unions_only and len(elem_list) > 1:

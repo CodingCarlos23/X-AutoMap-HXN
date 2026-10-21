@@ -193,6 +193,7 @@ def score_against_library(ratios, library, tolerance_default):
             avg_dev = round(sum(deviations) / len(deviations), 2) if deviations else 0.0
             matches.append({
                 "material": mat["name"],
+                "elements_in_material": " ".join(sorted(mat["elements"].keys())),
                 "avg_deviation_pts": avg_dev,
                 "confidence": _confidence_label(avg_dev),
             })
@@ -265,7 +266,7 @@ def _save_pngs(raw_detections, all_clusters, unions_out, results_dir):
     img1 = bgr.copy()
     raw_boxes = [_blob_to_box(b) for b in raw_detections.values()]
     _draw_boxes(img1, raw_boxes)
-    png1 = Path(results_dir) / "detected_material_on_raw_master_data_all_boxes.png"
+    png1 = Path(results_dir) / "phase_all_boxes.png"
     cv2.imwrite(str(png1), img1)
 
     # PNG 2: matched union boxes only
@@ -275,7 +276,7 @@ def _save_pngs(raw_detections, all_clusters, unions_out, results_dir):
         for u in unions_out if u["matches"]
     ]
     _draw_boxes(img2, matched_boxes)
-    png2 = Path(results_dir) / "detected_material_on_raw_master_data_matches.png"
+    png2 = Path(results_dir) / "phase_matches.png"
     cv2.imwrite(str(png2), img2)
 
     # PNG 3: all union boxes (matched + unmatched) — everything the union step found
@@ -290,7 +291,7 @@ def _save_pngs(raw_detections, all_clusters, unions_out, results_dir):
     ]
     _draw_boxes(img3, matched_boxes, color=(0, 255, 0))    # green = matched
     _draw_boxes(img3, unmatched_boxes, color=(0, 0, 255))  # red = no match
-    png3 = Path(results_dir) / "detected_material_on_raw_master_data_all_unions.png"
+    png3 = Path(results_dir) / "phase_all_unions.png"
     cv2.imwrite(str(png3), img3)
 
     print(f"[PHASE] PNGs → {png1.name} ({len(raw_boxes)} raw boxes)  |  "
@@ -379,7 +380,7 @@ def run_phase_matching(raw_detections, results_dir, library_path=None, groups=No
         "unions": unions_out,
     }
 
-    out_path = Path(results_dir) / "detected_material_on_raw_master_data.json"
+    out_path = Path(results_dir) / "phase_detections.json"
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
 

@@ -27,7 +27,7 @@ from qtpy.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QSizePolicy,
     QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem,
     QSplitter, QTreeWidget, QTreeWidgetItem, QCheckBox, QGroupBox,
-    QComboBox,
+    QComboBox, QListWidget, QListWidgetItem,
 )
 from qtpy.QtCore import Qt, QTimer, QRectF, QPoint
 from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
@@ -125,13 +125,17 @@ def _load_union_boxes(results_dir: Path, group_name: str | None = None) -> list[
     boxes = []
 
     if group_name:
+        # Prefer intensity-filtered unions (what goes to queue); fall back to unfiltered
         candidates = [
-            results_dir / f"unions_output_{group_name}.json",
+            results_dir / f"group_unions_{group_name}_intensity_filtered.json",
+            results_dir / f"group_unions_{group_name}.json",
             results_dir / "unions_output.json",
         ]
-        files = [p for p in candidates if p.exists()]
+        files = [p for p in candidates if p.exists()][:1]  # only the best match
     else:
-        files = list(results_dir.glob("unions_output_*.json"))
+        # Exclude *_intensity_filtered.json — those are loaded via the preferred path above
+        files = [p for p in results_dir.glob("group_unions_*.json")
+                 if "_intensity_filtered" not in p.name]
 
     for jf in files:
         try:
@@ -160,11 +164,11 @@ def _load_all_boxes(results_dir: Path, group_name: str | None = None) -> list[di
     import re
     if group_name:
         files = [p for p in [
-            results_dir / f"all_boxes_{group_name}.json",
+            results_dir / f"group_all_boxes_{group_name}.json",
             results_dir / "all_boxes.json",
         ] if p.exists()]
     else:
-        files = list(results_dir.glob("all_boxes_*.json"))
+        files = list(results_dir.glob("group_all_boxes_*.json"))
 
     entries = []
     for jf in files:
@@ -246,6 +250,16 @@ class LiveScanViewerWidget(QWidget):
         # Selection state
         self._selected_tile_idx: int | None = None
         self._selected_box_meta_idx: int | None = None
+
+        # Phase detection state
+        self._phase_scene_items: list[dict] = []   # {scene_item, union_id, is_multi, has_match, scan_id, scene_x, scene_y, scene_w, scene_h}
+        self._phase_meta: list[dict] = []           # full union data for tooltip, keyed by position in list
+        self._phase_data: dict[str, list] = {}      # scan_id -> unions list
+        self._selected_phase_union_id: str | None = None
+        self._show_single_phase: bool = True
+        self._show_multi_phase: bool = True
+        self._phase_available: bool = False
+        self._tile_tiff_w: dict[int, float] = {}    # tile_idx -> tiff pixel width for scaling
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
@@ -331,6 +345,25 @@ class LiveScanViewerWidget(QWidget):
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(10)
 
+        # Display mode selector (hidden until phase_detections.json is found)
+        mode_row = QHBoxLayout()
+        self._mode_label = QLabel("Display:")
+        self._mode_label.setStyleSheet("color: #ccc; font-size: 12px;")
+        self._display_mode_combo = QComboBox()
+        self._display_mode_combo.setStyleSheet(
+            "QComboBox { background: white; color: black; border: 1px solid #aaa; "
+            "border-radius: 3px; padding: 2px 6px; font-size: 12px; }"
+            "QComboBox QAbstractItemView { background: white; color: black; "
+            "selection-background-color: #1a6fdb; selection-color: white; }"
+        )
+        self._display_mode_combo.addItem("Union Boxes", 0)
+        self._display_mode_combo.currentIndexChanged.connect(self._on_display_mode_changed)
+        mode_row.addWidget(self._mode_label)
+        mode_row.addWidget(self._display_mode_combo, 1)
+        layout.addLayout(mode_row)
+        self._mode_label.setVisible(False)
+        self._display_mode_combo.setVisible(False)
+
         # Group selector (hidden when config has only one group)
         group_row = QHBoxLayout()
         self._group_label = QLabel("Display Group:")
@@ -376,7 +409,8 @@ class LiveScanViewerWidget(QWidget):
         layout.addWidget(self._boxes_checkbox)
 
         # Tile tree
-        tiles_group = QGroupBox("Tiles")
+        self._tiles_group = QGroupBox("Tiles")
+        tiles_group = self._tiles_group
         tiles_group.setStyleSheet(
             "QGroupBox { font-weight: bold; color: #ccc; "
             "margin-top: 14px; padding-top: 8px; }"
@@ -395,6 +429,43 @@ class LiveScanViewerWidget(QWidget):
         self._tile_tree.itemClicked.connect(self._on_tree_item_clicked)
         tiles_layout.addWidget(self._tile_tree)
         layout.addWidget(tiles_group, 1)
+
+        # Phase detection panel (hidden by default, shown when Phase Detection mode active)
+        self._phase_panel = QWidget()
+        phase_layout = QVBoxLayout(self._phase_panel)
+        phase_layout.setContentsMargins(0, 0, 0, 0)
+        phase_layout.setSpacing(6)
+
+        phase_filter_row = QHBoxLayout()
+        self._phase_single_btn = QPushButton("Single")
+        self._phase_single_btn.setCheckable(True)
+        self._phase_single_btn.setChecked(True)
+        self._phase_single_btn.setStyleSheet(
+            "QPushButton { background: #3a3a50; color: #ccc; border: 1px solid #555; "
+            "border-radius: 3px; padding: 3px 8px; font-size: 11px; }"
+            "QPushButton:checked { background: #1a6fdb; color: white; border-color: #1a6fdb; }"
+        )
+        self._phase_multi_btn = QPushButton("Multi")
+        self._phase_multi_btn.setCheckable(True)
+        self._phase_multi_btn.setChecked(True)
+        self._phase_multi_btn.setStyleSheet(self._phase_single_btn.styleSheet())
+        self._phase_single_btn.toggled.connect(self._on_phase_filter_single)
+        self._phase_multi_btn.toggled.connect(self._on_phase_filter_multi)
+        phase_filter_row.addWidget(self._phase_single_btn)
+        phase_filter_row.addWidget(self._phase_multi_btn)
+        phase_layout.addLayout(phase_filter_row)
+
+        self._phase_list = QListWidget()
+        self._phase_list.setStyleSheet(
+            "QListWidget { background: #1e1e22; color: #ccc; border: none; font-size: 11px; }"
+            "QListWidget::item { padding: 3px 4px; }"
+            "QListWidget::item:selected { background: #3a3a50; }"
+        )
+        self._phase_list.itemClicked.connect(self._on_phase_list_clicked)
+        phase_layout.addWidget(self._phase_list, 1)
+
+        layout.addWidget(self._phase_panel, 1)
+        self._phase_panel.setVisible(False)
 
         # Stats
         self._stats_lbl = QLabel("0 / 0 tiles\n0 boxes total")
@@ -656,6 +727,16 @@ class LiveScanViewerWidget(QWidget):
     # ------------------------------------------------------------------
 
     def handle_hover(self, event, scene_pos):
+        # Phase Detection mode hover
+        if self._display_mode_combo.currentIndex() == 1:
+            for pm in self._phase_meta:
+                rect = QRectF(pm["scene_x"], pm["scene_y"], pm["scene_w"], pm["scene_h"])
+                if rect.contains(scene_pos):
+                    self._show_tooltip(event, self._format_phase_tooltip(pm))
+                    return
+            self._hover_label.hide()
+            return
+
         if not self._boxes_checkbox.isChecked() or not self._box_meta:
             self._hover_label.hide()
             return
@@ -768,6 +849,12 @@ class LiveScanViewerWidget(QWidget):
         self._tile_highlight = None
         self._selected_tile_idx = None
         self._selected_box_meta_idx = None
+        self._phase_scene_items.clear()
+        self._phase_meta.clear()
+        self._phase_data.clear()
+        self._selected_phase_union_id = None
+        self._tile_tiff_w.clear()
+        self._phase_list.clear()
         self._scene.clear()
         self._tile_tree.clear()
 
@@ -905,11 +992,15 @@ class LiveScanViewerWidget(QWidget):
         tree_item.setData(0, Qt.UserRole, idx)
         self._tile_list_items[idx] = tree_item
 
+        self._tile_tiff_w[idx] = tiff_w
         self._tile_all_boxes[scan_id] = _load_all_boxes(results_dir, group_name or None)
 
         boxes = _load_union_boxes(results_dir, group_name or None)
         if boxes:
             self._draw_boxes(idx, scan_id, tiff_w, boxes)
+
+        # Draw phase detection boxes if file exists
+        self._draw_phase_boxes(idx, scan_id, results_dir, tiff_w)
 
         return tiff_w
 
@@ -975,6 +1066,260 @@ class LiveScanViewerWidget(QWidget):
                 tree_item.setExpanded(True)
 
         self._update_stats()
+
+    # ------------------------------------------------------------------
+    # Phase Detection — data loading and drawing
+    # ------------------------------------------------------------------
+
+    def _load_phase_data(self, results_dir: Path) -> list | None:
+        p = results_dir / "phase_detections.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text()).get("unions", [])
+        except Exception:
+            return None
+
+    def _draw_phase_boxes(self, tile_idx: int, scan_id: str, results_dir: Path, tiff_w: float):
+        unions = self._load_phase_data(results_dir)
+        if not unions or tiff_w <= 0:
+            return
+
+        self._phase_data[scan_id] = unions
+
+        # Reveal display mode combo the first time phase data is found
+        if not self._phase_available:
+            self._phase_available = True
+            if self._display_mode_combo.findText("Phase Detection") == -1:
+                self._display_mode_combo.addItem("Phase Detection", 1)
+            self._mode_label.setVisible(True)
+            self._display_mode_combo.setVisible(True)
+
+        col = tile_idx % self._n_cols
+        row = tile_idx // self._n_cols
+        stride = CELL_SIZE + CELL_GAP
+        x0 = col * stride
+        y0 = row * stride
+        scale = CELL_SIZE / tiff_w
+
+        in_phase_mode = self._display_mode_combo.currentIndex() == 1
+
+        PHASE_COLOR_MULTI   = QColor(80, 200, 80)
+        PHASE_COLOR_SINGLE  = QColor(220, 200, 50)
+        PHASE_COLOR_NONE    = QColor(200, 60, 60)
+
+        for union in unions:
+            matches = union.get("matches", [])
+            has_match = bool(matches) and "ambiguous" not in matches[0].get("material", "")
+            is_ambiguous = bool(matches) and "ambiguous" in matches[0].get("material", "")
+            is_multi = len(union.get("elements_detected", [])) > 1
+
+            ub = union.get("union_box", {})
+            x1, y1 = ub.get("x1", 0), ub.get("y1", 0)
+            x2, y2 = ub.get("x2", 0), ub.get("y2", 0)
+
+            sx = x0 + x1 * scale
+            sy = y0 + y1 * scale
+            sw = (x2 - x1) * scale
+            sh = (y2 - y1) * scale
+
+            if has_match:
+                color = PHASE_COLOR_MULTI if is_multi else PHASE_COLOR_SINGLE
+            elif is_ambiguous:
+                color = PHASE_COLOR_SINGLE
+            else:
+                color = PHASE_COLOR_NONE
+
+            pen = QPen(color, 2, Qt.SolidLine)
+            pen.setCosmetic(True)
+            rect_item = self._scene.addRect(sx, sy, sw, sh, pen)
+            # Only visible when in Phase Detection mode, and filtered
+            visible = in_phase_mode and (has_match or is_ambiguous) and (
+                (is_multi and self._show_multi_phase) or
+                (not is_multi and self._show_single_phase)
+            )
+            rect_item.setVisible(visible)
+
+            meta_entry = {
+                "scene_item": rect_item,
+                "union_id": union.get("union_id", ""),
+                "is_multi": is_multi,
+                "has_match": has_match,
+                "is_ambiguous": is_ambiguous,
+                "scan_id": scan_id,
+                "scene_x": sx,
+                "scene_y": sy,
+                "scene_w": sw,
+                "scene_h": sh,
+                "elements_detected": union.get("elements_detected", []),
+                "measured_ratios": union.get("measured_ratios", {}),
+                "matches": matches,
+                "color": color,
+            }
+            self._phase_scene_items.append(meta_entry)
+            self._phase_meta.append(meta_entry)
+
+        self._populate_phase_list()
+
+    def _populate_phase_list(self):
+        self._phase_list.clear()
+        seen_union_ids = set()
+
+        # Collect all matched unions across all tiles
+        entries = []
+        for pm in self._phase_meta:
+            uid = pm["union_id"]
+            if uid in seen_union_ids:
+                continue
+            if not (pm["has_match"] or pm["is_ambiguous"]):
+                continue
+            seen_union_ids.add(uid)
+            entries.append(pm)
+
+        # Sort: multi-element matched first, then single-element
+        entries.sort(key=lambda e: (0 if (e["is_multi"] and e["has_match"]) else 1, e["union_id"]))
+
+        for pm in entries:
+            is_multi = pm["is_multi"]
+            if is_multi and not self._show_multi_phase:
+                continue
+            if not is_multi and not self._show_single_phase:
+                continue
+
+            matches = pm["matches"]
+            if matches:
+                mat_name = matches[0]["material"]
+                if "ambiguous" in mat_name:
+                    # Extract short form: "ambiguous — could be: X, Y" → "ambiguous"
+                    display_mat = "ambiguous"
+                else:
+                    display_mat = mat_name
+            else:
+                display_mat = "no match"
+
+            elems_str = " ".join(pm["elements_detected"])
+            text = f"{display_mat}  [{elems_str}]"
+
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, pm["union_id"])
+
+            if is_multi and pm["has_match"]:
+                item.setForeground(QColor(80, 200, 80))
+            elif pm["is_ambiguous"] or (not is_multi and pm["has_match"]):
+                item.setForeground(QColor(220, 200, 50))
+            else:
+                item.setForeground(QColor(200, 200, 200))
+
+            self._phase_list.addItem(item)
+
+    # ------------------------------------------------------------------
+    # Phase Detection — mode switching and interaction
+    # ------------------------------------------------------------------
+
+    def _on_display_mode_changed(self, index: int):
+        in_phase = index == 1
+        # Toggle panels
+        tiles_group_visible = not in_phase
+        self._tiles_group.setVisible(tiles_group_visible)
+        self._phase_panel.setVisible(in_phase)
+        # Hide group controls in phase mode (phase spans all elements)
+        self._group_label.setVisible(not in_phase and len(self._all_groups) > 1)
+        self._group_combo.setVisible(not in_phase and len(self._all_groups) > 1)
+
+        # Show/hide phase boxes and union boxes
+        for item in self._box_scene_items:
+            item.setVisible(not in_phase and self._boxes_checkbox.isChecked())
+
+        for pm in self._phase_scene_items:
+            if in_phase:
+                visible = (pm["has_match"] or pm["is_ambiguous"]) and (
+                    (pm["is_multi"] and self._show_multi_phase) or
+                    (not pm["is_multi"] and self._show_single_phase)
+                )
+                pm["scene_item"].setVisible(visible)
+            else:
+                pm["scene_item"].setVisible(False)
+
+        # Clear any phase selection when switching modes
+        self._selected_phase_union_id = None
+        self._phase_list.clearSelection()
+
+    def _on_phase_list_clicked(self, item: QListWidgetItem):
+        union_id = item.data(Qt.UserRole)
+
+        if union_id == self._selected_phase_union_id:
+            # Deselect — restore all
+            self._selected_phase_union_id = None
+            self._phase_list.clearSelection()
+            self._restore_all_phase_boxes()
+        else:
+            self._selected_phase_union_id = union_id
+            self._isolate_phase_box(union_id)
+
+    def _isolate_phase_box(self, union_id: str):
+        HIGHLIGHT_PHASE = QColor(255, 220, 0)
+        for pm in self._phase_scene_items:
+            if pm["union_id"] == union_id:
+                pen = QPen(HIGHLIGHT_PHASE, 3, Qt.SolidLine)
+                pen.setCosmetic(True)
+                pm["scene_item"].setPen(pen)
+                pm["scene_item"].setVisible(True)
+            else:
+                pm["scene_item"].setVisible(False)
+
+    def _restore_all_phase_boxes(self):
+        for pm in self._phase_scene_items:
+            pen = QPen(pm["color"], 2, Qt.SolidLine)
+            pen.setCosmetic(True)
+            pm["scene_item"].setPen(pen)
+            visible = (pm["has_match"] or pm["is_ambiguous"]) and (
+                (pm["is_multi"] and self._show_multi_phase) or
+                (not pm["is_multi"] and self._show_single_phase)
+            )
+            pm["scene_item"].setVisible(visible)
+
+    def _on_phase_filter_single(self, checked: bool):
+        self._show_single_phase = checked
+        if self._selected_phase_union_id:
+            self._selected_phase_union_id = None
+            self._phase_list.clearSelection()
+        self._restore_all_phase_boxes()
+        self._populate_phase_list()
+
+    def _on_phase_filter_multi(self, checked: bool):
+        self._show_multi_phase = checked
+        if self._selected_phase_union_id:
+            self._selected_phase_union_id = None
+            self._phase_list.clearSelection()
+        self._restore_all_phase_boxes()
+        self._populate_phase_list()
+
+    def _format_phase_tooltip(self, pm: dict) -> str:
+        lines = [f"<b>{pm['union_id']}</b><br>"]
+        elems = " ".join(pm["elements_detected"])
+        lines.append(f"Elements: {elems}<br>")
+
+        ratios = pm["measured_ratios"]
+        ratio_str = " | ".join(
+            f"{e}: {v:.1f}%" for e, v in sorted(ratios.items(), key=lambda kv: -kv[1])
+        )
+        lines.append(f"Ratios: {ratio_str}<br><br>")
+
+        matches = pm["matches"]
+        if matches:
+            lines.append("<b>Matches:</b><br>")
+            for i, m in enumerate(matches[:5], 1):
+                mat = m["material"]
+                if "ambiguous" in mat:
+                    lines.append(f"{i}. {mat}<br>")
+                else:
+                    elems_in = m.get("elements_in_material", "")
+                    conf = m.get("confidence", "")
+                    lines.append(f"{i}. {mat} ({elems_in}) — {conf}<br>")
+        else:
+            lines.append("No library match")
+
+        return "".join(lines)
 
     # ------------------------------------------------------------------
     # Stats

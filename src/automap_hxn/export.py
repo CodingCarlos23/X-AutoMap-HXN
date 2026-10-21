@@ -31,7 +31,7 @@ def process_and_save_json(input_path, overlap_thresh=0.5):
     return output_path
 
 
-def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
+def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None, json_suffix=""):
     """
     Merges the first three element TIFFs into a single RGB TIFF file,
     and draws the union boxes on it.
@@ -75,9 +75,9 @@ def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
         merged_rgb = cv2.merge([norm_r, norm_g, norm_b])
 
         # Draw union boxes
-        unions_json_filename = "unions_output.json"
+        unions_json_filename = f"group_unions{json_suffix}.json"
         if group_name:
-            unions_json_filename = f"unions_output_{group_name}.json"
+            unions_json_filename = f"group_unions_{group_name}{json_suffix}.json"
         unions_json_path = Path(output_dir) / unions_json_filename
         
         if unions_json_path.exists():
@@ -98,9 +98,9 @@ def create_rgb_tiff(tiff_paths, output_dir, element_list, group_name=None):
             print(f"⚠️ Could not find {unions_json_path} to draw boxes.")
 
         # Save the final image
-        output_filename = "Union of elements.tiff"
+        output_filename = f"group_unions_elements{json_suffix}.tiff"
         if group_name:
-            output_filename = f"Union of elements {group_name}.tiff"
+            output_filename = f"group_unions_elements_{group_name}{json_suffix}.tiff"
         output_path = Path(output_dir) / output_filename
         tiff.imwrite(output_path, merged_rgb)
         print(f"✅ Saved merged RGB image with boxes to: {output_path}")
@@ -214,9 +214,9 @@ def create_all_elements_tiff(tiff_paths, output_dir, element_list, precomputed_b
 
         # --- Save the final image ---
         merged_rgb_for_save = cv2.cvtColor(merged_bgr, cv2.COLOR_BGR2RGB)
-        output_filename = "All_of_elements.tiff"
+        output_filename = "group_all_elements.tiff"
         if group_name:
-            output_filename = f"All_of_elements {group_name}.tiff"
+            output_filename = f"group_all_elements_{group_name}.tiff"
         output_path = Path(output_dir) / output_filename
         tiff.imwrite(str(output_path), merged_rgb_for_save)
         print(f"✅ Saved image with individual boxes to: {output_path}")
