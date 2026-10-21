@@ -1464,7 +1464,7 @@ class MainWindow(QWidget):
             f"Real Center: ({real_cx:.2f}, {real_cy:.2f}) µm<br>"
             f"Real Size: {real_w:.2f} × {real_h:.2f} µm<br>"
             f"Real Area: {real_w * real_h:.2f} µm²<br><br>"
-            f"Max intensity: {blob['max_intensity']:.3f}"
+            f"Max intensity: {blob.get('max_intensity_norm', blob.get('max_intensity', 0)):.3f}"
         )
 
     def _format_union_tooltip(self, ub, idx):

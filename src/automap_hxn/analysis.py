@@ -134,8 +134,10 @@ def _merge_cross_element_blobs(formatted_unions, overlap_thresh):
                     "image_center": merged_ic,
                     "image_radius": merged_ir,
                     "color": a.get('color') or b.get('color'),
-                    "max_intensity": max(a.get('max_intensity', 0), b.get('max_intensity', 0)),
-                    "mean_intensity": (a.get('mean_intensity', 0) + b.get('mean_intensity', 0)) / 2,
+                    "max_intensity_norm": max(a.get('max_intensity_norm', 0), b.get('max_intensity_norm', 0)),
+                    "mean_intensity_norm": (a.get('mean_intensity_norm', 0) + b.get('mean_intensity_norm', 0)) / 2,
+                    "max_intensity_raw": max(a.get('max_intensity_raw', 0), b.get('max_intensity_raw', 0)),
+                    "mean_intensity_raw": (a.get('mean_intensity_raw', 0) + b.get('mean_intensity_raw', 0)) / 2,
                 }
                 elem_sets[new_label] = new_elems
                 del formatted_unions[key_a]
@@ -320,6 +322,8 @@ def analyze_data_local(scan_id=None,
         if target_shape and tiff_img.shape != target_shape:
             tiff_img = resize_if_needed(tiff_img, tiff_path.name, target_shape)
 
+        tiff_raw = tiff_img.copy()
+
         # Use configurable normalization and dilation parameters
         morphology = params.get('morphology_params', {})
         kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
@@ -337,6 +341,22 @@ def analyze_data_local(scan_id=None,
                         tiff_path.name,
                         method=detection_method,
                         **method_params)
+
+        # Annotate each blob with raw photon-count intensities for cross-element ratio math
+        h_raw, w_raw = tiff_raw.shape[:2]
+        for blob in b:
+            x, y = blob['center']
+            r = blob['radius']
+            x1, y1 = max(0, x - r), max(0, y - r)
+            x2, y2 = min(w_raw, x + r), min(h_raw, y + r)
+            roi_raw = tiff_raw[y1:y2, x1:x2]
+            if roi_raw.size > 0:
+                blob['mean_intensity_raw'] = float(roi_raw.mean())
+                blob['max_intensity_raw'] = float(roi_raw.max())
+            else:
+                blob['mean_intensity_raw'] = 0.0
+                blob['max_intensity_raw'] = 0.0
+
         precomputed_blobs[color][(min_thresh, min_area)] = b
 
     # --- 3b. Save master raw-detections JSON (pre-filter, all elements) ---
@@ -358,8 +378,10 @@ def analyze_data_local(scan_id=None,
                     "image_center": _blob['center'],
                     "image_radius": _blob['radius'],
                     "color": _blob['color'],
-                    "max_intensity": _blob.get('max_intensity', 0),
-                    "mean_intensity": _blob.get('mean_intensity', 0),
+                    "mean_intensity_norm": _blob.get('mean_intensity_norm', 0),
+                    "max_intensity_norm": _blob.get('max_intensity_norm', 0),
+                    "mean_intensity_raw": _blob.get('mean_intensity_raw', 0),
+                    "max_intensity_raw": _blob.get('max_intensity_raw', 0),
                 }
                 _raw_counter += 1
     master_raw_path = Path(results_dir) / "raw_detections_master.json"
@@ -407,7 +429,7 @@ def analyze_data_local(scan_id=None,
                 lo, hi = intensity_ranges[elem_name]
                 filtered = {}
                 for key, blobs in blob_data.items():
-                    kept = [b for b in blobs if lo <= b.get("mean_intensity", 0) <= hi]
+                    kept = [b for b in blobs if lo <= b.get("mean_intensity_norm", 0) <= hi]
                     if kept:
                         filtered[key] = kept
                 group_blobs_for_union[color] = filtered
@@ -432,8 +454,10 @@ def analyze_data_local(scan_id=None,
                     "image_center": _blob['center'],
                     "image_radius": _blob['radius'],
                     "color": _blob['color'],
-                    "max_intensity": _blob.get('max_intensity', 0),
-                    "mean_intensity": _blob.get('mean_intensity', 0),
+                    "mean_intensity_norm": _blob.get('mean_intensity_norm', 0),
+                    "max_intensity_norm": _blob.get('max_intensity_norm', 0),
+                    "mean_intensity_raw": _blob.get('mean_intensity_raw', 0),
+                    "max_intensity_raw": _blob.get('max_intensity_raw', 0),
                 }
                 _blob_counter += 1
 
@@ -496,8 +520,10 @@ def analyze_data_local(scan_id=None,
                         "image_center": blob['center'],
                         "image_radius": blob['radius'],
                         "color": blob['color'],
-                        "max_intensity": blob.get('max_intensity', 0),
-                        "mean_intensity": blob.get('mean_intensity', 0)
+                        "mean_intensity_norm": blob.get('mean_intensity_norm', 0),
+                        "max_intensity_norm": blob.get('max_intensity_norm', 0),
+                        "mean_intensity_raw": blob.get('mean_intensity_raw', 0),
+                        "max_intensity_raw": blob.get('max_intensity_raw', 0)
                     }
                     blob_counter += 1
 
@@ -831,8 +857,10 @@ def analyze_data_from_arrays(element_arrays, params):
                         "image_center": blob['center'],
                         "image_radius": blob['radius'],
                         "color": blob['color'],
-                        "max_intensity": blob.get('max_intensity', 0),
-                        "mean_intensity": blob.get('mean_intensity', 0)
+                        "mean_intensity_norm": blob.get('mean_intensity_norm', 0),
+                        "max_intensity_norm": blob.get('max_intensity_norm', 0),
+                        "mean_intensity_raw": blob.get('mean_intensity_raw', 0),
+                        "max_intensity_raw": blob.get('max_intensity_raw', 0)
                     }
         
         elif len(group_blobs_for_union) >= 2:
@@ -1079,8 +1107,10 @@ def analyze_data_get_fine_scans_table(scan_id=None,
                         "image_center": blob['center'],
                         "image_radius": blob['radius'],
                         "color": blob['color'],
-                        "max_intensity": blob.get('max_intensity', 0),
-                        "mean_intensity": blob.get('mean_intensity', 0)
+                        "mean_intensity_norm": blob.get('mean_intensity_norm', 0),
+                        "max_intensity_norm": blob.get('max_intensity_norm', 0),
+                        "mean_intensity_raw": blob.get('mean_intensity_raw', 0),
+                        "max_intensity_raw": blob.get('max_intensity_raw', 0)
                     }
                     
         elif len(group_blobs_for_union) >= 2:

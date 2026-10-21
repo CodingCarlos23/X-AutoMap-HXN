@@ -145,7 +145,7 @@ def _load_union_boxes(results_dir: Path, group_name: str | None = None) -> list[
                         "cy_px": ic[1],
                         "side_px": il,
                         "label": entry.get("text"),
-                        "mean_intensity": entry.get("mean_intensity"),  # None for union boxes
+                        "mean_intensity": entry.get("mean_intensity_norm", entry.get("mean_intensity")),  # None for union boxes
                     })
         except Exception as exc:
             print(f"[LiveScan] Could not read {jf}: {exc}")
@@ -180,7 +180,7 @@ def _load_all_boxes(results_dir: Path, group_name: str | None = None) -> list[di
                 entries.append({
                     "element": elem,
                     "image_center": ic,
-                    "mean_intensity": entry.get("mean_intensity") or 0,
+                    "mean_intensity": entry.get("mean_intensity_norm", entry.get("mean_intensity")) or 0,
                 })
         except Exception as exc:
             print(f"[LiveScan] Could not read {jf}: {exc}")
@@ -737,7 +737,7 @@ class LiveScanViewerWidget(QWidget):
                     ic = entry["image_center"]
                     if lo_x <= ic[0] <= hi_x and lo_y <= ic[1] <= hi_y:
                         elem = entry["element"]
-                        elem_intensities.setdefault(elem, []).append(entry["mean_intensity"])
+                        elem_intensities.setdefault(elem, []).append(entry.get("mean_intensity_norm", entry.get("mean_intensity", 0)))
                 if elem_intensities:
                     lines.append("<br><br><b>Contributing blobs:</b>")
                     for elem, vals in sorted(elem_intensities.items()):
@@ -950,7 +950,7 @@ class LiveScanViewerWidget(QWidget):
                 "cx_px": cx_px,
                 "cy_px": cy_px,
                 "side_px": side_px,
-                "mean_intensity": box.get("mean_intensity"),
+                "mean_intensity": box.get("mean_intensity_norm", box.get("mean_intensity")),
                 "scene_x": bx,
                 "scene_y": by,
                 "scene_w": bw,

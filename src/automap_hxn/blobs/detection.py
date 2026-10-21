@@ -110,7 +110,7 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
     --------
     list : List of detected blob dictionaries with keys:
         'Box', 'center', 'radius', 'color', 'file', 
-        'max_intensity', 'mean_intensity', 'mean_dilation',
+        'max_intensity_norm', 'mean_intensity_norm', 'mean_dilation',
         'box_x', 'box_y', 'box_size'
         (plus 'method' key if include_method_info=True)
         
@@ -200,8 +200,8 @@ def detect_blobs(img_norm, img_orig, min_thresh, min_area, color,
                 'radius': radius,
                 'color': color,
                 'file': file_name,
-                'max_intensity': roi_orig.max(),
-                'mean_intensity': roi_orig.mean(),
+                'max_intensity_norm': float(roi_orig.max()),
+                'mean_intensity_norm': float(roi_orig.mean()),
                 'mean_dilation': float(roi_dilated.mean()),
                 'box_x': box_x,
                 'box_y': box_y,
