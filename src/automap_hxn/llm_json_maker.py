@@ -14,7 +14,7 @@ from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
     QScrollArea, QMessageBox, QComboBox, QCheckBox, QSpinBox,
-    QGroupBox, QRadioButton, QButtonGroup,
+    QGroupBox, QRadioButton, QButtonGroup, QSplitter,
 )
 from qtpy.QtCore import Qt, QThread, Signal, QTimer
 from qtpy.QtGui import (
@@ -312,8 +312,29 @@ BOX_COLORS = [
 ]
 
 
+def _apply_red_circles_transform(arr: np.ndarray, circle_color=(255, 0, 0)) -> np.ndarray:
+    """Normalize → Gaussian blur → Otsu threshold → contours → draw filled circles on white.
+
+    Helps VLMs count/box particles: converts XRF blobs into unambiguous colored circles.
+    Input must be uint8 grayscale (2-D). Returns uint8 RGB (3-D).
+    circle_color is an (R, G, B) tuple.
+    """
+    if arr.ndim != 2:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(arr, (3, 3), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = np.full((*arr.shape, 3), 255, dtype=np.uint8)  # white background
+    for cnt in contours:
+        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+        r = max(r, 3.0) * 1.3
+        cv2.circle(out, (int(cx), int(cy)), int(r), circle_color, -1)
+    return out
+
+
 def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False,
-                       upscale: bool = False, colormap: bool = False):
+                       upscale: bool = False, colormap: bool = False, red_circles: bool = False,
+                       circle_color=(255, 0, 0)):
     """Load any image (including 16/32-bit TIFF) and return (QPixmap, width, height)."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
@@ -334,7 +355,11 @@ def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
-    if colormap and arr.ndim == 2:
+    if red_circles:
+        if arr.ndim != 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        arr = _apply_red_circles_transform(arr, circle_color=circle_color)  # returns RGB
+    elif colormap and arr.ndim == 2:
         arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
         arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
     elif arr.ndim == 2:
@@ -364,6 +389,27 @@ def _draw_feature_boxes(base_pixmap, features):
         painter.setPen(QPen(color, 2))
         painter.drawRect(x1, y1, x2 - x1, y2 - y1)
 
+    painter.end()
+    return result
+
+
+def _draw_feature_boxes_multi_color(base_pixmap, feature_groups):
+    """Draw boxes from multiple groups, each with its own QColor.
+
+    feature_groups: list of (features_list, QColor) tuples.
+    """
+    result = base_pixmap.copy()
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pw, ph = result.width(), result.height()
+    for features, color in feature_groups:
+        painter.setPen(QPen(color, 2))
+        for feat in features:
+            x1 = int(max(0.0, min(1.0, float(feat.get("x1", 0)))) * pw)
+            y1 = int(max(0.0, min(1.0, float(feat.get("y1", 0)))) * ph)
+            x2 = int(max(0.0, min(1.0, float(feat.get("x2", 1)))) * pw)
+            y2 = int(max(0.0, min(1.0, float(feat.get("y2", 1)))) * ph)
+            painter.drawRect(x1, y1, x2 - x1, y2 - y1)
     painter.end()
     return result
 
@@ -636,7 +682,8 @@ def _draw_coordinate_grid(arr: np.ndarray, steps: int = 10) -> np.ndarray:
 
 
 def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True,
-                          grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
+                          grid_overlay: bool = False, upscale: bool = False, colormap: bool = False,
+                          red_circles: bool = False, circle_color=(255, 0, 0)):
     """Load image, optionally normalize and dilate, downsample to max_dim, return base64-PNG string."""
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
@@ -657,18 +704,24 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, nor
     if dilate_ksize > 0:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
-    # CLAHE: sharpen local contrast so blob edges are crisper for the VLM
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    if arr.ndim == 2:
-        arr = clahe.apply(arr)
-        if colormap:
-            arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
-        else:
-            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    if red_circles:
+        if arr.ndim != 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        rgb = _apply_red_circles_transform(arr, circle_color=circle_color)
+        arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     else:
-        lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        # CLAHE: sharpen local contrast so blob edges are crisper for the VLM
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        if arr.ndim == 2:
+            arr = clahe.apply(arr)
+            if colormap:
+                arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
+            else:
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        else:
+            lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     if grid_overlay:
         arr = _draw_coordinate_grid(arr)
     h, w = arr.shape[:2]
@@ -691,7 +744,7 @@ class _LocateThread(QThread):
     error = Signal(str)
 
     def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True,
-                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
+                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False, red_circles: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
@@ -699,12 +752,24 @@ class _LocateThread(QThread):
         self.grid_overlay = grid_overlay
         self.upscale = upscale
         self.colormap = colormap
+        self.red_circles = red_circles
         self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
             img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize,
-                                             grid_overlay=self.grid_overlay, upscale=self.upscale, colormap=self.colormap)
+                                             grid_overlay=self.grid_overlay, upscale=self.upscale, colormap=self.colormap,
+                                             red_circles=self.red_circles)
+            filters = []
+            if self.normalize:    filters.append("normalize")
+            if self.grid_overlay: filters.append("grid")
+            if self.dilate_ksize > 0: filters.append(f"dilate-{self.dilate_ksize}px")
+            if self.upscale:      filters.append("upscale")
+            if self.colormap:     filters.append("inferno")
+            if self.red_circles:  filters.append("red-circles")
+            filter_str = ", ".join(filters) if filters else "none"
+            print(f"[Feature Locator] Sending request for image '{pathlib.Path(self.image_path).name}' "
+                  f"with filters [{filter_str}] using model '{_active_model}'")
             provider = _get_provider(_active_model)
             if provider == "anthropic":
                 parsed = self._query_anthropic(img_b64)
@@ -817,7 +882,7 @@ class _LocateTileThread(QThread):
     progress = Signal(str)
 
     def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True,
-                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
+                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False, red_circles: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
@@ -825,6 +890,7 @@ class _LocateTileThread(QThread):
         self.grid_overlay = grid_overlay
         self.upscale = upscale
         self.colormap = colormap
+        self.red_circles = red_circles
         self._provider = _get_provider(_active_model)
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
@@ -855,6 +921,17 @@ class _LocateTileThread(QThread):
             h, w = arr.shape[:2]
             h2, w2 = h // 2, w // 2
 
+            filters = []
+            if self.normalize:    filters.append("normalize")
+            if self.grid_overlay: filters.append("grid")
+            if self.dilate_ksize > 0: filters.append(f"dilate-{self.dilate_ksize}px")
+            if self.upscale:      filters.append("upscale")
+            if self.colormap:     filters.append("inferno")
+            if self.red_circles:  filters.append("red-circles")
+            filter_str = ", ".join(filters) if filters else "none"
+            print(f"[Feature Locator] Sending tile request for image '{pathlib.Path(self.image_path).name}' "
+                  f"with filters [{filter_str}] using model '{_active_model}' (4 quadrants)")
+
             def _prep_quad(q):
                 return _draw_coordinate_grid(q) if self.grid_overlay else q
 
@@ -870,7 +947,7 @@ class _LocateTileThread(QThread):
             for qi, (name, crop, xoff, yoff, xscale, yscale) in enumerate(quads):
                 self.progress.emit(f"Quadrant {qi + 1}/4 ({name})...")
                 try:
-                    img_b64 = self._encode_crop(crop, colormap=self.colormap)
+                    img_b64 = self._encode_crop(crop, colormap=self.colormap, red_circles=self.red_circles)
                     features = self._query(img_b64)
                 except Exception as e:
                     features = []
@@ -896,8 +973,12 @@ class _LocateTileThread(QThread):
             self.error.emit(str(e))
 
     @staticmethod
-    def _encode_crop(crop: np.ndarray, colormap: bool = False) -> str:
-        if crop.ndim == 2:
+    def _encode_crop(crop: np.ndarray, colormap: bool = False, red_circles: bool = False) -> str:
+        if red_circles:
+            gray = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            rgb = _apply_red_circles_transform(gray)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        elif crop.ndim == 2:
             if colormap:
                 bgr = cv2.applyColorMap(crop, cv2.COLORMAP_INFERNO)
             else:
@@ -1170,6 +1251,133 @@ class _ChatTab(QWidget):
         self.chat_area.clear()
 
 
+_XRF_ELEM_COLORS = [
+    (QColor(220, 60, 60),  (255, 0,   0)),    # Red element
+    (QColor(60,  200, 60), (0,   255, 0)),    # Green element
+    (QColor(60,  120, 220),(0,   0,   255)),  # Blue element
+]
+
+
+class _LocateXRFTripleThread(QThread):
+    """Run 3 independent VLM calls (one per element) and combine into a single result dict."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, paths, normalize=True, upscale=True, circles=False,
+                 system_prompt_override=None):
+        super().__init__()
+        self.paths = paths  # [r_path, g_path, b_path]
+        self.normalize = normalize
+        self.upscale = upscale
+        self.circles = circles
+        self._system_prompt = system_prompt_override or LOCATE_SPARSE_XRF_PROMPT
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _get_key(self._provider) or ""
+
+    def run(self):
+        try:
+            keys = ["r_features", "g_features", "b_features"]
+            labels = ["Red (Element 1)", "Green (Element 2)", "Blue (Element 3)"]
+            circle_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+            combined = {}
+            total = 0
+            for i, (path, key, label, cc) in enumerate(
+                    zip(self.paths, keys, labels, circle_colors)):
+                self.progress.emit(f"Analyzing {label}... ({i+1}/3)")
+                print(f"[Feature Locator XRF] Sending request for '{pathlib.Path(path).name}' "
+                      f"({'circles' if self.circles else 'grayscale'}) using '{_active_model}'")
+                img_b64 = _encode_image_for_vlm(
+                    path, normalize=self.normalize, upscale=self.upscale,
+                    red_circles=self.circles, circle_color=cc)
+                features = self._query(img_b64)
+                combined[key] = features
+                total += len(features)
+                self.progress.emit(f"{label} — {len(features)} feature(s) found.")
+            combined["total_count"] = total
+            self.result.emit(combined)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _query(self, img_b64: str) -> list:
+        if self._provider == "anthropic":
+            return self._query_anthropic(img_b64)
+        if self._provider == "openai":
+            return self._query_openai(img_b64)
+        return self._query_ollama(img_b64)
+
+    def _query_anthropic(self, img_b64: str) -> list:
+        payload = json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 4096,
+            "system": self._system_prompt,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                              "media_type": "image/png", "data": img_b64}},
+                {"type": "text", "text": _LOCATE_USER_PROMPT},
+            ]}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": self._key,
+                     "anthropic-version": ANTHROPIC_API_VERSION})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
+
+    def _query_openai(self, img_b64: str) -> list:
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
+        if "openai" in _api_urls:
+            payload = json.dumps({
+                "model": _get_openai_model(),
+                "instructions": self._system_prompt,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
+                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
+                ]}],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
+        else:
+            payload = json.dumps({
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": _LOCATE_USER_PROMPT},
+                    ]},
+                ],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            ).get("features", [])
+
+    def _query_ollama(self, img_b64: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._system_prompt},
+                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
+            ],
+            "stream": False,
+            "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            raw = json.loads(resp.read())
+        return _parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
+
+
 class _LocateTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1280,7 +1488,7 @@ class _LocateTab(QWidget):
 
         grid_row = QHBoxLayout()
         self._grid_check = QCheckBox("Grid overlay (coordinate reference)")
-        self._grid_check.setChecked(True)
+        self._grid_check.setChecked(False)
         self._grid_check.setToolTip(
             "Draw a 10×10 coordinate grid with labels on the image before sending to the VLM.\n"
             "Gives the model visual reference points to improve bounding box accuracy."
@@ -1342,28 +1550,22 @@ class _LocateTab(QWidget):
 
         layout.addWidget(self._single_widget)
 
-        # --- XRF ROI mode controls ---
-        self._xrf_widget = QWidget()
-        self._xrf_widget.setVisible(False)
-        xrf_layout = QVBoxLayout(self._xrf_widget)
-        xrf_layout.setContentsMargins(0, 0, 0, 0)
-        xrf_layout.setSpacing(4)
-
-        colors = ["Red", "Green", "Blue"]
-        self._xrf_pick_btns = []
-        self._xrf_name_labels = []
-        for i, color in enumerate(colors):
-            row = QHBoxLayout()
-            btn = QPushButton(f"Pick {color} Channel (Element {i+1})...")
-            btn.clicked.connect(lambda _, idx=i: self._pick_xrf_image(idx))
-            lbl = QLabel("No file selected")
-            lbl.setStyleSheet("color: #888;")
-            row.addWidget(btn)
-            row.addWidget(lbl, 1)
-            xrf_layout.addLayout(row)
-            self._xrf_pick_btns.append(btn)
-            self._xrf_name_labels.append(lbl)
-        layout.addWidget(self._xrf_widget)
+        # Red circles — always visible (applies to both single and XRF modes)
+        red_circles_row = QHBoxLayout()
+        self._red_circles_check = QCheckBox(
+            "Colored circles on white  "
+            "(Otsu threshold → contours → filled circles; red/green/blue per element in XRF mode)"
+        )
+        self._red_circles_check.setToolTip(
+            "Normalize → Gaussian blur → Otsu threshold → find blob contours → draw a filled circle\n"
+            "around each blob on a white background before sending to the VLM.\n"
+            "In Single mode: red circles.  In XRF mode: element 1=red, 2=green, 3=blue.\n"
+            "Preview updates live. Overrides inferno colormap when enabled."
+        )
+        self._red_circles_check.toggled.connect(self._on_image_options_changed)
+        red_circles_row.addWidget(self._red_circles_check)
+        red_circles_row.addStretch()
+        layout.addLayout(red_circles_row)
 
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
@@ -1384,8 +1586,11 @@ class _LocateTab(QWidget):
         box_toggle_row.addStretch()
         layout.addLayout(box_toggle_row)
 
+        # ── Single-image scroll area ──────────────────────────────────────────
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll_area.viewport().setMouseTracking(True)
         self.img_display = _ImageDisplay()
         self.img_display.setAlignment(Qt.AlignCenter)
@@ -1394,42 +1599,119 @@ class _LocateTab(QWidget):
         self.img_display.mouse_left.connect(self._on_mouse_left)
         self.img_display.zoom_scrolled.connect(self._on_zoom)
         self.scroll_area.setWidget(self.img_display)
-        self.scroll_area.setVisible(False)
+
+        # ── XRF mode: left column of 3 mini-previews ─────────────────────────
+        self._xrf_pick_btns = []
+        self._xrf_name_labels = []
+        self._xrf_mini_labels = []   # QLabel pixmap displays, one per element
+
+        _elem_cfg = [
+            ("Red",   "color: #c0392b; font-weight: bold;"),
+            ("Green", "color: #27ae60; font-weight: bold;"),
+            ("Blue",  "color: #2980b9; font-weight: bold;"),
+        ]
+        xrf_left = QWidget()
+        xrf_left.setMinimumWidth(160)
+        xrf_left.setMaximumWidth(260)
+        xrf_left_layout = QVBoxLayout(xrf_left)
+        xrf_left_layout.setContentsMargins(0, 0, 4, 0)
+        xrf_left_layout.setSpacing(2)
+        for i, (color_name, label_style) in enumerate(_elem_cfg):
+            panel = QGroupBox(f"Element {i+1} — {color_name}")
+            panel.setStyleSheet(
+                "QGroupBox { font-weight: bold; border: 1px solid #444; "
+                "border-radius: 4px; margin-top: 8px; padding-top: 4px; }"
+            )
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setSpacing(2)
+            panel_layout.setContentsMargins(4, 4, 4, 4)
+
+            btn_row = QHBoxLayout()
+            btn = QPushButton(f"Pick {color_name}...")
+            btn.clicked.connect(lambda _, idx=i: self._pick_xrf_image(idx))
+            lbl = QLabel("No file selected")
+            lbl.setStyleSheet("color: #888; font-size: 10px;")
+            lbl.setWordWrap(True)
+            btn_row.addWidget(btn)
+            panel_layout.addLayout(btn_row)
+            panel_layout.addWidget(lbl)
+            self._xrf_pick_btns.append(btn)
+            self._xrf_name_labels.append(lbl)
+
+            mini = QLabel()
+            mini.setAlignment(Qt.AlignCenter)
+            mini.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            mini.setMinimumHeight(60)
+            mini.setStyleSheet("background: #111; border: 1px solid #333;")
+            panel_layout.addWidget(mini, 1)
+            self._xrf_mini_labels.append(mini)
+
+            xrf_left_layout.addWidget(panel, 1)
+
+        # ── XRF mode: composite (large) scroll area ───────────────────────────
+        self._xrf_composite_scroll = QScrollArea()
+        self._xrf_composite_scroll.setWidgetResizable(False)
+        self._xrf_composite_scroll.setAlignment(Qt.AlignCenter)
+        self._xrf_composite_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._xrf_composite_display = QLabel()
+        self._xrf_composite_display.setAlignment(Qt.AlignCenter)
+        self._xrf_composite_display.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._xrf_composite_scroll.setWidget(self._xrf_composite_display)
+        self._xrf_composite_pixmap = None   # base composite (no boxes)
+        self._xrf_annotated_pixmap = None   # composite + boxes
+
+        # Inner splitter: xrf_left | composite  (used only in XRF mode)
+        self._xrf_inner_splitter = QSplitter(Qt.Horizontal)
+        self._xrf_inner_splitter.setChildrenCollapsible(False)
+        self._xrf_inner_splitter.addWidget(xrf_left)
+        self._xrf_inner_splitter.addWidget(self._xrf_composite_scroll)
+        self._xrf_inner_splitter.setSizes([200, 520])
+        self._xrf_inner_splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        # Left stack: index 0 = single scroll_area, index 1 = xrf inner splitter
+        from qtpy.QtWidgets import QStackedWidget
+        self._left_stack = QStackedWidget()
+        self._left_stack.addWidget(self.scroll_area)          # index 0
+        self._left_stack.addWidget(self._xrf_inner_splitter)  # index 1
+
+        # ── Right info panel (always visible) ────────────────────────────────
+        right_panel = QWidget()
+        right_panel.setMinimumWidth(160)
+        right_panel.setMaximumWidth(300)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(6, 0, 0, 0)
+        right_layout.setSpacing(4)
 
         self.coord_label = QLabel("X: —\nY: —")
-        self.coord_label.setFixedWidth(75)
         self.coord_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.coord_label.setStyleSheet(
             "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
         )
-
-        self.info_panel = QTextEdit()
-        self.info_panel.setReadOnly(True)
-        self.info_panel.setMinimumWidth(200)
-        self.info_panel.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self.info_panel.setPlaceholderText("Feature details will appear here after analysis.")
-        self.info_panel.setVisible(False)
-
-        image_col = QVBoxLayout()
-        image_col.setSpacing(2)
-        image_row = QHBoxLayout()
-        image_row.setSpacing(0)
-        image_row.addWidget(self.scroll_area, 1)
-        image_row.addWidget(self.coord_label)
-        image_col.addLayout(image_row)
+        right_layout.addWidget(self.coord_label)
 
         self._send_status_label = QLabel("")
+        self._send_status_label.setWordWrap(True)
         self._send_status_label.setStyleSheet(
             "font-size: 10px; color: #aaa; font-family: monospace; padding: 2px 4px;"
         )
         self._send_status_label.setVisible(False)
-        image_col.addWidget(self._send_status_label)
+        right_layout.addWidget(self._send_status_label)
 
-        content_row = QHBoxLayout()
-        content_row.setSpacing(6)
-        content_row.addLayout(image_col, 3)
-        content_row.addWidget(self.info_panel, 1)
-        layout.addLayout(content_row, 1)
+        self.info_panel = QTextEdit()
+        self.info_panel.setReadOnly(True)
+        self.info_panel.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self.info_panel.setPlaceholderText("Feature details will appear here after analysis.")
+        self.info_panel.setVisible(False)
+        right_layout.addWidget(self.info_panel, 1)
+
+        # Outer splitter: left_stack | right info panel
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._left_stack)
+        self._splitter.addWidget(right_panel)
+        self._splitter.setSizes([720, 220])
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
+        layout.addWidget(self._splitter, 1)
 
     def _check_model(self):
         provider = _get_provider(_active_model)
@@ -1437,6 +1719,26 @@ class _LocateTab(QWidget):
             self._check_ollama_model()
         else:
             self._check_cloud_model(provider)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_image_views()
+
+    def _on_splitter_moved(self, pos: int, index: int):
+        self._refresh_image_views()
+
+    def _refresh_image_views(self):
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf:
+            pm = self._xrf_annotated_pixmap if (
+                self._show_boxes_check.isChecked() and self._xrf_annotated_pixmap
+            ) else self._xrf_composite_pixmap
+            if pm:
+                self._show_xrf_composite(pm)
+        else:
+            pm = self._current_pixmap()
+            if pm:
+                self._show_pixmap(pm)
 
     def _check_ollama_model(self):
         if not shutil.which("ollama"):
@@ -1506,15 +1808,12 @@ class _LocateTab(QWidget):
     def _on_mode_changed(self, index: int):
         is_xrf = index == 1
         self._single_widget.setVisible(not is_xrf)
-        self._xrf_widget.setVisible(is_xrf)
         self._preset_widget.setVisible(not is_xrf)
-        if is_xrf:
-            prompt = LOCATE_XRF_ROI_PROMPT
-        else:
-            prompt = self._active_prompt
+        self._left_stack.setCurrentIndex(1 if is_xrf else 0)
+        prompt = LOCATE_SPARSE_XRF_PROMPT if is_xrf else self._active_prompt
         self._header_prompt_lbl.setText(f"Prompt: {prompt[:120].rstrip()}…")
         self._header_prompt_lbl.setToolTip(prompt)
-        self.locate_btn.setText("Find XRF Areas of Interest" if is_xrf else "Get Location of Features")
+        self.locate_btn.setText("Analyze 3 Elements" if is_xrf else "Get Location of Features")
         self._reset_image_state()
         self.locate_btn.setEnabled(False)
 
@@ -1524,7 +1823,8 @@ class _LocateTab(QWidget):
         self._annotated_pixmap = None
         self._features = []
         self._zoom = 1.0
-        self.scroll_area.setVisible(False)
+        self._xrf_composite_pixmap = None
+        self._xrf_annotated_pixmap = None
         self.info_panel.setVisible(False)
 
     def _pick_xrf_image(self, idx: int):
@@ -1536,45 +1836,115 @@ class _LocateTab(QWidget):
             return
         self._xrf_paths[idx] = path
         self._xrf_name_labels[idx].setText(os.path.basename(path))
-        self._xrf_name_labels[idx].setStyleSheet("")
-        # Enable run button only when all 3 are selected
-        if all(self._xrf_paths) and self._model_ok:
+        self._xrf_name_labels[idx].setStyleSheet("font-size: 10px;")
+        self._update_xrf_mini_preview(idx)
+        if all(self._xrf_paths):
             self._build_xrf_composite_display()
-            self.locate_btn.setEnabled(True)
+            if self._model_ok:
+                self.locate_btn.setEnabled(True)
+
+    def _update_xrf_mini_preview(self, idx: int):
+        path = self._xrf_paths[idx]
+        if not path:
+            return
+        normalize = self._normalize_check.isChecked()
+        upscale = self._upscale_check.isChecked()
+        circles = self._red_circles_check.isChecked()
+        cc = _XRF_ELEM_COLORS[idx][1]
+        try:
+            pm, _, _ = _load_image_pixmap(path, normalize=normalize, upscale=upscale,
+                                           red_circles=circles, circle_color=cc)
+            lbl = self._xrf_mini_labels[idx]
+            scaled = pm.scaled(lbl.width() or 200, lbl.height() or 120,
+                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            lbl.setPixmap(scaled)
+        except Exception:
+            pass
 
     def _build_xrf_composite_display(self):
-        """Load 3 TIFFs, normalise each, composite as RGB, show in viewer."""
+        """Build and show the composite image for the 3 XRF elements.
+
+        Circles mode on : overlay all 3 colored circle images (red + green + blue on white).
+        Circles mode off: stack grayscale channels as R/G/B false-color composite.
+        """
         try:
-            channels = []
-            for p in self._xrf_paths:
-                arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
-                if arr is None:
-                    raise ValueError(f"Could not read {p}")
-                arr = arr.astype(np.float32)
-                mn, mx = arr.min(), arr.max()
-                if mx > mn:
-                    arr = (arr - mn) / (mx - mn)
-                channels.append((arr * 255).astype(np.uint8))
-            # Pad to same shape
-            h = max(c.shape[0] for c in channels)
-            w = max(c.shape[1] for c in channels)
-            padded = []
-            for c in channels:
-                p = np.zeros((h, w), dtype=np.uint8)
-                p[:c.shape[0], :c.shape[1]] = c
-                padded.append(p)
-            rgb = np.stack(padded, axis=-1)
-            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
-            self._orig_pixmap = QPixmap.fromImage(qimg)
-            self._dilated_pixmap = None
-            self._annotated_pixmap = None
-            self._zoom = 1.0
-            self._show_pixmap(self._orig_pixmap)
-            self.scroll_area.setVisible(True)
+            normalize = self._normalize_check.isChecked()
+            upscale = self._upscale_check.isChecked()
+            circles = self._red_circles_check.isChecked()
+            circle_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+
+            if circles:
+                # Each element becomes colored circles; overlay all on white canvas
+                circle_arrays = []
+                for p, cc in zip(self._xrf_paths, circle_colors):
+                    arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                    if arr is None:
+                        raise ValueError(f"Could not read {p}")
+                    arr = arr.astype(np.float32)
+                    if normalize:
+                        mn, mx = arr.min(), arr.max()
+                        if mx > mn:
+                            arr = (arr - mn) / (mx - mn)
+                    if upscale:
+                        h_, w_ = arr.shape
+                        if min(h_, w_) < 1092:
+                            scale = 1092 / min(h_, w_)
+                            arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
+                                             interpolation=cv2.INTER_CUBIC)
+                    circle_arrays.append(_apply_red_circles_transform(
+                        (arr * 255).astype(np.uint8), circle_color=cc))
+                # Merge: start white, paint circles from each element (non-white pixels win)
+                h = max(a.shape[0] for a in circle_arrays)
+                w = max(a.shape[1] for a in circle_arrays)
+                composite = np.full((h, w, 3), 255, dtype=np.uint8)
+                for ca in circle_arrays:
+                    mask = np.any(ca < 255, axis=-1)  # pixels that are not white
+                    ph, pw = ca.shape[:2]
+                    composite[:ph, :pw][mask] = ca[mask]
+            else:
+                # False-color: R=elem1 gray, G=elem2 gray, B=elem3 gray
+                channels = []
+                for p in self._xrf_paths:
+                    arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                    if arr is None:
+                        raise ValueError(f"Could not read {p}")
+                    arr = arr.astype(np.float32)
+                    if normalize:
+                        mn, mx = arr.min(), arr.max()
+                        if mx > mn:
+                            arr = (arr - mn) / (mx - mn)
+                    if upscale:
+                        h_, w_ = arr.shape
+                        if min(h_, w_) < 1092:
+                            scale = 1092 / min(h_, w_)
+                            arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
+                                             interpolation=cv2.INTER_CUBIC)
+                    channels.append((arr * 255).astype(np.uint8))
+                h = max(c.shape[0] for c in channels)
+                w = max(c.shape[1] for c in channels)
+                padded = []
+                for c in channels:
+                    p = np.zeros((h, w), dtype=np.uint8)
+                    p[:c.shape[0], :c.shape[1]] = c
+                    padded.append(p)
+                composite = np.stack(padded, axis=-1)
+
+            qimg = QImage(composite.data, w, h, w * 3, QImage.Format_RGB888).copy()
+            self._xrf_composite_pixmap = QPixmap.fromImage(qimg)
+            self._xrf_annotated_pixmap = None
+            self._show_xrf_composite(self._xrf_composite_pixmap)
             self.info_panel.setVisible(True)
         except Exception as e:
             self.status_label.setText(f"Could not build composite: {e}")
             self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
+
+    def _show_xrf_composite(self, pixmap):
+        sa = self._xrf_composite_scroll
+        vp_w = max(200, sa.viewport().width())
+        vp_h = max(200, sa.viewport().height())
+        scaled = pixmap.scaled(vp_w, vp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._xrf_composite_display.setPixmap(scaled)
+        self._xrf_composite_display.resize(scaled.width(), scaled.height())
 
     def _pick_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1639,9 +2009,17 @@ class _LocateTab(QWidget):
         self.scroll_area.verticalScrollBar().setValue(max(0, new_v))
 
     def _on_boxes_toggled(self, checked: bool):
-        pm = self._current_pixmap()
-        if pm:
-            self._show_pixmap(pm)
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf:
+            base = self._xrf_composite_pixmap
+            annotated = self._xrf_annotated_pixmap
+            if base:
+                pm = annotated if (checked and annotated) else base
+                self._show_xrf_composite(pm)
+        else:
+            pm = self._current_pixmap()
+            if pm:
+                self._show_pixmap(pm)
 
     def _run_locate(self):
         if self._locate_thread and self._locate_thread.isRunning():
@@ -1651,17 +2029,14 @@ class _LocateTab(QWidget):
             if not all(self._xrf_paths):
                 return
             self.locate_btn.setEnabled(False)
-            self.status_label.setText("Analyzing XRF composite... this may take 30–60 seconds.")
+            normalize = self._normalize_check.isChecked()
+            upscale = self._upscale_check.isChecked()
+            circles = self._red_circles_check.isChecked()
+            self.status_label.setText("Analyzing 3 elements individually... (~1–3 min)")
             self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
-            # Save composite to a temp PNG for the thread to load
-            import tempfile
-            buf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            buf.close()
-            pm = self._orig_pixmap
-            if pm:
-                pm.save(buf.name, "PNG")
-            self._xrf_tmp_path = buf.name
-            self._locate_thread = _LocateThread(buf.name, dilate_ksize=0, system_prompt_override=LOCATE_XRF_ROI_PROMPT)
+            self._locate_thread = _LocateXRFTripleThread(
+                self._xrf_paths, normalize=normalize, upscale=upscale, circles=circles)
+            self._locate_thread.progress.connect(self._on_tile_progress)
         else:
             if not self._image_path:
                 return
@@ -1671,57 +2046,85 @@ class _LocateTab(QWidget):
             grid = self._grid_check.isChecked()
             upscale = self._upscale_check.isChecked()
             colormap = self._colormap_check.isChecked()
+            red_circles = self._red_circles_check.isChecked()
             use_tile = self._tile_check.isChecked()
             if use_tile:
                 self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
                 self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize,
                                                         system_prompt_override=self._active_prompt,
                                                         normalize=normalize, grid_overlay=grid,
-                                                        upscale=upscale, colormap=colormap)
+                                                        upscale=upscale, colormap=colormap,
+                                                        red_circles=red_circles)
                 self._locate_thread.progress.connect(self._on_tile_progress)
             else:
                 self.status_label.setText("Analyzing... this may take 30–60 seconds.")
                 self._locate_thread = _LocateThread(self._image_path, dilate_ksize=ksize,
                                                     system_prompt_override=self._active_prompt,
                                                     normalize=normalize, grid_overlay=grid,
-                                                    upscale=upscale, colormap=colormap)
+                                                    upscale=upscale, colormap=colormap,
+                                                    red_circles=red_circles)
             self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
         self._locate_thread.result.connect(self._on_result)
         self._locate_thread.error.connect(self._on_error)
         self._locate_thread.start()
 
     def _on_result(self, data):
-        features = data.get("features", [])
-        n = len(features)
-        self._features = features
-
         is_xrf = self._mode_combo.currentIndex() == 1
-        if is_xrf and self._xrf_paths[0]:
+
+        if is_xrf:
+            # Triple XRF result: r_features / g_features / b_features
+            r_feats = data.get("r_features", [])
+            g_feats = data.get("g_features", [])
+            b_feats = data.get("b_features", [])
+            n = data.get("total_count", len(r_feats) + len(g_feats) + len(b_feats))
             ref = pathlib.Path(self._xrf_paths[0])
-            json_path = ref.with_name(ref.stem + "_xrf_roi_features.json")
+            json_path = ref.with_name(ref.stem + "_xrf_triple_features.json")
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"[Feature Locator XRF] All 3 elements done — {n} total feature(s). Saved at: {json_path}")
+
+            if self._xrf_composite_pixmap:
+                groups = [
+                    (r_feats, QColor(220, 60,  60)),
+                    (g_feats, QColor(60,  200, 60)),
+                    (b_feats, QColor(60,  120, 220)),
+                ]
+                self._xrf_annotated_pixmap = _draw_feature_boxes_multi_color(
+                    self._xrf_composite_pixmap, groups)
+                pm_to_show = self._xrf_annotated_pixmap if self._show_boxes_check.isChecked() \
+                    else self._xrf_composite_pixmap
+                self._show_xrf_composite(pm_to_show)
+
+            self._populate_info_xrf(r_feats, g_feats, b_feats, json_path)
+            self.locate_btn.setEnabled(True)
+            self.status_label.setText(f"Done — {n} feature(s) across 3 elements. Saved: {json_path.name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+            QMessageBox.information(self, "XRF Analysis Done",
+                f"R: {len(r_feats)}  G: {len(g_feats)}  B: {len(b_feats)} feature(s)\n"
+                f"Saved to: {json_path}")
         else:
+            features = data.get("features", [])
+            n = len(features)
+            self._features = features
             stem = pathlib.Path(self._image_path).stem
             json_path = pathlib.Path(self._image_path).with_name(stem + "_features.json")
-        with open(json_path, "w") as f:
-            json.dump(data, f, indent=2)
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"[Feature Locator] Results retrieved from '{_active_model}' — {n} feature(s) found. Saved at: {json_path}")
 
-        base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
-        if base and features:
-            self._annotated_pixmap = _draw_feature_boxes(base, features)
-            self._show_pixmap(self._annotated_pixmap)
-        else:
-            self._annotated_pixmap = None
+            base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+            if base and features:
+                self._annotated_pixmap = _draw_feature_boxes(base, features)
+                self._show_pixmap(self._annotated_pixmap)
+            else:
+                self._annotated_pixmap = None
 
-        self._populate_info(features, json_path)
-        self.locate_btn.setEnabled(True)
-        self.status_label.setText(f"Done. Saved: {json_path.name}")
-        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
-
-        QMessageBox.information(
-            self,
-            "Features Found",
-            f"{n} location(s) found.\nSaved to:\n{json_path}",
-        )
+            self._populate_info(features, json_path)
+            self.locate_btn.setEnabled(True)
+            self.status_label.setText(f"Done. Saved: {json_path.name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+            QMessageBox.information(self, "Features Found",
+                f"{n} location(s) found.\nSaved to:\n{json_path}")
 
     def _populate_info(self, features, json_path):
         color_names = ["red", "blue", "green", "yellow", "purple", "cyan", "orange"]
@@ -1748,6 +2151,33 @@ class _LocateTab(QWidget):
         self.info_panel.setPlainText("\n".join(lines).strip())
         self.info_panel.setVisible(True)
 
+    def _populate_info_xrf(self, r_feats, g_feats, b_feats, json_path):
+        elem_cfg = [
+            ("Red   (Elem 1)", r_feats),
+            ("Green (Elem 2)", g_feats),
+            ("Blue  (Elem 3)", b_feats),
+        ]
+        lines = [
+            f"Model: {_active_model}",
+            f"Saved: {json_path.name}",
+            "",
+        ]
+        for elem_label, feats in elem_cfg:
+            lines.append(f"── {elem_label} ─── {len(feats)} feature(s)")
+            for i, feat in enumerate(feats):
+                fid = feat.get("id", i + 1)
+                label = feat.get("label", "")
+                x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
+                x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
+                desc = feat.get("description", "")
+                lines.append(f"  #{fid}  {label}")
+                lines.append(f"       ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})")
+                if desc:
+                    lines.append(f"       {desc}")
+            lines.append("")
+        self.info_panel.setPlainText("\n".join(lines).strip())
+        self.info_panel.setVisible(True)
+
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0
 
@@ -1760,24 +2190,32 @@ class _LocateTab(QWidget):
             self._refresh_send_status()
 
     def _on_image_options_changed(self) -> None:
-        self._orig_pixmap = None
-        self._dilated_pixmap = None
-        if self._image_path:
-            self._update_display()
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf:
+            for i in range(3):
+                self._update_xrf_mini_preview(i)
+            if all(self._xrf_paths):
+                self._build_xrf_composite_display()
+        else:
+            self._orig_pixmap = None
+            self._dilated_pixmap = None
+            if self._image_path:
+                self._update_display()
 
     def _update_display(self) -> None:
         normalize = self._normalize_check.isChecked()
         grid = self._grid_check.isChecked()
         upscale = self._upscale_check.isChecked()
         colormap = self._colormap_check.isChecked()
+        red_circles = self._red_circles_check.isChecked()
         ksize = self._get_dilate_ksize()
         self._orig_pixmap, _, _ = _load_image_pixmap(
             self._image_path, dilate_ksize=0, normalize=normalize, grid_overlay=grid,
-            upscale=upscale, colormap=colormap)
+            upscale=upscale, colormap=colormap, red_circles=red_circles)
         if ksize > 0:
             self._dilated_pixmap, _, _ = _load_image_pixmap(
                 self._image_path, dilate_ksize=ksize, normalize=normalize, grid_overlay=grid,
-                upscale=upscale, colormap=colormap)
+                upscale=upscale, colormap=colormap, red_circles=red_circles)
         pm = self._current_pixmap()
         if pm:
             self._show_pixmap(pm)
@@ -1797,7 +2235,9 @@ class _LocateTab(QWidget):
             parts.append(f"Dilate {ksize}px ✓")
         if self._upscale_check.isChecked():
             parts.append("Upscale ✓")
-        if self._colormap_check.isChecked():
+        if self._red_circles_check.isChecked():
+            parts.append("Red Circles ✓")
+        elif self._colormap_check.isChecked():
             parts.append("Inferno ✓")
         text = "Sending to Claude:  " + "  |  ".join(parts) if parts else "Sending to Claude: raw image"
         self._send_status_label.setText(text)
