@@ -78,14 +78,40 @@ def _merge_element_regions(raw_detections, elem):
 
 # ── Step 2: centroid-distance cross-element union clustering ──────────────────
 
-def _build_centroid_union_clusters(raw_detections, proximity_px, id_offset=0):
+def _make_cluster(component, items, uid):
+    by_elem = defaultdict(lambda: {"boxes": [], "blobs": []})
+    for idx in component:
+        _, blob = items[idx]
+        elem = blob["element"]
+        by_elem[elem]["boxes"].append(_blob_to_box(blob))
+        by_elem[elem]["blobs"].append(blob)
+    all_boxes = [_blob_to_box(items[idx][1]) for idx in component]
+    union_box = [
+        min(b[0] for b in all_boxes), min(b[1] for b in all_boxes),
+        max(b[2] for b in all_boxes), max(b[3] for b in all_boxes),
+    ]
+    return {
+        "union_id": f"centroid_union_{uid:03d}",
+        "group": "all",
+        "union_box": union_box,
+        "by_elem": {e: d for e, d in by_elem.items()},
+    }
+
+
+def _build_centroid_union_clusters(raw_detections, proximity_px=5, id_offset=0):
     """
-    Cluster blobs into union groups using centroid distance instead of box overlap.
-    Only cross-element pairs within proximity_px pixels form edges — same-element
-    blobs never directly connect to each other, preventing chain-merge inflation.
-    Each BFS connected component becomes one union cluster.
+    Cluster blobs into union groups using centroid distance.
+    Two blobs from different elements are co-located (same particle) when:
+        dist(center_i, center_j) <= proximity_px
+    XRF signal peaks for elements on the same particle are essentially at the
+    same spatial location regardless of blob size, so a fixed centroid-distance
+    threshold is physically correct — blob radii play no role here.
+    After BFS, an anchor filter ejects chain-linked outliers: every non-anchor
+    blob must be directly within proximity_px of at least one anchor blob.
+    Ejected blobs become singleton clusters so they are still library-matched.
+    Anchor = element with the most blobs in the component (ties → alphabetical).
     """
-    items = list(raw_detections.items())  # [(name, blob_dict), ...]
+    items = list(raw_detections.items())
     n = len(items)
 
     adj = defaultdict(list)
@@ -120,29 +146,40 @@ def _build_centroid_union_clusters(raw_detections, proximity_px, id_offset=0):
                     visited[nb] = True
                     q.append(nb)
 
-        by_elem = defaultdict(lambda: {"boxes": [], "blobs": []})
-        for idx in component:
-            _, blob = items[idx]
-            elem = blob["element"]
-            box = _blob_to_box(blob)
-            by_elem[elem]["boxes"].append(box)
-            by_elem[elem]["blobs"].append(blob)
+        if len(component) == 1:
+            uid += 1
+            clusters.append(_make_cluster(component, items, uid))
+            continue
 
-        all_boxes = [_blob_to_box(items[idx][1]) for idx in component]
-        union_box = [
-            min(b[0] for b in all_boxes),
-            min(b[1] for b in all_boxes),
-            max(b[2] for b in all_boxes),
-            max(b[3] for b in all_boxes),
+        # Anchor filter: non-anchor blobs must be directly within proximity_px
+        # of an anchor blob — ejects chain-linked outliers as singleton clusters.
+        elem_counts = defaultdict(int)
+        for idx in component:
+            elem_counts[items[idx][1]["element"]] += 1
+        anchor_elem = max(elem_counts, key=lambda e: (elem_counts[e], e))
+        anchor_positions = [
+            items[idx][1]["image_center"]
+            for idx in component if items[idx][1]["element"] == anchor_elem
         ]
 
+        core, outliers = [], []
+        for idx in component:
+            blob = items[idx][1]
+            if blob["element"] == anchor_elem:
+                core.append(idx)
+            else:
+                cx, cy = blob["image_center"]
+                near = any(
+                    ((cx - ax) ** 2 + (cy - ay) ** 2) ** 0.5 <= proximity_px
+                    for ax, ay in anchor_positions
+                )
+                (core if near else outliers).append(idx)
+
         uid += 1
-        clusters.append({
-            "union_id": f"centroid_union_{uid:03d}",
-            "group": "all",
-            "union_box": union_box,
-            "by_elem": {e: d for e, d in by_elem.items()},
-        })
+        clusters.append(_make_cluster(core, items, uid))
+        for idx in outliers:
+            uid += 1
+            clusters.append(_make_cluster([idx], items, uid))
 
     return clusters
 
@@ -302,24 +339,22 @@ def _save_pngs(raw_detections, all_clusters, unions_out, results_dir):
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_phase_matching(raw_detections, results_dir, library_path=None, groups=None, proximity_px=5):
-    # proximity_px is arbitrary — needs beamline testing to calibrate against real particle sizes
     library, tol_default = load_materials_library(library_path)
     if not library:
         return
 
     all_elements = sorted({v["element"] for v in raw_detections.values()})
 
-    # Report image size so threshold-to-image ratio is visible
     _tiff_paths = _find_all_tiffs(results_dir)
     if _tiff_paths:
         _img = tifffile.imread(str(_tiff_paths[0]))
         _h, _w = (_img.shape[-2], _img.shape[-1]) if _img.ndim >= 2 else (_img.shape[0], _img.shape[0])
-        print(f"[PHASE] Image size: {_w}×{_h}px | proximity threshold: {proximity_px}px ({proximity_px/_w*100:.1f}% of width) | composite background from {len(_tiff_paths)} TIFFs")
+        print(f"[PHASE] Image size: {_w}×{_h}px | centroid proximity: {proximity_px}px ({proximity_px/_w*100:.1f}% of width) | composite from {len(_tiff_paths)} TIFFs")
     else:
-        print(f"[PHASE] proximity threshold: {proximity_px}px (no TIFFs found for size reference)")
+        print(f"[PHASE] centroid proximity: {proximity_px}px (no TIFFs found for size reference)")
 
     print(f"[PHASE] {len(raw_detections)} raw blobs across {len(all_elements)} elements — "
-          f"clustering by centroid proximity ({proximity_px}px threshold)")
+          f"clustering by centroid proximity ({proximity_px}px) with anchor-filter anti-chaining")
 
     all_clusters = _build_centroid_union_clusters(raw_detections, proximity_px, id_offset=0)
     n_multi = sum(1 for c in all_clusters if len(c["by_elem"]) > 1)

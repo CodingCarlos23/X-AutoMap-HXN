@@ -29,7 +29,7 @@ from qtpy.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem, QCheckBox, QGroupBox,
     QComboBox, QListWidget, QListWidgetItem,
 )
-from qtpy.QtCore import Qt, QTimer, QRectF, QPoint
+from qtpy.QtCore import Qt, QTimer, QRectF, QPoint, QEvent
 from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
 
 
@@ -462,6 +462,7 @@ class LiveScanViewerWidget(QWidget):
             "QListWidget::item:selected { background: #3a3a50; }"
         )
         self._phase_list.itemClicked.connect(self._on_phase_list_clicked)
+        self._phase_list.installEventFilter(self)
         phase_layout.addWidget(self._phase_list, 1)
 
         layout.addWidget(self._phase_panel, 1)
@@ -730,6 +731,10 @@ class LiveScanViewerWidget(QWidget):
         # Phase Detection mode hover
         if self._display_mode_combo.currentIndex() == 1:
             for pm in self._phase_meta:
+                if not (pm["has_match"] or pm["is_ambiguous"]):
+                    continue
+                if not pm["scene_item"].isVisible():
+                    continue
                 rect = QRectF(pm["scene_x"], pm["scene_y"], pm["scene_w"], pm["scene_h"])
                 if rect.contains(scene_pos):
                     self._show_tooltip(event, self._format_phase_tooltip(pm))
@@ -1112,7 +1117,13 @@ class LiveScanViewerWidget(QWidget):
             matches = union.get("matches", [])
             has_match = bool(matches) and "ambiguous" not in matches[0].get("material", "")
             is_ambiguous = bool(matches) and "ambiguous" in matches[0].get("material", "")
-            is_multi = len(union.get("elements_detected", [])) > 1
+            # is_multi based on what the LIBRARY ENTRY expects, not cluster composition:
+            # Multi = compound/alloy (library has >1 element), Single = pure material (library has 1)
+            if has_match:
+                lib_elems = matches[0].get("elements_in_material", "").split()
+                is_multi = len(lib_elems) > 1
+            else:
+                is_multi = False  # ambiguous and no-match are always single-element clusters
 
             ub = union.get("union_box", {})
             x1, y1 = ub.get("x1", 0), ub.get("y1", 0)
@@ -1173,43 +1184,42 @@ class LiveScanViewerWidget(QWidget):
                 continue
             if not (pm["has_match"] or pm["is_ambiguous"]):
                 continue
-            seen_union_ids.add(uid)
-            entries.append(pm)
-
-        # Sort: multi-element matched first, then single-element
-        entries.sort(key=lambda e: (0 if (e["is_multi"] and e["has_match"]) else 1, e["union_id"]))
-
-        for pm in entries:
             is_multi = pm["is_multi"]
             if is_multi and not self._show_multi_phase:
                 continue
             if not is_multi and not self._show_single_phase:
                 continue
+            seen_union_ids.add(uid)
+            entries.append(pm)
 
+        # Sort: multi-element matched first, then single-element, then by union_id
+        entries.sort(key=lambda e: (0 if (e["is_multi"] and e["has_match"]) else 1, e["union_id"]))
+
+        # Group by display material name
+        from collections import OrderedDict
+        groups: OrderedDict[str, list] = OrderedDict()
+        for pm in entries:
             matches = pm["matches"]
             if matches:
                 mat_name = matches[0]["material"]
-                if "ambiguous" in mat_name:
-                    # Extract short form: "ambiguous — could be: X, Y" → "ambiguous"
-                    display_mat = "ambiguous"
-                else:
-                    display_mat = mat_name
+                display_mat = "ambiguous" if "ambiguous" in mat_name else mat_name
             else:
                 display_mat = "no match"
+            groups.setdefault(display_mat, []).append(pm)
 
-            elems_str = " ".join(pm["elements_detected"])
-            text = f"{display_mat}  [{elems_str}]"
+        bold_font = self._phase_list.font()
+        bold_font.setBold(True)
 
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, pm["union_id"])
-
-            if is_multi and pm["has_match"]:
+        for mat_name, pms in groups.items():
+            count_str = f"  ×{len(pms)}" if len(pms) > 1 else ""
+            item = QListWidgetItem(f"{mat_name}{count_str}")
+            item.setData(Qt.UserRole, mat_name)   # material name — no union_id
+            item.setFont(bold_font)
+            sample = pms[0]
+            if sample["is_multi"] and sample["has_match"]:
                 item.setForeground(QColor(80, 200, 80))
-            elif pm["is_ambiguous"] or (not is_multi and pm["has_match"]):
-                item.setForeground(QColor(220, 200, 50))
             else:
-                item.setForeground(QColor(200, 200, 200))
-
+                item.setForeground(QColor(220, 200, 50))
             self._phase_list.addItem(item)
 
     # ------------------------------------------------------------------
@@ -1245,16 +1255,47 @@ class LiveScanViewerWidget(QWidget):
         self._phase_list.clearSelection()
 
     def _on_phase_list_clicked(self, item: QListWidgetItem):
-        union_id = item.data(Qt.UserRole)
-
-        if union_id == self._selected_phase_union_id:
-            # Deselect — restore all
+        mat_name = item.data(Qt.UserRole)
+        if mat_name == self._selected_phase_union_id:
             self._selected_phase_union_id = None
             self._phase_list.clearSelection()
             self._restore_all_phase_boxes()
         else:
-            self._selected_phase_union_id = union_id
-            self._isolate_phase_box(union_id)
+            self._selected_phase_union_id = mat_name
+            self._highlight_material(mat_name)
+
+    def _highlight_material(self, mat_name: str):
+        """Show all boxes matching mat_name highlighted; dim everything else."""
+        HIGHLIGHT_PHASE = QColor(255, 220, 0)
+        for pm in self._phase_scene_items:
+            matches = pm["matches"]
+            pm_mat = matches[0]["material"] if matches else ""
+            display = "ambiguous" if "ambiguous" in pm_mat else pm_mat
+            if display == mat_name and (pm["has_match"] or pm["is_ambiguous"]):
+                pen = QPen(HIGHLIGHT_PHASE, 3, Qt.SolidLine)
+                pen.setCosmetic(True)
+                pm["scene_item"].setPen(pen)
+                pm["scene_item"].setVisible(True)
+            else:
+                pm["scene_item"].setVisible(False)
+
+    def eventFilter(self, obj, event):
+        if obj is self._phase_list and event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                count = self._phase_list.count()
+                if count == 0:
+                    return True
+                row = self._phase_list.currentRow()
+                new_row = max(0, row - 1) if key == Qt.Key_Up else min(count - 1, row + 1)
+                self._phase_list.setCurrentRow(new_row)
+                item = self._phase_list.item(new_row)
+                if item is not None:
+                    mat_name = item.data(Qt.UserRole)
+                    self._selected_phase_union_id = mat_name
+                    self._highlight_material(mat_name)
+                return True
+        return super().eventFilter(obj, event)
 
     def _isolate_phase_box(self, union_id: str):
         HIGHLIGHT_PHASE = QColor(255, 220, 0)
