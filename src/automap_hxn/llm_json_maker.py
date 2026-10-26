@@ -393,6 +393,30 @@ def _draw_feature_boxes(base_pixmap, features):
     return result
 
 
+def _draw_colocate_boxes(base_pixmap: QPixmap, zones: list) -> QPixmap:
+    """Draw black outline boxes for co-location zones on the composite."""
+    result = base_pixmap.copy()
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pw, ph = result.width(), result.height()
+    pen = QPen(QColor(0, 0, 0), 3)
+    pen.setStyle(Qt.SolidLine)
+    painter.setPen(pen)
+    for zone in zones:
+        x1 = int(max(0.0, float(zone.get("x1", 0))) * pw)
+        y1 = int(max(0.0, float(zone.get("y1", 0))) * ph)
+        x2 = int(min(1.0, float(zone.get("x2", 1))) * pw)
+        y2 = int(min(1.0, float(zone.get("y2", 1))) * ph)
+        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+        # small zone ID label
+        painter.setPen(QPen(QColor(0, 0, 0), 1))
+        painter.setFont(QFont("monospace", 8))
+        painter.drawText(x1 + 2, y1 + 10, f"Z{zone.get('id', '?')}")
+        painter.setPen(pen)
+    painter.end()
+    return result
+
+
 def _draw_feature_boxes_multi_color(base_pixmap, feature_groups):
     """Draw boxes from multiple groups, each with its own QColor.
 
@@ -1378,6 +1402,221 @@ class _LocateXRFTripleThread(QThread):
         return _parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
 
 
+def _box_intersect(a: dict, b: dict) -> dict | None:
+    """Return intersection bbox dict, or None if no overlap."""
+    ix1 = max(a["x1"], b["x1"])
+    iy1 = max(a["y1"], b["y1"])
+    ix2 = min(a["x2"], b["x2"])
+    iy2 = min(a["y2"], b["y2"])
+    if ix2 > ix1 and iy2 > iy1:
+        return {"x1": ix1, "y1": iy1, "x2": ix2, "y2": iy2}
+    return None
+
+
+class _LocateXRFColocateThread(QThread):
+    """Compute element co-location zones and send to LLM for material suggestions."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, triple_data: dict, elem_labels: list[str],
+                 system_prompt_override: str | None = None):
+        super().__init__()
+        self._data = triple_data          # the full triple features dict
+        self._elem_labels = elem_labels   # ["Fe", "Cr", "Ni"] (user-entered names)
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _get_key(self._provider) or ""
+
+    def run(self):
+        try:
+            r_feats = self._data.get("r_features", [])
+            g_feats = self._data.get("g_features", [])
+            b_feats = self._data.get("b_features", [])
+            # elem_labels already contain the color e.g. "Ca (Red)" — use as-is
+            names = [lbl if lbl.strip() else c
+                     for lbl, c in zip(self._elem_labels, ["Red", "Green", "Blue"])]
+
+            self.progress.emit("Computing co-location zones...")
+            zones = self._compute_zones(r_feats, g_feats, b_feats, names)
+            if not zones:
+                self.result.emit({"overlap_zones": [], "total_zones": 0,
+                                  "elements": dict(zip(["r", "g", "b"], names))})
+                return
+
+            self.progress.emit(f"{len(zones)} overlap zone(s) found — querying {_active_model}...")
+            print(f"[XRF Co-locate] {len(zones)} zone(s). Sending to '{_active_model}' for material analysis...")
+            suggestions = self._query_llm(zones, names)
+
+            # Merge LLM suggestions into zones
+            for zone, sug in zip(zones, suggestions):
+                zone["llm_suggestion"] = sug.get("suggestion", "")
+                zone["reasoning"] = sug.get("reasoning", "")
+
+            result = {
+                "elements": {"r": names[0], "g": names[1], "b": names[2]},
+                "model": _active_model,
+                "overlap_zones": zones,
+                "total_zones": len(zones),
+            }
+            self.result.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @staticmethod
+    def _compute_zones(r_feats, g_feats, b_feats, names) -> list:
+        zones = []
+        zone_id = 1
+
+        def _add(elems, elem_names, box):
+            nonlocal zone_id
+            zones.append({
+                "id": zone_id,
+                "element_codes": elems,
+                "elements": elem_names,
+                "x1": round(box["x1"], 4), "y1": round(box["y1"], 4),
+                "x2": round(box["x2"], 4), "y2": round(box["y2"], 4),
+                "llm_suggestion": "", "reasoning": "",
+            })
+            zone_id += 1
+
+        # R+G pairwise
+        for rf in r_feats:
+            for gf in g_feats:
+                box = _box_intersect(rf, gf)
+                if box:
+                    # Check if B also overlaps the intersection
+                    triple = False
+                    for bf in b_feats:
+                        tri_box = _box_intersect(box, bf)
+                        if tri_box:
+                            _add(["R", "G", "B"], [names[0], names[1], names[2]], tri_box)
+                            triple = True
+                            break
+                    if not triple:
+                        _add(["R", "G"], [names[0], names[1]], box)
+
+        # R+B pairwise (no G)
+        for rf in r_feats:
+            for bf in b_feats:
+                box = _box_intersect(rf, bf)
+                if box:
+                    has_g = any(_box_intersect(box, gf) for gf in g_feats)
+                    if not has_g:
+                        _add(["R", "B"], [names[0], names[2]], box)
+
+        # G+B pairwise (no R)
+        for gf in g_feats:
+            for bf in b_feats:
+                box = _box_intersect(gf, bf)
+                if box:
+                    has_r = any(_box_intersect(box, rf) for rf in r_feats)
+                    if not has_r:
+                        _add(["G", "B"], [names[1], names[2]], box)
+
+        return zones
+
+    def _query_llm(self, zones: list, names: list) -> list:
+        zone_lines = []
+        for z in zones:
+            elem_str = " + ".join(z["elements"])
+            zone_lines.append(
+                f"  Zone {z['id']}: {elem_str} co-located at "
+                f"({z['x1']:.3f},{z['y1']:.3f})→({z['x2']:.3f},{z['y2']:.3f})"
+            )
+        prompt = (
+            "You are an XRF (X-ray fluorescence) materials scientist. "
+            f"The scan has 3 elements: Element 1 = {names[0]}, "
+            f"Element 2 = {names[1]}, Element 3 = {names[2]}.\n\n"
+            "The following co-location zones were detected where multiple element signals overlap:\n"
+            + "\n".join(zone_lines) + "\n\n"
+            "For each zone, identify the most likely material, compound, alloy, or phase that "
+            "explains why these elements co-exist in the same region. Be concise but specific.\n\n"
+            "Respond ONLY with valid JSON:\n"
+            '{"zones": [{"id": 1, "suggestion": "stainless steel", '
+            '"reasoning": "Fe+Cr+Ni is a classic stainless steel signature"}]}'
+        )
+        if self._provider == "anthropic":
+            return self._query_anthropic(prompt)
+        if self._provider == "openai":
+            return self._query_openai(prompt)
+        return self._query_ollama(prompt)
+
+    @staticmethod
+    def _safe_parse_zones(text: str) -> list:
+        start = text.find("{")
+        if start < 0:
+            return []
+        fragment = text[start:]
+        try:
+            return json.loads(fragment).get("zones", [])
+        except json.JSONDecodeError:
+            # Truncated response — try to salvage complete zone objects
+            zones = []
+            depth = 0
+            buf = ""
+            in_zones = False
+            for ch in fragment:
+                buf += ch
+                if ch == "{":
+                    depth += 1
+                    if '"zones"' in buf and not in_zones:
+                        in_zones = True
+                elif ch == "}":
+                    depth -= 1
+                    if in_zones and depth == 1:
+                        zone_text = buf[buf.rfind('"id"', 0, len(buf) - 1) - 1:]
+                        try:
+                            z = json.loads("{" + zone_text.lstrip("{"))
+                            if "id" in z:
+                                zones.append(z)
+                        except Exception:
+                            pass
+            return zones
+
+    def _query_anthropic(self, prompt: str) -> list:
+        payload = json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": self._key,
+                     "anthropic-version": ANTHROPIC_API_VERSION})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        text = (data.get("content") or [{}])[0].get("text", "{}")
+        return self._safe_parse_zones(text)
+
+    def _query_openai(self, prompt: str) -> list:
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
+        payload = json.dumps({
+            "model": _get_openai_model() if "openai" in _api_urls else self._model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        return self._safe_parse_zones(text)
+
+    def _query_ollama(self, prompt: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False, "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(OLLAMA_URL, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = json.loads(resp.read())
+        text = raw.get("message", {}).get("content", "{}")
+        return self._safe_parse_zones(text)
+
+
 class _LocateTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1388,6 +1627,19 @@ class _LocateTab(QWidget):
         self._annotated_pixmap = None
         self._features = []
         self._zoom = 1.0
+        self._xrf_zoom = 1.0
+        self._xrf_base_w = 0
+        self._xrf_base_h = 0
+        self._xrf_r_features = []
+        self._xrf_g_features = []
+        self._xrf_b_features = []
+        self._xrf_colocate_zones = []
+        self._xrf_last_triple_json = None  # path to last _xrf_triple_features.json
+        self._boxes_visible = True         # master toggle (all boxes)
+        self._xrf_show_r = True
+        self._xrf_show_g = True
+        self._xrf_show_b = True
+        self._xrf_show_zones = True
         self._model_ok = True
         self._xrf_paths = [None, None, None]
         self._xrf_elem_names = ["Element 1", "Element 2", "Element 3"]
@@ -1577,14 +1829,13 @@ class _LocateTab(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        # Box toggle
-        box_toggle_row = QHBoxLayout()
-        self._show_boxes_check = QCheckBox("Show Boxes")
-        self._show_boxes_check.setChecked(True)
-        self._show_boxes_check.toggled.connect(self._on_boxes_toggled)
-        box_toggle_row.addWidget(self._show_boxes_check)
-        box_toggle_row.addStretch()
-        layout.addLayout(box_toggle_row)
+        # Co-location analysis button (XRF mode only, shown after triple analysis)
+        self._colocate_btn = QPushButton("Analyze Co-locations")
+        self._colocate_btn.setMinimumHeight(32)
+        self._colocate_btn.setToolTip("Compute element co-location zones and query LLM for material suggestions")
+        self._colocate_btn.clicked.connect(self._run_colocate)
+        self._colocate_btn.setVisible(False)
+        layout.addWidget(self._colocate_btn)
 
         # ── Single-image scroll area ──────────────────────────────────────────
         self.scroll_area = QScrollArea()
@@ -1599,6 +1850,17 @@ class _LocateTab(QWidget):
         self.img_display.mouse_left.connect(self._on_mouse_left)
         self.img_display.zoom_scrolled.connect(self._on_zoom)
         self.scroll_area.setWidget(self.img_display)
+
+        # Overlay toggle button — floats in top-right of single image view
+        self._single_overlay_btn = QPushButton("Hide Boxes", self.scroll_area)
+        self._single_overlay_btn.setFixedSize(88, 26)
+        self._single_overlay_btn.setStyleSheet(
+            "QPushButton { background: rgba(30,30,30,200); color: #eee; border: 1px solid #555;"
+            " border-radius: 4px; font-size: 11px; padding: 2px 6px; }"
+            "QPushButton:hover { background: rgba(60,60,60,220); }"
+        )
+        self._single_overlay_btn.clicked.connect(self._toggle_single_boxes)
+        self._single_overlay_btn.raise_()
 
         # ── XRF mode: left column of 3 mini-previews ─────────────────────────
         self._xrf_pick_btns = []
@@ -1629,13 +1891,14 @@ class _LocateTab(QWidget):
             btn_row = QHBoxLayout()
             btn = QPushButton(f"Pick {color_name}...")
             btn.clicked.connect(lambda _, idx=i: self._pick_xrf_image(idx))
+            btn_row.addWidget(btn)
+            panel_layout.addLayout(btn_row)
+            self._xrf_pick_btns.append(btn)
+
             lbl = QLabel("No file selected")
             lbl.setStyleSheet("color: #888; font-size: 10px;")
             lbl.setWordWrap(True)
-            btn_row.addWidget(btn)
-            panel_layout.addLayout(btn_row)
             panel_layout.addWidget(lbl)
-            self._xrf_pick_btns.append(btn)
             self._xrf_name_labels.append(lbl)
 
             mini = QLabel()
@@ -1653,12 +1916,48 @@ class _LocateTab(QWidget):
         self._xrf_composite_scroll.setWidgetResizable(False)
         self._xrf_composite_scroll.setAlignment(Qt.AlignCenter)
         self._xrf_composite_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._xrf_composite_display = QLabel()
+        self._xrf_composite_scroll.viewport().setMouseTracking(True)
+        self._xrf_composite_display = _ImageDisplay()
         self._xrf_composite_display.setAlignment(Qt.AlignCenter)
         self._xrf_composite_display.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._xrf_composite_display.mouse_moved.connect(self._on_xrf_mouse_moved)
+        self._xrf_composite_display.mouse_left.connect(self._on_mouse_left)
+        self._xrf_composite_display.zoom_scrolled.connect(self._on_xrf_zoom)
         self._xrf_composite_scroll.setWidget(self._xrf_composite_display)
         self._xrf_composite_pixmap = None   # base composite (no boxes)
         self._xrf_annotated_pixmap = None   # composite + boxes
+
+        _ovr_style = (
+            "QPushButton {{ background: rgba(30,30,30,200); color: {fg}; border: 1px solid #555;"
+            " border-radius: 4px; font-size: 10px; padding: 1px 5px; }}"
+            "QPushButton:hover {{ background: rgba(70,70,70,220); }}"
+        )
+
+        # Master "Hide All / Show All" overlay button — floats top-right of XRF composite
+        self._xrf_overlay_btn = QPushButton("Hide All", self._xrf_composite_scroll)
+        self._xrf_overlay_btn.setFixedSize(72, 24)
+        self._xrf_overlay_btn.setStyleSheet(_ovr_style.format(fg="#eee"))
+        self._xrf_overlay_btn.clicked.connect(self._toggle_overlay_boxes)
+        self._xrf_overlay_btn.raise_()
+
+        # Individual element toggle buttons (hidden until analysis done)
+        self._xrf_elem_overlay_btns = []
+        _elem_colors_fg = ["#f87171", "#4ade80", "#60a5fa", "#d1d5db"]
+        _elem_labels_dflt = ["● R", "● G", "● B", "◆ Zones"]
+        _elem_callbacks = [
+            lambda: self._toggle_elem_box(0),
+            lambda: self._toggle_elem_box(1),
+            lambda: self._toggle_elem_box(2),
+            lambda: self._toggle_elem_box(3),
+        ]
+        for fg, txt, cb in zip(_elem_colors_fg, _elem_labels_dflt, _elem_callbacks):
+            btn = QPushButton(txt, self._xrf_composite_scroll)
+            btn.setFixedSize(72, 22)
+            btn.setStyleSheet(_ovr_style.format(fg=fg))
+            btn.clicked.connect(cb)
+            btn.setVisible(False)
+            btn.raise_()
+            self._xrf_elem_overlay_btns.append(btn)
 
         # Inner splitter: xrf_left | composite  (used only in XRF mode)
         self._xrf_inner_splitter = QSplitter(Qt.Horizontal)
@@ -1723,22 +2022,98 @@ class _LocateTab(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refresh_image_views()
+        self._reposition_overlay_btns()
 
     def _on_splitter_moved(self, pos: int, index: int):
         self._refresh_image_views()
+        self._reposition_overlay_btns()
+
+    def _reposition_overlay_btns(self):
+        margin = 8
+        gap = 2
+        # Single image overlay
+        sa = self.scroll_area
+        self._single_overlay_btn.move(sa.width() - self._single_overlay_btn.width() - margin, margin)
+        self._single_overlay_btn.raise_()
+        # XRF composite master button
+        sa = self._xrf_composite_scroll
+        master = self._xrf_overlay_btn
+        master.move(sa.width() - master.width() - margin, margin)
+        master.raise_()
+        # Individual element buttons stacked below master
+        y = margin + master.height() + gap
+        for btn in self._xrf_elem_overlay_btns:
+            if btn.isVisible():
+                btn.move(sa.width() - btn.width() - margin, y)
+                y += btn.height() + gap
+                btn.raise_()
+
+    def _toggle_overlay_boxes(self):
+        self._boxes_visible = not self._boxes_visible
+        self._xrf_show_r = self._boxes_visible
+        self._xrf_show_g = self._boxes_visible
+        self._xrf_show_b = self._boxes_visible
+        self._xrf_show_zones = self._boxes_visible
+        label = "Hide All" if self._boxes_visible else "Show All"
+        self._xrf_overlay_btn.setText(label)
+        self._single_overlay_btn.setText("Hide Boxes" if self._boxes_visible else "Show Boxes")
+        self._sync_elem_btn_labels()
+        self._refresh_image_views()
+
+    def _toggle_elem_box(self, idx: int):
+        flags = [self._xrf_show_r, self._xrf_show_g, self._xrf_show_b, self._xrf_show_zones]
+        flags[idx] = not flags[idx]
+        self._xrf_show_r, self._xrf_show_g, self._xrf_show_b, self._xrf_show_zones = flags
+        self._sync_elem_btn_labels()
+        self._refresh_image_views()
+
+    def _sync_elem_btn_labels(self):
+        colors = ["Red", "Green", "Blue", "Zones"]
+        short = ["R", "G", "B", "Zones"]
+        flags = [self._xrf_show_r, self._xrf_show_g, self._xrf_show_b, self._xrf_show_zones]
+        # Use actual element names if available
+        names = [self._xrf_elem_names[i] or short[i] for i in range(3)] + ["Zones"]
+        for i, (btn, flag, name) in enumerate(zip(self._xrf_elem_overlay_btns, flags, names)):
+            prefix = "●" if i < 3 else "◆"
+            btn.setText(f"{prefix} {name}" if flag else f"○ {name}")
+
+    def _show_elem_overlay_btns(self, show_zones: bool = False):
+        """Show/update the individual element overlay buttons after analysis."""
+        for i, btn in enumerate(self._xrf_elem_overlay_btns):
+            if i == 3:
+                btn.setVisible(show_zones)
+            else:
+                btn.setVisible(True)
+        self._sync_elem_btn_labels()
+        self._reposition_overlay_btns()
 
     def _refresh_image_views(self):
         is_xrf = self._mode_combo.currentIndex() == 1
         if is_xrf:
-            pm = self._xrf_annotated_pixmap if (
-                self._show_boxes_check.isChecked() and self._xrf_annotated_pixmap
-            ) else self._xrf_composite_pixmap
+            pm = self._xrf_current_composite()
             if pm:
                 self._show_xrf_composite(pm)
         else:
             pm = self._current_pixmap()
             if pm:
                 self._show_pixmap(pm)
+
+    def _xrf_current_composite(self):
+        """Dynamically build the composite with only the currently-visible box layers."""
+        base = self._xrf_composite_pixmap
+        if not base:
+            return None
+        groups = []
+        if self._xrf_show_r and self._xrf_r_features:
+            groups.append((self._xrf_r_features, QColor(220, 60,  60)))
+        if self._xrf_show_g and self._xrf_g_features:
+            groups.append((self._xrf_g_features, QColor(60,  200, 60)))
+        if self._xrf_show_b and self._xrf_b_features:
+            groups.append((self._xrf_b_features, QColor(60,  120, 220)))
+        result = _draw_feature_boxes_multi_color(base, groups) if groups else base
+        if self._xrf_show_zones and self._xrf_colocate_zones:
+            result = _draw_colocate_boxes(result, self._xrf_colocate_zones)
+        return result
 
     def _check_ollama_model(self):
         if not shutil.which("ollama"):
@@ -1825,6 +2200,22 @@ class _LocateTab(QWidget):
         self._zoom = 1.0
         self._xrf_composite_pixmap = None
         self._xrf_annotated_pixmap = None
+        self._xrf_colocate_pixmap = None
+        self._xrf_colocate_zones = []
+        self._xrf_zoom = 1.0
+        self._xrf_last_triple_json = None
+        self._xrf_elem_names = ["", "", ""]
+        self._xrf_r_features = []
+        self._xrf_g_features = []
+        self._xrf_b_features = []
+        self._colocate_btn.setVisible(False)
+        self._boxes_visible = True
+        self._xrf_show_r = True
+        self._xrf_show_g = True
+        self._xrf_show_b = True
+        self._xrf_show_zones = True
+        for btn in self._xrf_elem_overlay_btns:
+            btn.setVisible(False)
         self.info_panel.setVisible(False)
 
     def _pick_xrf_image(self, idx: int):
@@ -1835,6 +2226,10 @@ class _LocateTab(QWidget):
         if not path:
             return
         self._xrf_paths[idx] = path
+        # Auto-extract element name from filename: scan_12345_Fe.tiff → "Fe"
+        stem = pathlib.Path(path).stem
+        elem_name = stem.split("_")[-1]
+        self._xrf_elem_names[idx] = elem_name
         self._xrf_name_labels[idx].setText(os.path.basename(path))
         self._xrf_name_labels[idx].setStyleSheet("font-size: 10px;")
         self._update_xrf_mini_preview(idx)
@@ -1942,9 +2337,95 @@ class _LocateTab(QWidget):
         sa = self._xrf_composite_scroll
         vp_w = max(200, sa.viewport().width())
         vp_h = max(200, sa.viewport().height())
-        scaled = pixmap.scaled(vp_w, vp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        fit = pixmap.scaled(vp_w, vp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._xrf_base_w, self._xrf_base_h = fit.width(), fit.height()
+        w = max(1, int(self._xrf_base_w * self._xrf_zoom))
+        h = max(1, int(self._xrf_base_h * self._xrf_zoom))
+        scaled = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._xrf_composite_display.setPixmap(scaled)
         self._xrf_composite_display.resize(scaled.width(), scaled.height())
+
+    def _on_xrf_zoom(self, direction: int):
+        sa = self._xrf_composite_scroll
+        viewport = sa.viewport()
+        cursor_vp = viewport.mapFromGlobal(self._xrf_composite_display.cursor().pos())
+        old_h = sa.horizontalScrollBar().value()
+        old_v = sa.verticalScrollBar().value()
+
+        old_zoom = self._xrf_zoom
+        self._xrf_zoom = max(0.25, min(8.0, self._xrf_zoom * (1.15 if direction > 0 else 1 / 1.15)))
+
+        pm = self._xrf_current_composite()
+        if pm:
+            self._show_xrf_composite(pm)
+
+        ratio = self._xrf_zoom / old_zoom
+        sa.horizontalScrollBar().setValue(max(0, int((old_h + cursor_vp.x()) * ratio - cursor_vp.x())))
+        sa.verticalScrollBar().setValue(max(0, int((old_v + cursor_vp.y()) * ratio - cursor_vp.y())))
+
+    def _on_xrf_mouse_moved(self, fx: float, fy: float) -> None:
+        self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
+        self.coord_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 6px;")
+
+        lines = []
+
+        # Zone tooltip — only when zones are visible
+        if self._xrf_show_zones and self._xrf_colocate_zones:
+            for zone in self._xrf_colocate_zones:
+                if zone.get("x1", 0) <= fx <= zone.get("x2", 0) and \
+                        zone.get("y1", 0) <= fy <= zone.get("y2", 0):
+                    elem_str = " + ".join(zone.get("elements", []))
+                    x1, y1 = zone.get("x1", 0), zone.get("y1", 0)
+                    x2, y2 = zone.get("x2", 0), zone.get("y2", 0)
+                    lines = [
+                        f"<b>Zone {zone.get('id', '?')}  —  {elem_str}</b>",
+                        f"bbox: ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})",
+                    ]
+                    if zone.get("llm_suggestion"):
+                        lines.append(f"<b>→ {zone['llm_suggestion']}</b>")
+                    if zone.get("reasoning"):
+                        lines.append(f"<i>{zone['reasoning']}</i>")
+                    break
+
+        # Element feature tooltips — only for visible elements, only if no zone hit
+        if not lines:
+            labels = self._get_elem_labels()
+            elem_groups = [
+                (labels[0], "#e74c3c", self._xrf_r_features, self._xrf_show_r),
+                (labels[1], "#27ae60", self._xrf_g_features, self._xrf_show_g),
+                (labels[2], "#2980b9", self._xrf_b_features, self._xrf_show_b),
+            ]
+            for elem_label, color, feats, visible in elem_groups:
+                if not visible:
+                    continue
+                for feat in feats:
+                    if feat.get("x1", 0) <= fx <= feat.get("x2", 0) and \
+                            feat.get("y1", 0) <= fy <= feat.get("y2", 0):
+                        fid = feat.get("id", "?")
+                        label = feat.get("label", "")
+                        desc = feat.get("description", "")
+                        x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
+                        x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
+                        lines = [
+                            f'<b style="color:{color};">{elem_label}</b>',
+                            f"<b>Feature #{fid}</b>  {label}",
+                        ]
+                        if desc:
+                            lines.append(f"<i>{desc}</i>")
+                        lines.append(f"bbox: ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})")
+                        lines.append(f"size: {(x2-x1)*100:.1f}% × {(y2-y1)*100:.1f}%")
+                        break
+                if lines:
+                    break
+
+        if lines:
+            self._hover_tooltip.setText("<br>".join(lines))
+            self._hover_tooltip.adjustSize()
+            gpos = QCursor.pos()
+            self._hover_tooltip.move(gpos.x() + 16, gpos.y() - self._hover_tooltip.height() - 4)
+            self._hover_tooltip.show()
+        else:
+            self._hover_tooltip.hide()
 
     def _pick_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1973,7 +2454,7 @@ class _LocateTab(QWidget):
             self.locate_btn.setEnabled(True)
 
     def _current_pixmap(self):
-        if self._show_boxes_check.isChecked() and self._annotated_pixmap:
+        if self._boxes_visible and self._annotated_pixmap:
             return self._annotated_pixmap
         return self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
 
@@ -2008,18 +2489,13 @@ class _LocateTab(QWidget):
         self.scroll_area.horizontalScrollBar().setValue(max(0, new_h))
         self.scroll_area.verticalScrollBar().setValue(max(0, new_v))
 
-    def _on_boxes_toggled(self, checked: bool):
-        is_xrf = self._mode_combo.currentIndex() == 1
-        if is_xrf:
-            base = self._xrf_composite_pixmap
-            annotated = self._xrf_annotated_pixmap
-            if base:
-                pm = annotated if (checked and annotated) else base
-                self._show_xrf_composite(pm)
-        else:
-            pm = self._current_pixmap()
-            if pm:
-                self._show_pixmap(pm)
+    def _toggle_single_boxes(self):
+        """Toggle boxes for the single image view (via the overlay button)."""
+        self._boxes_visible = not self._boxes_visible
+        self._single_overlay_btn.setText("Hide Boxes" if self._boxes_visible else "Show Boxes")
+        pm = self._current_pixmap()
+        if pm:
+            self._show_pixmap(pm)
 
     def _run_locate(self):
         if self._locate_thread and self._locate_thread.isRunning():
@@ -2077,11 +2553,19 @@ class _LocateTab(QWidget):
             g_feats = data.get("g_features", [])
             b_feats = data.get("b_features", [])
             n = data.get("total_count", len(r_feats) + len(g_feats) + len(b_feats))
+            labels = self._get_elem_labels()
+            data["elements"] = {"r": labels[0], "g": labels[1], "b": labels[2]}
             ref = pathlib.Path(self._xrf_paths[0])
             json_path = ref.with_name(ref.stem + "_xrf_triple_features.json")
             with open(json_path, "w") as f:
                 json.dump(data, f, indent=2)
+            self._xrf_last_triple_json = json_path
             print(f"[Feature Locator XRF] All 3 elements done — {n} total feature(s). Saved at: {json_path}")
+
+            # Store for tooltip hover lookup
+            self._xrf_r_features = r_feats
+            self._xrf_g_features = g_feats
+            self._xrf_b_features = b_feats
 
             if self._xrf_composite_pixmap:
                 groups = [
@@ -2089,14 +2573,13 @@ class _LocateTab(QWidget):
                     (g_feats, QColor(60,  200, 60)),
                     (b_feats, QColor(60,  120, 220)),
                 ]
-                self._xrf_annotated_pixmap = _draw_feature_boxes_multi_color(
-                    self._xrf_composite_pixmap, groups)
-                pm_to_show = self._xrf_annotated_pixmap if self._show_boxes_check.isChecked() \
-                    else self._xrf_composite_pixmap
-                self._show_xrf_composite(pm_to_show)
+                self._show_xrf_composite(self._xrf_current_composite())
 
+            self._show_elem_overlay_btns(show_zones=False)
             self._populate_info_xrf(r_feats, g_feats, b_feats, json_path)
             self.locate_btn.setEnabled(True)
+            self._colocate_btn.setVisible(True)
+            self._colocate_btn.setEnabled(True)
             self.status_label.setText(f"Done — {n} feature(s) across 3 elements. Saved: {json_path.name}")
             self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
             QMessageBox.information(self, "XRF Analysis Done",
@@ -2178,6 +2661,75 @@ class _LocateTab(QWidget):
         self.info_panel.setPlainText("\n".join(lines).strip())
         self.info_panel.setVisible(True)
 
+    def _get_elem_labels(self) -> list[str]:
+        """Return element label strings like 'Fe (Red)', 'Cr (Green)', 'Ni (Blue)'.
+
+        Element name is auto-extracted from the filename stem on pick.
+        """
+        colors = ["Red", "Green", "Blue"]
+        return [
+            f"{self._xrf_elem_names[i]} ({colors[i]})" if self._xrf_elem_names[i]
+            else colors[i]
+            for i in range(3)
+        ]
+
+    def _run_colocate(self):
+        if not self._xrf_last_triple_json:
+            return
+        self._colocate_btn.setEnabled(False)
+        self.status_label.setText("Running co-location analysis...")
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+        triple_data = {
+            "r_features": self._xrf_r_features,
+            "g_features": self._xrf_g_features,
+            "b_features": self._xrf_b_features,
+        }
+        labels = self._get_elem_labels()
+        self._colocate_thread = _LocateXRFColocateThread(triple_data, labels)
+        self._colocate_thread.result.connect(self._on_colocate_result)
+        self._colocate_thread.error.connect(self._on_error)
+        self._colocate_thread.progress.connect(self._on_tile_progress)
+        self._colocate_thread.start()
+
+    def _on_colocate_result(self, data: dict):
+        zones = data.get("overlap_zones", [])
+        n = data.get("total_zones", len(zones))
+        ref = pathlib.Path(self._xrf_paths[0])
+        json_path = ref.with_name(ref.stem + "_xrf_colocate.json")
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[XRF Co-locate] {n} zone(s) identified. Saved at: {json_path}")
+        for z in zones:
+            elem_str = " + ".join(z.get("elements", []))
+            print(f"  Zone {z['id']}: {elem_str} @ ({z['x1']:.3f},{z['y1']:.3f})→({z['x2']:.3f},{z['y2']:.3f})")
+
+        self._xrf_colocate_zones = zones
+        if self._xrf_composite_pixmap and zones:
+            self._xrf_colocate_pixmap = _draw_colocate_boxes(self._xrf_composite_pixmap, zones)
+
+        self._colocate_btn.setEnabled(True)
+        self._show_elem_overlay_btns(show_zones=True)
+        self._refresh_image_views()
+        self.status_label.setText(f"Co-location done — {n} zone(s). Saved: {json_path.name}")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._populate_info_colocate(zones, json_path)
+
+    def _populate_info_colocate(self, zones: list, json_path):
+        # Append below existing triple-features content so both are scrollable
+        sep = "\n\n" + "─" * 40 + "\n"
+        lines = [f"CO-LOCATION ANALYSIS  —  {json_path.name}", ""]
+        for z in zones:
+            elem_str = " + ".join(z.get("elements", []))
+            lines.append(f"Zone {z['id']}: {elem_str}")
+            lines.append(f"  bbox: ({z['x1']:.3f},{z['y1']:.3f})→({z['x2']:.3f},{z['y2']:.3f})")
+            if z.get("llm_suggestion"):
+                lines.append(f"  → {z['llm_suggestion']}")
+            if z.get("reasoning"):
+                lines.append(f"  {z['reasoning']}")
+            lines.append("")
+        self.info_panel.append(sep + "\n".join(lines).strip())
+        self.info_panel.setVisible(True)
+
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0
 
@@ -2247,12 +2799,13 @@ class _LocateTab(QWidget):
         self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
         self.coord_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 6px;")
 
-        # Hover tooltip: find if cursor is inside any feature bbox
+        # Hover tooltip: only when boxes are visible
         hit = None
-        for feat in self._features:
-            if feat.get("x1", 0) <= fx <= feat.get("x2", 0) and feat.get("y1", 0) <= fy <= feat.get("y2", 0):
-                hit = feat
-                break
+        if self._boxes_visible:
+            for feat in self._features:
+                if feat.get("x1", 0) <= fx <= feat.get("x2", 0) and feat.get("y1", 0) <= fy <= feat.get("y2", 0):
+                    hit = feat
+                    break
 
         if hit:
             fid = hit.get("id", "?")
