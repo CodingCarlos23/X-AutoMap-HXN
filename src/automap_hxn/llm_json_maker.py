@@ -1636,6 +1636,8 @@ class _LocateXRFColocateThread(QThread):
                 zone["reasoning"] = sug.get("reasoning", "")
 
             result = {
+                "mode": "triple",
+                "method": "geometric",
                 "elements": {"r": names[0], "g": names[1], "b": names[2]},
                 "model": _active_model,
                 "overlap_zones": zones,
@@ -1828,6 +1830,8 @@ class _LocateXRFMultiColocateThread(QThread):
                 zone["llm_suggestion"] = sug.get("suggestion", "")
                 zone["reasoning"] = sug.get("reasoning", "")
             self.result.emit({
+                "mode": "multi",
+                "method": "geometric",
                 "elements": self._elem_names,
                 "model": _active_model,
                 "overlap_zones": zones,
@@ -1879,7 +1883,6 @@ class _LocateXRFMultiColocateThread(QThread):
                         sorted_idx = sorted(active_indices)
                         zones.append({
                             "id": zone_id,
-                            "element_codes": [names[idx] for idx in sorted_idx],
                             "elements": [names[idx] for idx in sorted_idx],
                             "x1": round(active_box["x1"], 4),
                             "y1": round(active_box["y1"], 4),
@@ -1959,6 +1962,155 @@ class _LocateXRFMultiColocateThread(QThread):
             raw = json.loads(resp.read())
         text = raw.get("message", {}).get("content", "{}")
         return _LocateXRFColocateThread._safe_parse_zones(text)
+
+
+class _LocateLLMColocateThread(QThread):
+    """Send full VLM features JSON to LLM; let it reason spatially and return co-location zones."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    _SYSTEM = (
+        "You are an XRF (X-ray fluorescence) materials scientist. "
+        "You will receive VLM-detected features for multiple element scans. "
+        "Your task is to identify co-location zones — regions where 2 or more elements "
+        "overlap or are immediately adjacent — and identify the most likely material or phase. "
+        "Return ONLY valid JSON. No text outside the JSON object."
+    )
+
+    _SCHEMA = (
+        '{"zones": [{'
+        '"id": 1, '
+        '"elements": ["Fe", "Cr"], '
+        '"x1": 0.10, "y1": 0.20, "x2": 0.35, "y2": 0.45, '
+        '"suggestion": "ferrochrome alloy", '
+        '"reasoning": "Fe+Cr co-location is characteristic of ferrochrome"'
+        '}]}'
+    )
+
+    def __init__(self, elem_features: list, elem_names: list):
+        super().__init__()
+        self._elem_features = elem_features
+        self._elem_names = elem_names
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _get_key(self._provider) or ""
+
+    def run(self):
+        try:
+            self.progress.emit("Sending VLM results to LLM for spatial co-location analysis...")
+            prompt = self._build_prompt()
+            print(f"[LLM Co-locate] Sending {sum(len(f) for f in self._elem_features)} total features "
+                  f"across {len(self._elem_names)} elements to '{_active_model}'")
+            if self._provider == "anthropic":
+                zones = self._query_anthropic(prompt)
+            elif self._provider == "openai":
+                zones = self._query_openai(prompt)
+            else:
+                zones = self._query_ollama(prompt)
+            for i, z in enumerate(zones):
+                z["id"] = i + 1
+                z.setdefault("llm_suggestion", z.pop("suggestion", ""))
+                z.setdefault("reasoning", "")
+                z.pop("element_codes", None)
+            self.result.emit({
+                "elements": self._elem_names,
+                "model": _active_model,
+                "method": "llm",
+                "overlap_zones": zones,
+                "total_zones": len(zones),
+            })
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _build_prompt(self) -> str:
+        lines = [
+            f"You have VLM detection results for {len(self._elem_names)} XRF element scans.",
+            "Bounding boxes are fractional coordinates (0.0–1.0), (0,0)=top-left, (1,1)=bottom-right.",
+            "",
+        ]
+        for i, (name, feats) in enumerate(zip(self._elem_names, self._elem_features)):
+            lines.append(f"Element {i+1} = {name}:  ({len(feats)} feature(s))")
+            for f in feats:
+                fid = f.get("id", "?")
+                label = f.get("label", "")
+                desc = f.get("description", "")
+                x1, y1 = f.get("x1", 0), f.get("y1", 0)
+                x2, y2 = f.get("x2", 0), f.get("y2", 0)
+                lines.append(f"  #{fid} [{label}] ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})"
+                             + (f'  "{desc}"' if desc else ""))
+            lines.append("")
+        lines += [
+            "TASK: Find ALL regions where 2 or more elements have overlapping or immediately adjacent features.",
+            "For each co-location zone:",
+            "  1. Return the INTERSECTION bounding box — tightest box covering where the elements touch/overlap.",
+            "     If features are adjacent but not overlapping, use the gap-bridging box.",
+            "  2. List which element names are present.",
+            "  3. Identify the most likely material, compound, alloy, or mineral phase.",
+            "",
+            f"Use this exact JSON schema:\n{self._SCHEMA}",
+        ]
+        return "\n".join(lines)
+
+    def _query_anthropic(self, prompt: str) -> list:
+        payload = json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 8096,
+            "system": self._SYSTEM,
+            "messages": [{"role": "user", "content": prompt}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": self._key,
+                     "anthropic-version": ANTHROPIC_API_VERSION})
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read())
+        text = (data.get("content") or [{}])[0].get("text", "{}")
+        return self._parse(text)
+
+    def _query_openai(self, prompt: str) -> list:
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
+        payload = json.dumps({
+            "model": _get_openai_model() if "openai" in _api_urls else self._model,
+            "max_tokens": 8096,
+            "messages": [
+                {"role": "system", "content": self._SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read())
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        return self._parse(text)
+
+    def _query_ollama(self, prompt: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False, "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(OLLAMA_URL, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            raw = json.loads(resp.read())
+        text = raw.get("message", {}).get("content", "{}")
+        return self._parse(text)
+
+    @staticmethod
+    def _parse(text: str) -> list:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        try:
+            return json.loads(text).get("zones", [])
+        except json.JSONDecodeError:
+            return _LocateXRFColocateThread._safe_parse_zones(text)
 
 
 class _LocateTab(QWidget):
@@ -2166,13 +2318,12 @@ class _LocateTab(QWidget):
         layout.addWidget(self._single_widget)
 
         # Colored circles checkbox — plain style but with visible indicator outline
+        _cb_style = "QCheckBox { font-size: 13px; }"
+
         red_circles_row = QHBoxLayout()
+        red_circles_row.setContentsMargins(0, 0, 0, 0)
         self._red_circles_check = QCheckBox("Colored circles on white")
-        self._red_circles_check.setStyleSheet(
-            "QCheckBox { font-size: 13px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #666; border-radius: 2px; }"
-            "QCheckBox::indicator:hover { border-color: #bbb; }"
-        )
+        self._red_circles_check.setStyleSheet(_cb_style)
         self._red_circles_check.setToolTip(
             "Normalize → Gaussian blur → Otsu threshold → find blob contours → draw a filled circle\n"
             "around each blob on a white background before sending to the VLM.\n"
@@ -2183,6 +2334,29 @@ class _LocateTab(QWidget):
         red_circles_row.addWidget(self._red_circles_check)
         red_circles_row.addStretch()
         layout.addLayout(red_circles_row)
+
+        # LLM co-location checkbox (Triple + Multi only)
+        llm_coloc_row = QHBoxLayout()
+        llm_coloc_row.setContentsMargins(0, 0, 0, 0)
+        self._llm_colocate_check = QCheckBox("LLM Analyze Locations for VLM Results")
+        self._llm_colocate_check.setStyleSheet(_cb_style)
+        self._llm_colocate_check.setToolTip(
+            "Alternative co-location method: sends the full VLM features JSON directly to the LLM\n"
+            "and asks it to spatially reason about which elements overlap, returning tight intersection\n"
+            "bounding boxes and material IDs — no Python geometry involved.\n"
+            "When unchecked: uses the standard geometric box-intersection pipeline."
+        )
+        llm_coloc_row.addWidget(self._llm_colocate_check)
+        llm_coloc_row.addStretch()
+        self._llm_colocate_widget = QWidget()
+        self._llm_colocate_widget.setContentsMargins(0, 0, 0, 0)
+        self._llm_colocate_widget.setLayout(llm_coloc_row)
+        self._llm_colocate_widget.setVisible(False)
+        layout.addWidget(self._llm_colocate_widget)
+
+        # Both checked by default
+        self._red_circles_check.setChecked(True)
+        self._llm_colocate_check.setChecked(True)
 
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
@@ -2725,6 +2899,7 @@ class _LocateTab(QWidget):
     def _on_mode_changed(self, index: int):
         self._single_widget.setVisible(index == 0)
         self._preset_widget.setVisible(index == 0)
+        self._llm_colocate_widget.setVisible(index in (1, 2))
         if index == 0:
             self._left_stack.setCurrentIndex(0)
             prompt = self._active_prompt
@@ -3245,32 +3420,51 @@ class _LocateTab(QWidget):
         ]
 
     def _run_colocate(self):
-        if self._mode_combo.currentIndex() == 2:
+        mode = self._mode_combo.currentIndex()
+        use_llm = self._llm_colocate_check.isChecked()
+
+        if mode == 2:
             if not self._multi_elem_features:
                 return
             self._colocate_btn.setEnabled(False)
-            self.status_label.setText("Running multi-element co-location analysis...")
-            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
-            self._multi_colocate_thread = _LocateXRFMultiColocateThread(
-                self._multi_elem_features, self._multi_elem_names)
-            self._multi_colocate_thread.result.connect(self._on_multi_colocate_result)
+            if use_llm:
+                self.status_label.setText("LLM analyzing co-locations from VLM results...")
+                self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+                self._multi_colocate_thread = _LocateLLMColocateThread(
+                    self._multi_elem_features, self._multi_elem_names)
+                self._multi_colocate_thread.result.connect(self._on_multi_llm_colocate_result)
+            else:
+                self.status_label.setText("Running multi-element co-location analysis...")
+                self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+                self._multi_colocate_thread = _LocateXRFMultiColocateThread(
+                    self._multi_elem_features, self._multi_elem_names)
+                self._multi_colocate_thread.result.connect(self._on_multi_colocate_result)
             self._multi_colocate_thread.error.connect(self._on_error)
             self._multi_colocate_thread.progress.connect(self._on_tile_progress)
             self._multi_colocate_thread.start()
             return
+
         if not self._xrf_last_triple_json:
             return
         self._colocate_btn.setEnabled(False)
-        self.status_label.setText("Running co-location analysis...")
-        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
-        triple_data = {
-            "r_features": self._xrf_r_features,
-            "g_features": self._xrf_g_features,
-            "b_features": self._xrf_b_features,
-        }
-        labels = self._get_elem_labels()
-        self._colocate_thread = _LocateXRFColocateThread(triple_data, labels)
-        self._colocate_thread.result.connect(self._on_colocate_result)
+        if use_llm:
+            self.status_label.setText("LLM analyzing co-locations from VLM results...")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            labels = self._get_elem_labels()
+            elem_features = [self._xrf_r_features, self._xrf_g_features, self._xrf_b_features]
+            self._colocate_thread = _LocateLLMColocateThread(elem_features, labels)
+            self._colocate_thread.result.connect(self._on_llm_colocate_result)
+        else:
+            self.status_label.setText("Running co-location analysis...")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            triple_data = {
+                "r_features": self._xrf_r_features,
+                "g_features": self._xrf_g_features,
+                "b_features": self._xrf_b_features,
+            }
+            labels = self._get_elem_labels()
+            self._colocate_thread = _LocateXRFColocateThread(triple_data, labels)
+            self._colocate_thread.result.connect(self._on_colocate_result)
         self._colocate_thread.error.connect(self._on_error)
         self._colocate_thread.progress.connect(self._on_tile_progress)
         self._colocate_thread.start()
@@ -3278,6 +3472,8 @@ class _LocateTab(QWidget):
     def _on_colocate_result(self, data: dict):
         zones = data.get("overlap_zones", [])
         n = data.get("total_zones", len(zones))
+        data.setdefault("mode", "triple")
+        data.setdefault("method", "geometric")
         ref = pathlib.Path(self._xrf_paths[0])
         json_path = ref.with_name(ref.stem + "_xrf_colocate.json")
         with open(json_path, "w") as f:
@@ -3295,6 +3491,57 @@ class _LocateTab(QWidget):
         self._show_elem_overlay_btns(show_zones=True)
         self._refresh_image_views()
         self.status_label.setText(f"Co-location done — {n} zone(s). Saved: {json_path.name}")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._populate_info_colocate(zones, json_path)
+
+    def _on_llm_colocate_result(self, data: dict):
+        """Triple mode — LLM pipeline result handler."""
+        zones = data.get("overlap_zones", [])
+        n = data.get("total_zones", len(zones))
+        data["mode"] = "triple"
+        data["method"] = "llm"
+        # Strip color suffix from element names (e.g. "Fe (Red)" → "Fe")
+        import re
+        _strip = lambda s: re.sub(r'\s*\([^)]+\)\s*$', '', s).strip()
+        if isinstance(data.get("elements"), list):
+            data["elements"] = [_strip(e) for e in data["elements"]]
+        for z in zones:
+            z["elements"] = [_strip(e) for e in z.get("elements", [])]
+        ref = pathlib.Path(self._xrf_paths[0])
+        json_path = ref.with_name(ref.stem + "_xrf_llm_colocate.json")
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[XRF LLM Co-locate] {n} zone(s) identified. Saved at: {json_path}")
+        self._xrf_colocate_zones = zones
+        if self._xrf_composite_pixmap and zones:
+            self._xrf_colocate_pixmap = _draw_colocate_boxes(self._xrf_composite_pixmap, zones)
+        self._colocate_btn.setEnabled(True)
+        self._show_elem_overlay_btns(show_zones=True)
+        self._refresh_image_views()
+        self.status_label.setText(f"LLM co-location done — {n} zone(s). Saved: {json_path.name}")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._populate_info_colocate(zones, json_path)
+
+    def _on_multi_llm_colocate_result(self, data: dict):
+        """Multi mode — LLM pipeline result handler."""
+        zones = data.get("overlap_zones", [])
+        n = data.get("total_zones", len(zones))
+        data["mode"] = "multi"
+        data["method"] = "llm"
+        ref_path = pathlib.Path(self._multi_dir_path)
+        json_path = ref_path / f"{ref_path.name}_multi_llm_colocate.json"
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[Multi LLM Co-locate] {n} zone(s) identified. Saved at: {json_path}")
+        self._multi_colocate_zones = zones
+        pm = self._multi_current_composite()
+        if pm:
+            self._show_multi_composite(pm)
+        self._colocate_btn.setEnabled(True)
+        self._multi_zones_btn.setVisible(True)
+        self._multi_zones_btn.setText("◆ Zones")
+        self._reposition_overlay_btns()
+        self.status_label.setText(f"LLM co-location done — {n} zone(s). Saved: {json_path.name}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
         self._populate_info_colocate(zones, json_path)
 
@@ -3698,6 +3945,8 @@ class _LocateTab(QWidget):
     def _on_multi_colocate_result(self, data: dict):
         zones = data.get("overlap_zones", [])
         n = data.get("total_zones", len(zones))
+        data.setdefault("mode", "multi")
+        data.setdefault("method", "geometric")
         ref_path = pathlib.Path(self._multi_dir_path)
         json_path = ref_path / f"{ref_path.name}_multi_colocate.json"
         with open(json_path, "w") as f:
