@@ -247,9 +247,57 @@ def _parse_responses_text(data: dict) -> str:
 
 
 def _parse_locate_json(content: str) -> dict:
-    if content.startswith("```"):
-        content = "\n".join(content.splitlines()[1:-1])
-    return json.loads(content)
+    # Strip markdown fences
+    if "```" in content:
+        lines = content.splitlines()
+        inner = []
+        in_block = False
+        for line in lines:
+            if line.strip().startswith("```"):
+                in_block = not in_block
+                continue
+            if in_block or not content.startswith("```"):
+                inner.append(line)
+        content = "\n".join(inner).strip() if inner else content
+
+    # Extract outermost { ... }
+    start = content.find("{")
+    end = content.rfind("}")
+    if start >= 0 and end > start:
+        content = content[start:end + 1]
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Truncated response — try to salvage complete feature objects
+        features = []
+        depth = 0
+        buf = ""
+        in_features = False
+        fid = 1
+        for ch in content:
+            buf += ch
+            if ch == "{":
+                depth += 1
+                if '"features"' in buf and not in_features:
+                    in_features = True
+            elif ch == "}":
+                depth -= 1
+                if in_features and depth == 1:
+                    obj_start = buf.rfind('"id"', 0, len(buf) - 1)
+                    if obj_start < 0:
+                        obj_start = buf.rfind('"x1"', 0, len(buf) - 1)
+                    if obj_start >= 0:
+                        fragment = buf[obj_start - 1:]
+                        try:
+                            feat = json.loads("{" + fragment.lstrip("{"))
+                            if any(k in feat for k in ("x1", "id", "label")):
+                                feat.setdefault("id", fid)
+                                features.append(feat)
+                                fid += 1
+                        except Exception:
+                            pass
+        return {"features": features, "total_count": len(features)}
 
 LOCATE_SYSTEM_PROMPT = (
     "You are a scientific image analysis assistant for XRF (X-ray fluorescence) scan data. "
@@ -1281,6 +1329,19 @@ _XRF_ELEM_COLORS = [
     (QColor(60,  120, 220),(0,   0,   255)),  # Blue element
 ]
 
+_MULTI_ELEM_COLORS = [
+    (QColor(220, 60,  60),  (255, 0,   0)),    # Red
+    (QColor(60,  200, 60),  (0,   255, 0)),    # Green
+    (QColor(60,  120, 220), (0,   0,   255)),  # Blue
+    (QColor(230, 200, 50),  (255, 220, 0)),    # Yellow
+    (QColor(160, 60,  220), (180, 0,   255)),  # Purple
+    (QColor(230, 130, 40),  (255, 140, 0)),    # Orange
+    (QColor(50,  210, 210), (0,   220, 220)),  # Cyan
+    (QColor(240, 100, 180), (255, 100, 180)),  # Pink
+    (QColor(100, 220, 80),  (100, 255, 60)),   # Lime
+    (QColor(50,  170, 180), (0,   180, 200)),  # Teal
+]
+
 
 class _LocateXRFTripleThread(QThread):
     """Run 3 independent VLM calls (one per element) and combine into a single result dict."""
@@ -1353,6 +1414,127 @@ class _LocateXRFTripleThread(QThread):
 
     def _query_openai(self, img_b64: str) -> list:
         headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
+        if "openai" in _api_urls:
+            payload = json.dumps({
+                "model": _get_openai_model(),
+                "instructions": self._system_prompt,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
+                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
+                ]}],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
+        else:
+            payload = json.dumps({
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": _LOCATE_USER_PROMPT},
+                    ]},
+                ],
+            }, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.loads(resp.read())
+            return _parse_locate_json(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            ).get("features", [])
+
+    def _query_ollama(self, img_b64: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._system_prompt},
+                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
+            ],
+            "stream": False,
+            "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            OLLAMA_URL, data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            raw = json.loads(resp.read())
+        return _parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
+
+
+class _LocateXRFMultiThread(QThread):
+    """Run N independent VLM calls (one per element) and combine into a single result dict."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, paths, normalize=True, upscale=True, circles=False,
+                 system_prompt_override=None):
+        super().__init__()
+        self.paths = paths
+        self.normalize = normalize
+        self.upscale = upscale
+        self.circles = circles
+        self._system_prompt = system_prompt_override or LOCATE_SPARSE_XRF_PROMPT
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _get_key(self._provider) or ""
+
+    def run(self):
+        try:
+            N = len(self.paths)
+            elem_features = []
+            total = 0
+            for i, path in enumerate(self.paths):
+                color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+                cc = color_entry[1]
+                stem = pathlib.Path(path).stem
+                elem_name = stem.split("_")[-1]
+                self.progress.emit(f"Analyzing {elem_name} ({i+1}/{N})...")
+                print(f"[Feature Locator Multi] Sending '{pathlib.Path(path).name}' using '{_active_model}'")
+                img_b64 = _encode_image_for_vlm(
+                    path, normalize=self.normalize, upscale=self.upscale,
+                    red_circles=self.circles, circle_color=cc)
+                features = self._query(img_b64)
+                elem_features.append(features)
+                total += len(features)
+                self.progress.emit(f"{elem_name} — {len(features)} feature(s) found.")
+            self.result.emit({"elem_features": elem_features, "total_count": total})
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _query(self, img_b64: str) -> list:
+        if self._provider == "anthropic":
+            return self._query_anthropic(img_b64)
+        if self._provider == "openai":
+            return self._query_openai(img_b64)
+        return self._query_ollama(img_b64)
+
+    def _query_anthropic(self, img_b64: str) -> list:
+        key = _get_key("anthropic") or ""
+        payload = json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 4096,
+            "system": self._system_prompt,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                              "media_type": "image/png", "data": img_b64}},
+                {"type": "text", "text": _LOCATE_USER_PROMPT},
+            ]}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key,
+                     "anthropic-version": ANTHROPIC_API_VERSION})
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
+
+    def _query_openai(self, img_b64: str) -> list:
+        key = _get_key("openai") or ""
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
         if "openai" in _api_urls:
             payload = json.dumps({
                 "model": _get_openai_model(),
@@ -1617,6 +1799,168 @@ class _LocateXRFColocateThread(QThread):
         return self._safe_parse_zones(text)
 
 
+class _LocateXRFMultiColocateThread(QThread):
+    """Generalized N-element co-location analysis."""
+    result = Signal(dict)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, elem_features: list, elem_names: list):
+        super().__init__()
+        self._elem_features = elem_features
+        self._elem_names = elem_names
+        self._provider = _get_provider(_active_model)
+        self._model = _active_model
+        self._key = _get_key(self._provider) or ""
+
+    def run(self):
+        try:
+            self.progress.emit("Computing multi-element co-location zones...")
+            zones = self._compute_zones(self._elem_features, self._elem_names)
+            if not zones:
+                self.result.emit({"overlap_zones": [], "total_zones": 0,
+                                  "elements": self._elem_names})
+                return
+            self.progress.emit(f"{len(zones)} zone(s) found — querying {_active_model}...")
+            print(f"[Multi Co-locate] {len(zones)} zone(s). Sending to '{_active_model}' for material analysis...")
+            suggestions = self._query_llm(zones, self._elem_names)
+            for zone, sug in zip(zones, suggestions):
+                zone["llm_suggestion"] = sug.get("suggestion", "")
+                zone["reasoning"] = sug.get("reasoning", "")
+            self.result.emit({
+                "elements": self._elem_names,
+                "model": _active_model,
+                "overlap_zones": zones,
+                "total_zones": len(zones),
+            })
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @staticmethod
+    def _compute_zones(elem_features_list, names, max_overlap=6):
+        """Pairwise-seed approach: O(N^2 * F^2) instead of O(F^N).
+
+        For every pair of features from different elements that overlap, seed a
+        zone and greedily try to extend it with features from remaining elements.
+        Each unique (element-set, intersection-box) is recorded once.
+        """
+        N = len(elem_features_list)
+        zones = []
+        zone_id = 1
+        seen = set()  # frozenset(elem_indices) → list of boxes, for dedup
+
+        for i in range(N):
+            for j in range(i + 1, N):
+                for fi in elem_features_list[i]:
+                    for fj in elem_features_list[j]:
+                        box = _box_intersect(fi, fj)
+                        if box is None:
+                            continue
+                        # Greedily extend to more elements
+                        active_indices = [i, j]
+                        active_box = box
+                        for k in range(N):
+                            if k in active_indices:
+                                continue
+                            if len(active_indices) >= max_overlap:
+                                break
+                            for fk in elem_features_list[k]:
+                                ext = _box_intersect(active_box, fk)
+                                if ext is not None:
+                                    active_indices.append(k)
+                                    active_box = ext
+                                    break
+                        key = (frozenset(active_indices),
+                               round(active_box["x1"], 3), round(active_box["y1"], 3),
+                               round(active_box["x2"], 3), round(active_box["y2"], 3))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        sorted_idx = sorted(active_indices)
+                        zones.append({
+                            "id": zone_id,
+                            "element_codes": [names[idx] for idx in sorted_idx],
+                            "elements": [names[idx] for idx in sorted_idx],
+                            "x1": round(active_box["x1"], 4),
+                            "y1": round(active_box["y1"], 4),
+                            "x2": round(active_box["x2"], 4),
+                            "y2": round(active_box["y2"], 4),
+                            "llm_suggestion": "", "reasoning": "",
+                        })
+                        zone_id += 1
+        return zones
+
+    def _query_llm(self, zones, names):
+        zone_lines = []
+        for z in zones:
+            elem_str = " + ".join(z["elements"])
+            zone_lines.append(
+                f"  Zone {z['id']}: {elem_str} co-located at "
+                f"({z['x1']:.3f},{z['y1']:.3f})→({z['x2']:.3f},{z['y2']:.3f})"
+            )
+        elem_list = ", ".join(f"Element {i+1} = {n}" for i, n in enumerate(names))
+        prompt = (
+            "You are an XRF (X-ray fluorescence) materials scientist. "
+            f"The scan has {len(names)} elements: {elem_list}.\n\n"
+            "The following co-location zones were detected where multiple element signals overlap:\n"
+            + "\n".join(zone_lines) + "\n\n"
+            "For each zone, identify the most likely material, compound, alloy, or phase that "
+            "explains why these elements co-exist in the same region. Be concise but specific.\n\n"
+            "Respond ONLY with valid JSON:\n"
+            '{"zones": [{"id": 1, "suggestion": "stainless steel", '
+            '"reasoning": "Fe+Cr+Ni is a classic stainless steel signature"}]}'
+        )
+        if self._provider == "anthropic":
+            return self._query_anthropic(prompt)
+        if self._provider == "openai":
+            return self._query_openai(prompt)
+        return self._query_ollama(prompt)
+
+    def _query_anthropic(self, prompt: str) -> list:
+        key = _get_key("anthropic") or ""
+        payload = json.dumps({
+            "model": _get_anthropic_model(),
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            _get_anthropic_url(), data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key,
+                     "anthropic-version": ANTHROPIC_API_VERSION})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        text = (data.get("content") or [{}])[0].get("text", "{}")
+        return _LocateXRFColocateThread._safe_parse_zones(text)
+
+    def _query_openai(self, prompt: str) -> list:
+        key = _get_key("openai") or ""
+        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
+        payload = json.dumps({
+            "model": _get_openai_model() if "openai" in _api_urls else self._model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        return _LocateXRFColocateThread._safe_parse_zones(text)
+
+    def _query_ollama(self, prompt: str) -> list:
+        payload = json.dumps({
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False, "format": "json",
+        }, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(OLLAMA_URL, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = json.loads(resp.read())
+        text = raw.get("message", {}).get("content", "{}")
+        return _LocateXRFColocateThread._safe_parse_zones(text)
+
+
 class _LocateTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1643,6 +1987,25 @@ class _LocateTab(QWidget):
         self._model_ok = True
         self._xrf_paths = [None, None, None]
         self._xrf_elem_names = ["Element 1", "Element 2", "Element 3"]
+        self._multi_dir_path = None
+        self._multi_tiff_paths = []
+        self._multi_selected_paths = []
+        self._multi_elem_features = []
+        self._multi_elem_names = []
+        self._multi_colocate_zones = []
+        self._multi_composite_pixmap = None
+        self._multi_show_flags = []
+        self._multi_show_zones = True
+        self._multi_mini_labels = []
+        self._multi_checkboxes = []
+        self._multi_colocate_thread = None
+        self._multi_zoom = 1.0
+        self._multi_base_w = 0
+        self._multi_base_h = 0
+        self._multi_circles_composite_pixmap = None
+        self._multi_view_circles = False
+        self._xrf_circles_composite_pixmap = None
+        self._xrf_view_circles = False
         self._init_ui()
         self._check_model()
 
@@ -1674,13 +2037,13 @@ class _LocateTab(QWidget):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["Single Image", "XRF ROI (3 Elements)"])
+        self._mode_combo.addItems(["Single Element", "Triple Element (3 TIFFs)", "Multi Element"])
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self._mode_combo)
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
-        # Prompt preset selector (Single Image mode only)
+        # Prompt preset selector (Single Element mode only)
         self._preset_row = QHBoxLayout()
         self._preset_row.addWidget(QLabel("Prompt:"))
         self._preset_combo = QComboBox()
@@ -1712,7 +2075,7 @@ class _LocateTab(QWidget):
         )
         self._hover_tooltip.hide()
 
-        # --- Single Image mode controls ---
+        # --- Single Element mode controls ---
         self._single_widget = QWidget()
         single_layout = QVBoxLayout(self._single_widget)
         single_layout.setContentsMargins(0, 0, 0, 0)
@@ -1802,16 +2165,18 @@ class _LocateTab(QWidget):
 
         layout.addWidget(self._single_widget)
 
-        # Red circles — always visible (applies to both single and XRF modes)
+        # Colored circles checkbox — plain style but with visible indicator outline
         red_circles_row = QHBoxLayout()
-        self._red_circles_check = QCheckBox(
-            "Colored circles on white  "
-            "(Otsu threshold → contours → filled circles; red/green/blue per element in XRF mode)"
+        self._red_circles_check = QCheckBox("Colored circles on white")
+        self._red_circles_check.setStyleSheet(
+            "QCheckBox { font-size: 13px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #666; border-radius: 2px; }"
+            "QCheckBox::indicator:hover { border-color: #bbb; }"
         )
         self._red_circles_check.setToolTip(
             "Normalize → Gaussian blur → Otsu threshold → find blob contours → draw a filled circle\n"
             "around each blob on a white background before sending to the VLM.\n"
-            "In Single mode: red circles.  In XRF mode: element 1=red, 2=green, 3=blue.\n"
+            "In Single mode: red circles.  In XRF/Multi mode: each element gets its assigned color.\n"
             "Preview updates live. Overrides inferno colormap when enabled."
         )
         self._red_circles_check.toggled.connect(self._on_image_options_changed)
@@ -1940,6 +2305,13 @@ class _LocateTab(QWidget):
         self._xrf_overlay_btn.clicked.connect(self._toggle_overlay_boxes)
         self._xrf_overlay_btn.raise_()
 
+        self._xrf_switch_view_btn = QPushButton("⬤ Circles", self._xrf_composite_scroll)
+        self._xrf_switch_view_btn.setFixedSize(80, 22)
+        self._xrf_switch_view_btn.setStyleSheet(_ovr_style.format(fg="#fbbf24"))
+        self._xrf_switch_view_btn.clicked.connect(self._toggle_xrf_view)
+        self._xrf_switch_view_btn.setVisible(False)
+        self._xrf_switch_view_btn.raise_()
+
         # Individual element toggle buttons (hidden until analysis done)
         self._xrf_elem_overlay_btns = []
         _elem_colors_fg = ["#f87171", "#4ade80", "#60a5fa", "#d1d5db"]
@@ -1967,11 +2339,129 @@ class _LocateTab(QWidget):
         self._xrf_inner_splitter.setSizes([200, 520])
         self._xrf_inner_splitter.splitterMoved.connect(self._on_splitter_moved)
 
-        # Left stack: index 0 = single scroll_area, index 1 = xrf inner splitter
+        # ── Multi Element mode: left panel ───────────────────────────────────────
+        _multi_left = QWidget()
+        _multi_left.setMinimumWidth(160)
+        _multi_left.setMaximumWidth(280)
+        _multi_left_layout = QVBoxLayout(_multi_left)
+        _multi_left_layout.setContentsMargins(0, 0, 4, 0)
+        _multi_left_layout.setSpacing(4)
+
+        _multi_dir_row = QHBoxLayout()
+        self._multi_browse_btn = QPushButton("Browse Directory...")
+        self._multi_browse_btn.clicked.connect(self._pick_multi_dir)
+        _multi_dir_row.addWidget(self._multi_browse_btn)
+        _multi_left_layout.addLayout(_multi_dir_row)
+        self._multi_dir_label = QLabel("No directory selected")
+        self._multi_dir_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._multi_dir_label.setWordWrap(True)
+        _multi_left_layout.addWidget(self._multi_dir_label)
+
+        _multi_left_layout.addWidget(QLabel("TIFFs found:"))
+        self._multi_cb_scroll = QScrollArea()
+        self._multi_cb_scroll.setWidgetResizable(True)
+        self._multi_cb_scroll.setMinimumHeight(80)
+        self._multi_cb_container = QWidget()
+        self._multi_cb_layout = QVBoxLayout(self._multi_cb_container)
+        self._multi_cb_layout.setContentsMargins(4, 4, 4, 4)
+        self._multi_cb_layout.setSpacing(2)
+        self._multi_cb_layout.addStretch()
+        self._multi_cb_scroll.setWidget(self._multi_cb_container)
+        _multi_left_layout.addWidget(self._multi_cb_scroll, 1)
+
+        self._multi_confirm_btn = QPushButton("Confirm Selection")
+        self._multi_confirm_btn.setEnabled(False)
+        self._multi_confirm_btn.clicked.connect(self._on_multi_confirm_selection)
+        _multi_left_layout.addWidget(self._multi_confirm_btn)
+
+        # Load from saved JSON (skip VLM re-run)
+        _sep = QLabel("── Load previous results ──")
+        _sep.setStyleSheet("color: #666; font-size: 10px;")
+        _sep.setAlignment(Qt.AlignCenter)
+        _multi_left_layout.addWidget(_sep)
+
+        self._multi_load_features_btn = QPushButton("Load Features JSON...")
+        self._multi_load_features_btn.setToolTip("Load a saved _multi_features.json to restore boxes without re-running the VLM")
+        self._multi_load_features_btn.clicked.connect(self._load_multi_features_json)
+        _multi_left_layout.addWidget(self._multi_load_features_btn)
+
+        self._multi_load_colocate_btn = QPushButton("Load Co-location JSON...")
+        self._multi_load_colocate_btn.setToolTip("Load a saved _multi_colocate.json to restore co-location zones")
+        self._multi_load_colocate_btn.clicked.connect(self._load_multi_colocate_json)
+        _multi_left_layout.addWidget(self._multi_load_colocate_btn)
+
+        _multi_left_layout.addWidget(QLabel("Previews:"))
+        self._multi_preview_scroll = QScrollArea()
+        self._multi_preview_scroll.setWidgetResizable(True)
+        self._multi_preview_scroll.setMinimumHeight(100)
+        _multi_preview_inner = QWidget()
+        self._multi_preview_layout = QVBoxLayout(_multi_preview_inner)
+        self._multi_preview_layout.setContentsMargins(2, 2, 2, 2)
+        self._multi_preview_layout.setSpacing(4)
+        self._multi_preview_layout.addStretch()
+        self._multi_preview_scroll.setWidget(_multi_preview_inner)
+        _multi_left_layout.addWidget(self._multi_preview_scroll, 2)
+
+        # Separate composite scroll for multi mode
+        self._multi_composite_scroll = QScrollArea()
+        self._multi_composite_scroll.setWidgetResizable(False)
+        self._multi_composite_scroll.setAlignment(Qt.AlignCenter)
+        self._multi_composite_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._multi_composite_scroll.viewport().setMouseTracking(True)
+        self._multi_composite_display = _ImageDisplay()
+        self._multi_composite_display.setAlignment(Qt.AlignCenter)
+        self._multi_composite_display.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._multi_composite_display.mouse_moved.connect(self._on_multi_mouse_moved)
+        self._multi_composite_display.mouse_left.connect(self._on_mouse_left)
+        self._multi_composite_display.zoom_scrolled.connect(self._on_multi_zoom)
+        self._multi_composite_scroll.setWidget(self._multi_composite_display)
+
+        # Floating overlay buttons on multi composite
+        _ovr_style_m = (
+            "QPushButton {{ background: rgba(30,30,30,200); color: {fg}; border: 1px solid #555;"
+            " border-radius: 4px; font-size: 10px; padding: 1px 5px; }}"
+            "QPushButton:hover {{ background: rgba(70,70,70,220); }}"
+        )
+        self._multi_overlay_btn = QPushButton("Hide All", self._multi_composite_scroll)
+        self._multi_overlay_btn.setFixedSize(72, 24)
+        self._multi_overlay_btn.setStyleSheet(_ovr_style_m.format(fg="#eee"))
+        self._multi_overlay_btn.clicked.connect(self._toggle_multi_all_boxes)
+        self._multi_overlay_btn.raise_()
+
+        self._multi_zones_btn = QPushButton("◆ Zones", self._multi_composite_scroll)
+        self._multi_zones_btn.setFixedSize(72, 22)
+        self._multi_zones_btn.setStyleSheet(_ovr_style_m.format(fg="#d1d5db"))
+        self._multi_zones_btn.clicked.connect(self._toggle_multi_zones)
+        self._multi_zones_btn.setVisible(False)
+        self._multi_zones_btn.raise_()
+
+        self._multi_boxes_btn = QPushButton("● Boxes", self._multi_composite_scroll)
+        self._multi_boxes_btn.setFixedSize(72, 22)
+        self._multi_boxes_btn.setStyleSheet(_ovr_style_m.format(fg="#a78bfa"))
+        self._multi_boxes_btn.clicked.connect(self._toggle_multi_elem_boxes)
+        self._multi_boxes_btn.setVisible(False)
+        self._multi_boxes_btn.raise_()
+
+        self._multi_switch_view_btn = QPushButton("⬤ Circles", self._multi_composite_scroll)
+        self._multi_switch_view_btn.setFixedSize(80, 22)
+        self._multi_switch_view_btn.setStyleSheet(_ovr_style_m.format(fg="#fbbf24"))
+        self._multi_switch_view_btn.clicked.connect(self._toggle_multi_view)
+        self._multi_switch_view_btn.setVisible(False)
+        self._multi_switch_view_btn.raise_()
+
+        self._multi_inner_splitter = QSplitter(Qt.Horizontal)
+        self._multi_inner_splitter.setChildrenCollapsible(False)
+        self._multi_inner_splitter.addWidget(_multi_left)
+        self._multi_inner_splitter.addWidget(self._multi_composite_scroll)
+        self._multi_inner_splitter.setSizes([220, 500])
+        self._multi_inner_splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        # Left stack: index 0 = single scroll_area, index 1 = xrf inner splitter, index 2 = multi
         from qtpy.QtWidgets import QStackedWidget
         self._left_stack = QStackedWidget()
-        self._left_stack.addWidget(self.scroll_area)          # index 0
-        self._left_stack.addWidget(self._xrf_inner_splitter)  # index 1
+        self._left_stack.addWidget(self.scroll_area)           # index 0
+        self._left_stack.addWidget(self._xrf_inner_splitter)   # index 1
+        self._left_stack.addWidget(self._multi_inner_splitter) # index 2
 
         # ── Right info panel (always visible) ────────────────────────────────
         right_panel = QWidget()
@@ -2040,9 +2530,21 @@ class _LocateTab(QWidget):
         master = self._xrf_overlay_btn
         master.move(sa.width() - master.width() - margin, margin)
         master.raise_()
-        # Individual element buttons stacked below master
         y = margin + master.height() + gap
         for btn in self._xrf_elem_overlay_btns:
+            if btn.isVisible():
+                btn.move(sa.width() - btn.width() - margin, y)
+                y += btn.height() + gap
+                btn.raise_()
+        if self._xrf_switch_view_btn.isVisible():
+            self._xrf_switch_view_btn.move(sa.width() - self._xrf_switch_view_btn.width() - margin, y)
+            self._xrf_switch_view_btn.raise_()
+        # Multi composite buttons
+        sa = self._multi_composite_scroll
+        self._multi_overlay_btn.move(sa.width() - self._multi_overlay_btn.width() - margin, margin)
+        self._multi_overlay_btn.raise_()
+        y = margin + self._multi_overlay_btn.height() + gap
+        for btn in [self._multi_boxes_btn, self._multi_zones_btn, self._multi_switch_view_btn]:
             if btn.isVisible():
                 btn.move(sa.width() - btn.width() - margin, y)
                 y += btn.height() + gap
@@ -2077,6 +2579,41 @@ class _LocateTab(QWidget):
             prefix = "●" if i < 3 else "◆"
             btn.setText(f"{prefix} {name}" if flag else f"○ {name}")
 
+    def _toggle_multi_all_boxes(self):
+        all_on = any(self._multi_show_flags) or self._multi_show_zones
+        new_state = not all_on
+        self._multi_show_flags = [new_state] * len(self._multi_show_flags)
+        self._multi_show_zones = new_state
+        self._multi_overlay_btn.setText("Hide All" if new_state else "Show All")
+        self._multi_boxes_btn.setText("● Boxes" if new_state else "○ Boxes")
+        self._multi_zones_btn.setText("◆ Zones" if new_state else "◇ Zones")
+        self._refresh_image_views()
+
+    def _toggle_multi_elem_boxes(self):
+        any_on = any(self._multi_show_flags)
+        self._multi_show_flags = [not any_on] * len(self._multi_show_flags)
+        self._multi_boxes_btn.setText("● Boxes" if not any_on else "○ Boxes")
+        self._refresh_image_views()
+
+    def _toggle_multi_zones(self):
+        self._multi_show_zones = not self._multi_show_zones
+        self._multi_zones_btn.setText("◆ Zones" if self._multi_show_zones else "◇ Zones")
+        self._refresh_image_views()
+
+    def _toggle_xrf_view(self):
+        self._xrf_view_circles = not self._xrf_view_circles
+        self._xrf_switch_view_btn.setText("⬤ Circles" if self._xrf_view_circles else "⬤ Normal")
+        pm = self._xrf_current_composite()
+        if pm:
+            self._show_xrf_composite(pm)
+
+    def _toggle_multi_view(self):
+        self._multi_view_circles = not self._multi_view_circles
+        self._multi_switch_view_btn.setText("⬤ Circles" if self._multi_view_circles else "⬤ Normal")
+        pm = self._multi_current_composite()
+        if pm:
+            self._show_multi_composite(pm)
+
     def _show_elem_overlay_btns(self, show_zones: bool = False):
         """Show/update the individual element overlay buttons after analysis."""
         for i, btn in enumerate(self._xrf_elem_overlay_btns):
@@ -2088,11 +2625,15 @@ class _LocateTab(QWidget):
         self._reposition_overlay_btns()
 
     def _refresh_image_views(self):
-        is_xrf = self._mode_combo.currentIndex() == 1
-        if is_xrf:
+        mode = self._mode_combo.currentIndex()
+        if mode == 1:
             pm = self._xrf_current_composite()
             if pm:
                 self._show_xrf_composite(pm)
+        elif mode == 2:
+            pm = self._multi_current_composite()
+            if pm:
+                self._show_multi_composite(pm)
         else:
             pm = self._current_pixmap()
             if pm:
@@ -2100,7 +2641,8 @@ class _LocateTab(QWidget):
 
     def _xrf_current_composite(self):
         """Dynamically build the composite with only the currently-visible box layers."""
-        base = self._xrf_composite_pixmap
+        base = (self._xrf_circles_composite_pixmap if self._xrf_view_circles
+                else self._xrf_composite_pixmap)
         if not base:
             return None
         groups = []
@@ -2181,14 +2723,22 @@ class _LocateTab(QWidget):
         dlg.exec_()
 
     def _on_mode_changed(self, index: int):
-        is_xrf = index == 1
-        self._single_widget.setVisible(not is_xrf)
-        self._preset_widget.setVisible(not is_xrf)
-        self._left_stack.setCurrentIndex(1 if is_xrf else 0)
-        prompt = LOCATE_SPARSE_XRF_PROMPT if is_xrf else self._active_prompt
+        self._single_widget.setVisible(index == 0)
+        self._preset_widget.setVisible(index == 0)
+        if index == 0:
+            self._left_stack.setCurrentIndex(0)
+            prompt = self._active_prompt
+            self.locate_btn.setText("Get Location of Features")
+        elif index == 1:
+            self._left_stack.setCurrentIndex(1)
+            prompt = LOCATE_SPARSE_XRF_PROMPT
+            self.locate_btn.setText("Analyze 3 Elements")
+        else:
+            self._left_stack.setCurrentIndex(2)
+            prompt = LOCATE_SPARSE_XRF_PROMPT
+            self.locate_btn.setText("Analyze All Elements")
         self._header_prompt_lbl.setText(f"Prompt: {prompt[:120].rstrip()}…")
         self._header_prompt_lbl.setToolTip(prompt)
-        self.locate_btn.setText("Analyze 3 Elements" if is_xrf else "Get Location of Features")
         self._reset_image_state()
         self.locate_btn.setEnabled(False)
 
@@ -2216,6 +2766,19 @@ class _LocateTab(QWidget):
         self._xrf_show_zones = True
         for btn in self._xrf_elem_overlay_btns:
             btn.setVisible(False)
+        self._multi_elem_features = []
+        self._multi_colocate_zones = []
+        self._multi_composite_pixmap = None
+        self._multi_show_flags = []
+        self._multi_show_zones = True
+        self._multi_zoom = 1.0
+        self._multi_boxes_btn.setVisible(False)
+        self._multi_zones_btn.setVisible(False)
+        self._multi_switch_view_btn.setVisible(False)
+        self._multi_view_circles = False
+        self._xrf_circles_composite_pixmap = None
+        self._xrf_view_circles = False
+        self._xrf_switch_view_btn.setVisible(False)
         self.info_panel.setVisible(False)
 
     def _pick_xrf_image(self, idx: int):
@@ -2257,77 +2820,68 @@ class _LocateTab(QWidget):
             pass
 
     def _build_xrf_composite_display(self):
-        """Build and show the composite image for the 3 XRF elements.
-
-        Circles mode on : overlay all 3 colored circle images (red + green + blue on white).
-        Circles mode off: stack grayscale channels as R/G/B false-color composite.
-        """
+        """Build normal + circles composites for the 3 XRF elements; show whichever is active."""
         try:
             normalize = self._normalize_check.isChecked()
             upscale = self._upscale_check.isChecked()
-            circles = self._red_circles_check.isChecked()
             circle_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
 
-            if circles:
-                # Each element becomes colored circles; overlay all on white canvas
-                circle_arrays = []
-                for p, cc in zip(self._xrf_paths, circle_colors):
-                    arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
-                    if arr is None:
-                        raise ValueError(f"Could not read {p}")
-                    arr = arr.astype(np.float32)
-                    if normalize:
-                        mn, mx = arr.min(), arr.max()
-                        if mx > mn:
-                            arr = (arr - mn) / (mx - mn)
-                    if upscale:
-                        h_, w_ = arr.shape
-                        if min(h_, w_) < 1092:
-                            scale = 1092 / min(h_, w_)
-                            arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
-                                             interpolation=cv2.INTER_CUBIC)
-                    circle_arrays.append(_apply_red_circles_transform(
-                        (arr * 255).astype(np.uint8), circle_color=cc))
-                # Merge: start white, paint circles from each element (non-white pixels win)
-                h = max(a.shape[0] for a in circle_arrays)
-                w = max(a.shape[1] for a in circle_arrays)
-                composite = np.full((h, w, 3), 255, dtype=np.uint8)
-                for ca in circle_arrays:
-                    mask = np.any(ca < 255, axis=-1)  # pixels that are not white
-                    ph, pw = ca.shape[:2]
-                    composite[:ph, :pw][mask] = ca[mask]
-            else:
-                # False-color: R=elem1 gray, G=elem2 gray, B=elem3 gray
-                channels = []
-                for p in self._xrf_paths:
-                    arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
-                    if arr is None:
-                        raise ValueError(f"Could not read {p}")
-                    arr = arr.astype(np.float32)
-                    if normalize:
-                        mn, mx = arr.min(), arr.max()
-                        if mx > mn:
-                            arr = (arr - mn) / (mx - mn)
-                    if upscale:
-                        h_, w_ = arr.shape
-                        if min(h_, w_) < 1092:
-                            scale = 1092 / min(h_, w_)
-                            arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
-                                             interpolation=cv2.INTER_CUBIC)
-                    channels.append((arr * 255).astype(np.uint8))
-                h = max(c.shape[0] for c in channels)
-                w = max(c.shape[1] for c in channels)
-                padded = []
-                for c in channels:
-                    p = np.zeros((h, w), dtype=np.uint8)
-                    p[:c.shape[0], :c.shape[1]] = c
-                    padded.append(p)
-                composite = np.stack(padded, axis=-1)
+            def _load_gray(p):
+                arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                if arr is None:
+                    raise ValueError(f"Could not read {p}")
+                arr = arr.astype(np.float32)
+                if normalize:
+                    mn, mx = arr.min(), arr.max()
+                    if mx > mn:
+                        arr = (arr - mn) / (mx - mn)
+                if upscale:
+                    h_, w_ = arr.shape
+                    if min(h_, w_) < 1092:
+                        scale = 1092 / min(h_, w_)
+                        arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
+                                         interpolation=cv2.INTER_CUBIC)
+                return (arr * 255).astype(np.uint8)
 
-            qimg = QImage(composite.data, w, h, w * 3, QImage.Format_RGB888).copy()
+            # Always build normal false-color composite
+            channels = [_load_gray(p) for p in self._xrf_paths]
+            h = max(c.shape[0] for c in channels)
+            w = max(c.shape[1] for c in channels)
+            padded = []
+            for c in channels:
+                pad = np.zeros((h, w), dtype=np.uint8)
+                pad[:c.shape[0], :c.shape[1]] = c
+                padded.append(pad)
+            normal_comp = np.stack(padded, axis=-1)
+            qimg = QImage(normal_comp.data, w, h, w * 3, QImage.Format_RGB888).copy()
             self._xrf_composite_pixmap = QPixmap.fromImage(qimg)
+
+            # Also build circles composite
+            circle_arrays = [
+                _apply_red_circles_transform(channels[i], circle_color=circle_colors[i])
+                for i in range(3)
+            ]
+            hc = max(a.shape[0] for a in circle_arrays)
+            wc = max(a.shape[1] for a in circle_arrays)
+            circles_comp = np.full((hc, wc, 3), 255, dtype=np.uint8)
+            for ca in circle_arrays:
+                mask = np.any(ca < 255, axis=-1)
+                ph, pw = ca.shape[:2]
+                circles_comp[:ph, :pw][mask] = ca[mask]
+            qimg2 = QImage(circles_comp.data, wc, hc, wc * 3, QImage.Format_RGB888).copy()
+            self._xrf_circles_composite_pixmap = QPixmap.fromImage(qimg2)
+
             self._xrf_annotated_pixmap = None
-            self._show_xrf_composite(self._xrf_composite_pixmap)
+            # Show whichever view is active
+            pm = self._xrf_current_composite()
+            if pm:
+                self._show_xrf_composite(pm)
+            # Show switch view button since circles composite is available
+            self._xrf_switch_view_btn.setVisible(True)
+            self._xrf_switch_view_btn.setText(
+                "⬤ Circles" if self._xrf_view_circles else "⬤ Normal"
+            )
+            self._reposition_overlay_btns()
             self.info_panel.setVisible(True)
         except Exception as e:
             self.status_label.setText(f"Could not build composite: {e}")
@@ -2500,7 +3054,24 @@ class _LocateTab(QWidget):
     def _run_locate(self):
         if self._locate_thread and self._locate_thread.isRunning():
             return
-        is_xrf = self._mode_combo.currentIndex() == 1
+        mode = self._mode_combo.currentIndex()
+        if mode == 2:
+            if not self._multi_selected_paths:
+                return
+            self.locate_btn.setEnabled(False)
+            normalize = self._normalize_check.isChecked()
+            upscale = self._upscale_check.isChecked()
+            circles = self._red_circles_check.isChecked()
+            self.status_label.setText(f"Analyzing {len(self._multi_selected_paths)} elements... (may take several minutes)")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            self._locate_thread = _LocateXRFMultiThread(
+                self._multi_selected_paths, normalize=normalize, upscale=upscale, circles=circles)
+            self._locate_thread.progress.connect(self._on_tile_progress)
+            self._locate_thread.result.connect(self._on_multi_result)
+            self._locate_thread.error.connect(self._on_error)
+            self._locate_thread.start()
+            return
+        is_xrf = mode == 1
         if is_xrf:
             if not all(self._xrf_paths):
                 return
@@ -2674,6 +3245,19 @@ class _LocateTab(QWidget):
         ]
 
     def _run_colocate(self):
+        if self._mode_combo.currentIndex() == 2:
+            if not self._multi_elem_features:
+                return
+            self._colocate_btn.setEnabled(False)
+            self.status_label.setText("Running multi-element co-location analysis...")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+            self._multi_colocate_thread = _LocateXRFMultiColocateThread(
+                self._multi_elem_features, self._multi_elem_names)
+            self._multi_colocate_thread.result.connect(self._on_multi_colocate_result)
+            self._multi_colocate_thread.error.connect(self._on_error)
+            self._multi_colocate_thread.progress.connect(self._on_tile_progress)
+            self._multi_colocate_thread.start()
+            return
         if not self._xrf_last_triple_json:
             return
         self._colocate_btn.setEnabled(False)
@@ -2730,6 +3314,407 @@ class _LocateTab(QWidget):
         self.info_panel.append(sep + "\n".join(lines).strip())
         self.info_panel.setVisible(True)
 
+    # ── Multi Element methods ─────────────────────────────────────────────────
+
+    def _pick_multi_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select Directory of Element TIFFs", "")
+        if not d:
+            return
+        self._multi_dir_path = d
+        self._multi_dir_label.setText(d)
+        import glob as _glob
+        tiffs = sorted(
+            _glob.glob(os.path.join(d, "*.tif")) + _glob.glob(os.path.join(d, "*.tiff"))
+        )
+        self._multi_tiff_paths = tiffs
+        for cb in self._multi_checkboxes:
+            cb.setParent(None)
+        self._multi_checkboxes.clear()
+        while self._multi_cb_layout.count():
+            item = self._multi_cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for path in tiffs:
+            cb = QCheckBox(os.path.basename(path))
+            cb.setChecked(True)
+            cb.setToolTip(path)
+            self._multi_cb_layout.addWidget(cb)
+            self._multi_checkboxes.append(cb)
+        self._multi_cb_layout.addStretch()
+        self._multi_confirm_btn.setEnabled(bool(tiffs))
+        if not tiffs:
+            self._multi_dir_label.setText(f"{d}  (no TIFFs found)")
+
+    def _on_multi_confirm_selection(self):
+        self._multi_selected_paths = [
+            self._multi_tiff_paths[i]
+            for i, cb in enumerate(self._multi_checkboxes)
+            if cb.isChecked()
+        ]
+        if not self._multi_selected_paths:
+            self.status_label.setText("No TIFFs selected.")
+            return
+        N = len(self._multi_selected_paths)
+        self._multi_elem_names = [
+            pathlib.Path(p).stem.split("_")[-1]
+            for p in self._multi_selected_paths
+        ]
+        while self._multi_preview_layout.count():
+            item = self._multi_preview_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._multi_mini_labels.clear()
+        normalize = self._normalize_check.isChecked()
+        upscale = self._upscale_check.isChecked()
+        circles = self._red_circles_check.isChecked()
+        for i, path in enumerate(self._multi_selected_paths):
+            color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+            cc = color_entry[1]
+            elem_name = self._multi_elem_names[i]
+            group = QGroupBox(elem_name)
+            group.setStyleSheet(
+                "QGroupBox { font-weight: bold; border: 1px solid #444; "
+                "border-radius: 4px; margin-top: 6px; padding-top: 2px; }"
+            )
+            g_layout = QVBoxLayout(group)
+            g_layout.setContentsMargins(2, 2, 2, 2)
+            mini = QLabel()
+            mini.setAlignment(Qt.AlignCenter)
+            mini.setMinimumHeight(160)
+            mini.setStyleSheet("background: #111; border: 1px solid #333;")
+            try:
+                pm, _, _ = _load_image_pixmap(path, normalize=normalize, upscale=upscale,
+                                               red_circles=circles, circle_color=cc)
+                scaled = pm.scaled(200, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                mini.setPixmap(scaled)
+            except Exception:
+                pass
+            g_layout.addWidget(mini)
+            self._multi_preview_layout.addWidget(group)
+            self._multi_mini_labels.append(mini)
+        self._multi_preview_layout.addStretch()
+        self._build_multi_composite_display()
+        self._multi_show_flags = [True] * N
+        self._multi_show_zones = True
+        if self._model_ok:
+            self.locate_btn.setEnabled(True)
+        self.status_label.setText(f"{N} element(s) selected. Ready to analyze.")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+
+    def _load_multi_features_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Multi Features JSON", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            elem_names = data.get("elements", [])
+            elem_features = data.get("elem_features", [])
+            if not elem_names or not elem_features:
+                self.status_label.setText("Invalid features JSON — missing elements or elem_features.")
+                self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
+                return
+            json_dir = pathlib.Path(path).parent
+            # Match TIFFs by element name suffix
+            tiff_paths = []
+            for name in elem_names:
+                matches = sorted(json_dir.glob(f"*_{name}.tif")) + sorted(json_dir.glob(f"*_{name}.tiff"))
+                tiff_paths.append(str(matches[0]) if matches else None)
+            self._multi_dir_path = str(json_dir)
+            self._multi_dir_label.setText(str(json_dir))
+            self._multi_selected_paths = [p for p in tiff_paths if p]
+            self._multi_elem_names = elem_names
+            self._multi_elem_features = elem_features
+            N = len(elem_names)
+            self._multi_show_flags = [True] * N
+            self._multi_show_zones = True
+            if self._multi_selected_paths:
+                self._build_multi_composite_display()
+            pm = self._multi_current_composite()
+            if pm:
+                self._show_multi_composite(pm)
+            self._colocate_btn.setVisible(True)
+            self._colocate_btn.setEnabled(True)
+            self._multi_boxes_btn.setVisible(True)
+            self._multi_boxes_btn.setText("● Boxes")
+            self._reposition_overlay_btns()
+            n = data.get("total_count", sum(len(f) for f in elem_features))
+            self.status_label.setText(f"Loaded {N} elements, {n} features from {pathlib.Path(path).name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+            self._populate_info_multi(elem_features, elem_names, pathlib.Path(path))
+            self.locate_btn.setEnabled(True)
+            self.info_panel.setVisible(True)
+        except Exception as e:
+            self.status_label.setText(f"Failed to load features JSON: {e}")
+            self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
+
+    def _load_multi_colocate_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Co-location JSON", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            zones = data.get("overlap_zones", [])
+            if not zones:
+                self.status_label.setText("No overlap zones found in that JSON.")
+                self.status_label.setStyleSheet("color: #e67e22; padding: 4px;")
+                return
+            self._multi_colocate_zones = zones
+            if not self._multi_dir_path:
+                self._multi_dir_path = str(pathlib.Path(path).parent)
+            pm = self._multi_current_composite()
+            if pm:
+                self._show_multi_composite(pm)
+            self._multi_zones_btn.setVisible(True)
+            self._multi_zones_btn.setText("◆ Zones")
+            self._reposition_overlay_btns()
+            n = len(zones)
+            self.status_label.setText(f"Loaded {n} co-location zone(s) from {pathlib.Path(path).name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+            self._populate_info_colocate(zones, pathlib.Path(path))
+        except Exception as e:
+            self.status_label.setText(f"Failed to load co-location JSON: {e}")
+            self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
+
+    def _build_multi_composite_display(self):
+        if not self._multi_selected_paths:
+            return
+        try:
+            normalize = self._normalize_check.isChecked()
+            upscale = self._upscale_check.isChecked()
+
+            def _load_gray(path):
+                arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                if arr is None:
+                    raise ValueError(f"Could not read {path}")
+                arr = arr.astype(np.float32)
+                if normalize:
+                    mn, mx = arr.min(), arr.max()
+                    if mx > mn:
+                        arr = (arr - mn) / (mx - mn)
+                if upscale:
+                    h_, w_ = arr.shape
+                    if min(h_, w_) < 1092:
+                        scale = 1092 / min(h_, w_)
+                        arr = cv2.resize(arr, (int(w_ * scale), int(h_ * scale)),
+                                         interpolation=cv2.INTER_CUBIC)
+                return arr
+
+            arrays = [_load_gray(p) for p in self._multi_selected_paths]
+            h = max(a.shape[0] for a in arrays)
+            w = max(a.shape[1] for a in arrays)
+
+            # Normal additive composite
+            composite = np.zeros((h, w, 3), dtype=np.float32)
+            for i, arr in enumerate(arrays):
+                color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+                r, g, b = color_entry[1]
+                padded = np.zeros((h, w), dtype=np.float32)
+                padded[:arr.shape[0], :arr.shape[1]] = arr
+                composite[:, :, 0] = np.clip(composite[:, :, 0] + padded * (r / 255.0), 0, 1)
+                composite[:, :, 1] = np.clip(composite[:, :, 1] + padded * (g / 255.0), 0, 1)
+                composite[:, :, 2] = np.clip(composite[:, :, 2] + padded * (b / 255.0), 0, 1)
+            composite_u8 = (composite * 255).astype(np.uint8)
+            qimg = QImage(composite_u8.data, w, h, w * 3, QImage.Format_RGB888).copy()
+            self._multi_composite_pixmap = QPixmap.fromImage(qimg)
+
+            # Circles composite — each element circles on white, overlaid by color
+            circle_canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+            for i, arr in enumerate(arrays):
+                color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+                cc = color_entry[1]
+                arr_u8 = (arr * 255).astype(np.uint8)
+                ca = _apply_red_circles_transform(arr_u8, circle_color=cc)
+                mask = np.any(ca < 255, axis=-1)
+                ph, pw = ca.shape[:2]
+                circle_canvas[:ph, :pw][mask] = ca[mask]
+            qimg2 = QImage(circle_canvas.data, w, h, w * 3, QImage.Format_RGB888).copy()
+            self._multi_circles_composite_pixmap = QPixmap.fromImage(qimg2)
+
+            pm = self._multi_current_composite()
+            if pm:
+                self._show_multi_composite(pm)
+            self._multi_switch_view_btn.setVisible(True)
+            self._multi_switch_view_btn.setText(
+                "⬤ Circles" if self._multi_view_circles else "⬤ Normal"
+            )
+            self._reposition_overlay_btns()
+        except Exception as e:
+            self.status_label.setText(f"Could not build composite: {e}")
+            self.status_label.setStyleSheet("color: #c0392b; padding: 4px;")
+
+    def _show_multi_composite(self, pixmap):
+        sa = self._multi_composite_scroll
+        vp_w = max(200, sa.viewport().width())
+        vp_h = max(200, sa.viewport().height())
+        fit = pixmap.scaled(vp_w, vp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._multi_base_w, self._multi_base_h = fit.width(), fit.height()
+        w = max(1, int(self._multi_base_w * self._multi_zoom))
+        h = max(1, int(self._multi_base_h * self._multi_zoom))
+        scaled = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._multi_composite_display.setPixmap(scaled)
+        self._multi_composite_display.resize(scaled.width(), scaled.height())
+
+    def _multi_current_composite(self):
+        base = (self._multi_circles_composite_pixmap if self._multi_view_circles
+                else self._multi_composite_pixmap)
+        if not base:
+            return None
+        groups = []
+        for i, (feats, show) in enumerate(zip(self._multi_elem_features, self._multi_show_flags)):
+            if show and feats:
+                color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+                groups.append((feats, color_entry[0]))
+        result = _draw_feature_boxes_multi_color(base, groups) if groups else base
+        if self._multi_show_zones and self._multi_colocate_zones:
+            result = _draw_colocate_boxes(result, self._multi_colocate_zones)
+        return result
+
+    def _on_multi_zoom(self, direction: int):
+        sa = self._multi_composite_scroll
+        viewport = sa.viewport()
+        cursor_vp = viewport.mapFromGlobal(self._multi_composite_display.cursor().pos())
+        old_h = sa.horizontalScrollBar().value()
+        old_v = sa.verticalScrollBar().value()
+        old_zoom = self._multi_zoom
+        self._multi_zoom = max(0.25, min(8.0, self._multi_zoom * (1.15 if direction > 0 else 1 / 1.15)))
+        pm = self._multi_current_composite()
+        if pm:
+            self._show_multi_composite(pm)
+        ratio = self._multi_zoom / old_zoom
+        sa.horizontalScrollBar().setValue(max(0, int((old_h + cursor_vp.x()) * ratio - cursor_vp.x())))
+        sa.verticalScrollBar().setValue(max(0, int((old_v + cursor_vp.y()) * ratio - cursor_vp.y())))
+
+    def _on_multi_mouse_moved(self, fx: float, fy: float) -> None:
+        self.coord_label.setText(f"X: {fx:.3f}\nY: {fy:.3f}")
+        self.coord_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 6px;")
+        lines = []
+        if self._multi_show_zones and self._multi_colocate_zones:
+            for zone in self._multi_colocate_zones:
+                if zone.get("x1", 0) <= fx <= zone.get("x2", 0) and \
+                        zone.get("y1", 0) <= fy <= zone.get("y2", 0):
+                    elem_str = " + ".join(zone.get("elements", []))
+                    lines = [
+                        f"<b>Zone {zone.get('id', '?')}  —  {elem_str}</b>",
+                        f"bbox: ({zone['x1']:.3f},{zone['y1']:.3f})→({zone['x2']:.3f},{zone['y2']:.3f})",
+                    ]
+                    if zone.get("llm_suggestion"):
+                        lines.append(f"<b>→ {zone['llm_suggestion']}</b>")
+                    if zone.get("reasoning"):
+                        lines.append(f"<i>{zone['reasoning']}</i>")
+                    break
+        if not lines:
+            for i, (feats, show) in enumerate(zip(self._multi_elem_features, self._multi_show_flags)):
+                if not show:
+                    continue
+                for feat in feats:
+                    if feat.get("x1", 0) <= fx <= feat.get("x2", 0) and \
+                            feat.get("y1", 0) <= fy <= feat.get("y2", 0):
+                        color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+                        elem_name = self._multi_elem_names[i] if i < len(self._multi_elem_names) else f"Elem {i+1}"
+                        fid = feat.get("id", "?")
+                        label = feat.get("label", "")
+                        desc = feat.get("description", "")
+                        x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
+                        x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
+                        hex_color = color_entry[0].name()
+                        lines = [
+                            f'<b style="color:{hex_color};">{elem_name}</b>',
+                            f"<b>Feature #{fid}</b>  {label}",
+                        ]
+                        if desc:
+                            lines.append(f"<i>{desc}</i>")
+                        lines.append(f"bbox: ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})")
+                        break
+                if lines:
+                    break
+        if lines:
+            self._hover_tooltip.setText("<br>".join(lines))
+            self._hover_tooltip.adjustSize()
+            gpos = QCursor.pos()
+            self._hover_tooltip.move(gpos.x() + 16, gpos.y() - self._hover_tooltip.height() - 4)
+            self._hover_tooltip.show()
+        else:
+            self._hover_tooltip.hide()
+
+    def _on_multi_result(self, data: dict):
+        self._multi_elem_features = data.get("elem_features", [])
+        n = data.get("total_count", sum(len(f) for f in self._multi_elem_features))
+        N = len(self._multi_selected_paths)
+        ref_path = pathlib.Path(self._multi_dir_path)
+        dir_name = ref_path.name
+        json_path = ref_path / f"{dir_name}_multi_features.json"
+        save_data = {
+            "elements": self._multi_elem_names,
+            "elem_features": self._multi_elem_features,
+            "total_count": n,
+            "model": _active_model,
+        }
+        with open(json_path, "w") as f:
+            json.dump(save_data, f, indent=2)
+        print(f"[Feature Locator Multi] All {N} elements done — {n} total feature(s). Saved at: {json_path}")
+        self._multi_show_flags = [True] * N
+        self._multi_show_zones = True
+        pm = self._multi_current_composite()
+        if pm:
+            self._show_multi_composite(pm)
+        self.locate_btn.setEnabled(True)
+        self._colocate_btn.setVisible(True)
+        self._colocate_btn.setEnabled(True)
+        self._multi_boxes_btn.setVisible(True)
+        self._multi_boxes_btn.setText("● Boxes")
+        self._reposition_overlay_btns()
+        self.status_label.setText(f"Done — {n} feature(s) across {N} elements. Saved: {json_path.name}")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._populate_info_multi(self._multi_elem_features, self._multi_elem_names, json_path)
+        QMessageBox.information(self, "Multi Element Analysis Done",
+            f"{N} elements analyzed — {n} total feature(s)\nSaved to: {json_path}")
+
+    def _populate_info_multi(self, elem_features, elem_names, json_path):
+        lines = [f"Model: {_active_model}", f"Saved: {json_path.name}", ""]
+        for i, (feats, name) in enumerate(zip(elem_features, elem_names)):
+            lines.append(f"── {name}  ({len(feats)} feature(s))")
+            for j, feat in enumerate(feats):
+                fid = feat.get("id", j + 1)
+                label = feat.get("label", "")
+                x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
+                x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
+                desc = feat.get("description", "")
+                lines.append(f"  #{fid}  {label}")
+                lines.append(f"       ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})")
+                if desc:
+                    lines.append(f"       {desc}")
+            lines.append("")
+        self.info_panel.setPlainText("\n".join(lines).strip())
+        self.info_panel.setVisible(True)
+
+    def _on_multi_colocate_result(self, data: dict):
+        zones = data.get("overlap_zones", [])
+        n = data.get("total_zones", len(zones))
+        ref_path = pathlib.Path(self._multi_dir_path)
+        json_path = ref_path / f"{ref_path.name}_multi_colocate.json"
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[Multi Co-locate] {n} zone(s) identified. Saved at: {json_path}")
+        self._multi_colocate_zones = zones
+        pm = self._multi_current_composite()
+        if pm:
+            self._show_multi_composite(pm)
+        self._colocate_btn.setEnabled(True)
+        self._multi_zones_btn.setVisible(True)
+        self._multi_zones_btn.setText("◆ Zones")
+        self._reposition_overlay_btns()
+        self.status_label.setText(f"Co-location done — {n} zone(s). Saved: {json_path.name}")
+        self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._populate_info_colocate(zones, json_path)
+
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0
 
@@ -2742,12 +3727,15 @@ class _LocateTab(QWidget):
             self._refresh_send_status()
 
     def _on_image_options_changed(self) -> None:
-        is_xrf = self._mode_combo.currentIndex() == 1
-        if is_xrf:
+        mode = self._mode_combo.currentIndex()
+        if mode == 1:
             for i in range(3):
                 self._update_xrf_mini_preview(i)
             if all(self._xrf_paths):
                 self._build_xrf_composite_display()
+        elif mode == 2:
+            if self._multi_selected_paths:
+                self._on_multi_confirm_selection()
         else:
             self._orig_pixmap = None
             self._dilated_pixmap = None
