@@ -493,6 +493,44 @@ def _draw_feature_boxes_multi_color(base_pixmap, feature_groups):
     return result
 
 
+def _save_pixmap_png(pixmap: "QPixmap", path: "pathlib.Path") -> bool:
+    """Save a QPixmap to disk as PNG. Returns True on success."""
+    try:
+        ok = pixmap.save(str(path), "PNG")
+        if ok:
+            print(f"[Export] Saved PNG → {path.name}")
+        else:
+            print(f"[Export] Failed to save PNG → {path}")
+        return ok
+    except Exception as exc:
+        print(f"[Export] Exception saving PNG → {path}: {exc}")
+        return False
+
+
+def _draw_colocate_boxes_confidence(base_pixmap: "QPixmap", zones: list) -> "QPixmap":
+    """Draw zone boxes colored by confidence: green=high, yellow=medium, red=low."""
+    result = base_pixmap.copy()
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pw, ph = result.width(), result.height()
+    _conf_color = {"high": QColor(60, 200, 60), "medium": QColor(220, 200, 50), "low": QColor(200, 60, 60)}
+    for zone in zones:
+        conf = zone.get("confidence", "medium") if zone.get("confidence") else "medium"
+        color = _conf_color.get(conf, QColor(200, 200, 200))
+        pen = QPen(color, 3, Qt.SolidLine)
+        painter.setPen(pen)
+        x1 = int(max(0.0, float(zone.get("x1", 0))) * pw)
+        y1 = int(max(0.0, float(zone.get("y1", 0))) * ph)
+        x2 = int(min(1.0, float(zone.get("x2", 1))) * pw)
+        y2 = int(min(1.0, float(zone.get("y2", 1))) * ph)
+        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+        painter.setPen(QPen(color, 1))
+        painter.setFont(QFont("monospace", 8))
+        painter.drawText(x1 + 2, y1 + 10, f"Z{zone.get('id', '?')}")
+    painter.end()
+    return result
+
+
 # ── image display with mouse coord tracking ───────────────────────────────────
 
 class _ImageDisplay(QLabel):
@@ -2060,6 +2098,9 @@ class _LocateLLMColocateThread(QThread):
         "You will receive VLM-detected features for multiple element scans. "
         "Your task is to identify co-location zones — regions where 2 or more elements "
         "overlap or are immediately adjacent — and identify the most likely material or phase. "
+        "For each zone, provide: your best-guess primary suggestion, your confidence in that guess "
+        "(high/medium/low), a list of alternative possibilities, and your reasoning. "
+        "Be explicit when evidence is ambiguous — low confidence answers are valid and expected. "
         "Return ONLY valid JSON. No text outside the JSON object."
     )
 
@@ -2068,8 +2109,23 @@ class _LocateLLMColocateThread(QThread):
         '"id": 1, '
         '"elements": ["Fe", "Cr"], '
         '"x1": 0.10, "y1": 0.20, "x2": 0.35, "y2": 0.45, '
-        '"suggestion": "ferrochrome alloy", '
-        '"reasoning": "Fe+Cr co-location is characteristic of ferrochrome"'
+        '"suggestion": "ferrochrome alloy (FeCr)", '
+        '"confidence": "medium", '
+        '"reasoning": {'
+        '"science": "Iron and chromium are the two primary constituents of ferrochrome, '
+        'an alloy produced by co-smelting iron ore with chromite. Cr is almost always bonded '
+        'with Fe or O in natural and industrial samples — it rarely appears in elemental form.", '
+        '"logic": "No O signal is present to support an oxide phase, which shifts the identification '
+        'toward the metallic alloy. If O were co-located, chromite or Cr2O3 would rank higher.", '
+        '"location": "The Fe and Cr bounding boxes have substantial overlap, consistent with '
+        'a single co-processed grain rather than two neighboring but distinct phases."'
+        '}, '
+        '"alternatives": ['
+        '{"name": "chromite (FeCr2O4)", "note": "Fe and Cr are the key constituents of chromite, '
+        'a spinel mineral common in ultramafic rocks — O co-location would be needed to confirm"}, '
+        '{"name": "Fe-Cr carbide", "note": "occurs in tool steels and cast iron where C is present '
+        'during processing — C signal would be needed to support this"}'
+        ']'
         '}]}'
     )
 
@@ -2096,7 +2152,9 @@ class _LocateLLMColocateThread(QThread):
             for i, z in enumerate(zones):
                 z["id"] = i + 1
                 z.setdefault("llm_suggestion", z.pop("suggestion", ""))
-                z.setdefault("reasoning", "")
+                z.setdefault("confidence", "")
+                z.setdefault("alternatives", [])
+                z.setdefault("reasoning", {})
                 z.pop("element_codes", None)
             self.result.emit({
                 "elements": self._elem_names,
@@ -2131,7 +2189,20 @@ class _LocateLLMColocateThread(QThread):
             "  1. Return the INTERSECTION bounding box — tightest box covering where the elements touch/overlap.",
             "     If features are adjacent but not overlapping, use the gap-bridging box.",
             "  2. List which element names are present.",
-            "  3. Identify the most likely material, compound, alloy, or mineral phase.",
+            "  3. Give your best-guess material, compound, alloy, or mineral phase as 'suggestion'.",
+            "  4. Rate your confidence as 'high', 'medium', or 'low'. Be conservative — use 'low' when ambiguous.",
+            "  5. In 'reasoning', provide a structured object with exactly three keys:",
+            "     'science': explain what this material is, what role each detected element plays in its",
+            "       chemistry or formation, and what process or environment typically produces it.",
+            "     'logic': explain why this suggestion ranks above alternatives — cite which elements",
+            "       are present or absent and what that rules in or out.",
+            "     'location': describe the spatial relationship between the detected element features —",
+            "       how tightly they overlap, whether they appear to be the same grain or neighboring",
+            "       phases, and how that spatial pattern supports or complicates the identification.",
+            "  6. In 'alternatives', list 2–3 other possibilities as objects with 'name' and 'note'.",
+            "     Each 'note' should explain the science of that alternative — what it is, where it is",
+            "     commonly found, and what additional element signal would be needed to confirm it.",
+            "     If no other plausible alternatives exist, return an empty list [].",
             "",
             f"Use this exact JSON schema:\n{self._SCHEMA}",
         ]
@@ -2306,6 +2377,8 @@ class _LocateTab(QWidget):
         # Floating hover tooltip
         self._hover_tooltip = QLabel(self)
         self._hover_tooltip.setWindowFlags(Qt.ToolTip)
+        self._hover_tooltip.setWordWrap(True)
+        self._hover_tooltip.setMaximumWidth(420)
         self._hover_tooltip.setStyleSheet(
             "QLabel { background: #1a1a1a; color: #f0f0f0; border: 1px solid #555;"
             " border-radius: 6px; padding: 8px; font-size: 13px; }"
@@ -3191,14 +3264,36 @@ class _LocateTab(QWidget):
                     elem_str = " + ".join(zone.get("elements", []))
                     x1, y1 = zone.get("x1", 0), zone.get("y1", 0)
                     x2, y2 = zone.get("x2", 0), zone.get("y2", 0)
+                    conf = zone.get("confidence", "")
+                    conf_str = f" — {conf} confidence" if conf else ""
                     lines = [
                         f"<b>Zone {zone.get('id', '?')}  —  {elem_str}</b>",
                         f"bbox: ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})",
                     ]
                     if zone.get("llm_suggestion"):
-                        lines.append(f"<b>→ {zone['llm_suggestion']}</b>")
-                    if zone.get("reasoning"):
-                        lines.append(f"<i>{zone['reasoning']}</i>")
+                        lines.append(f"<b>Possible material: {zone['llm_suggestion']}{conf_str}</b>")
+                    reasoning = zone.get("reasoning", {})
+                    if isinstance(reasoning, dict):
+                        if reasoning.get("science"):
+                            lines.append(f"<i><b>Science:</b> {reasoning['science']}</i>")
+                        if reasoning.get("logic"):
+                            lines.append(f"<i><b>Logic:</b> {reasoning['logic']}</i>")
+                        if reasoning.get("location"):
+                            lines.append(f"<i><b>Location:</b> {reasoning['location']}</i>")
+                    elif reasoning:
+                        lines.append(f"<i>{reasoning}</i>")
+                    alts = zone.get("alternatives", [])
+                    if alts:
+                        lines.append("<b>Other possibilities:</b>")
+                        for alt in alts:
+                            if isinstance(alt, dict):
+                                note = f" — {alt['note']}" if alt.get("note") else ""
+                                lines.append(f"&nbsp;&nbsp;• {alt.get('name', '')}{note}")
+                            else:
+                                lines.append(f"&nbsp;&nbsp;• {alt}")
+                    else:
+                        lines.append("<i>No other possible matches identified.</i>")
+                    lines.append("<span style='color:#888;font-size:10px;'>Best guess based on elemental co-location — not confirmed</span>")
                     break
 
         # Element feature tooltips — only for visible elements, only if no zone hit
@@ -3413,6 +3508,18 @@ class _LocateTab(QWidget):
             self._colocate_btn.setEnabled(True)
             self.status_label.setText(f"Done — {n} feature(s) across 3 elements. Saved: {json_path.name}")
             self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+            # Export element PNGs
+            if self._xrf_composite_pixmap:
+                groups = [
+                    (r_feats, QColor(220, 60,  60)),
+                    (g_feats, QColor(60,  200, 60)),
+                    (b_feats, QColor(60,  120, 220)),
+                ]
+                pm_boxes = _draw_feature_boxes_multi_color(self._xrf_composite_pixmap, groups)
+                _save_pixmap_png(pm_boxes, json_path.with_name(ref.stem + "_triple_elements_composite.png"))
+            if self._xrf_circles_composite_pixmap:
+                pm_circ_boxes = _draw_feature_boxes_multi_color(self._xrf_circles_composite_pixmap, groups)
+                _save_pixmap_png(pm_circ_boxes, json_path.with_name(ref.stem + "_triple_elements_circles.png"))
             QMessageBox.information(self, "XRF Analysis Done",
                 f"R: {len(r_feats)}  G: {len(g_feats)}  B: {len(b_feats)} feature(s)\n"
                 f"Saved to: {json_path}")
@@ -3430,6 +3537,8 @@ class _LocateTab(QWidget):
             if base and features:
                 self._annotated_pixmap = _draw_feature_boxes(base, features)
                 self._show_pixmap(self._annotated_pixmap)
+                png_path = json_path.with_name(stem + "_single_elements_composite.png")
+                _save_pixmap_png(self._annotated_pixmap, png_path)
             else:
                 self._annotated_pixmap = None
 
@@ -3571,6 +3680,11 @@ class _LocateTab(QWidget):
         self._xrf_colocate_zones = zones
         if self._xrf_composite_pixmap and zones:
             self._xrf_colocate_pixmap = _draw_colocate_boxes(self._xrf_composite_pixmap, zones)
+            pm_col = _draw_colocate_boxes_confidence(self._xrf_composite_pixmap, zones)
+            _save_pixmap_png(pm_col, json_path.with_name(ref.stem + "_triple_colocate_composite.png"))
+            if self._xrf_circles_composite_pixmap:
+                pm_col_circ = _draw_colocate_boxes_confidence(self._xrf_circles_composite_pixmap, zones)
+                _save_pixmap_png(pm_col_circ, json_path.with_name(ref.stem + "_triple_colocate_circles.png"))
 
         self._colocate_btn.setEnabled(True)
         self._show_elem_overlay_btns(show_zones=True)
@@ -3600,6 +3714,11 @@ class _LocateTab(QWidget):
         self._xrf_colocate_zones = zones
         if self._xrf_composite_pixmap and zones:
             self._xrf_colocate_pixmap = _draw_colocate_boxes(self._xrf_composite_pixmap, zones)
+            pm_col = _draw_colocate_boxes_confidence(self._xrf_composite_pixmap, zones)
+            _save_pixmap_png(pm_col, json_path.with_name(ref.stem + "_triple_colocate_composite.png"))
+            if self._xrf_circles_composite_pixmap:
+                pm_col_circ = _draw_colocate_boxes_confidence(self._xrf_circles_composite_pixmap, zones)
+                _save_pixmap_png(pm_col_circ, json_path.with_name(ref.stem + "_triple_colocate_circles.png"))
         self._colocate_btn.setEnabled(True)
         self._show_elem_overlay_btns(show_zones=True)
         self._refresh_image_views()
@@ -3629,6 +3748,14 @@ class _LocateTab(QWidget):
         self.status_label.setText(f"LLM co-location done — {n} zone(s). Saved: {json_path.name}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
         self._populate_info_colocate(zones, json_path)
+        # Export co-locate PNGs
+        dir_name = ref_path.name
+        if self._multi_composite_pixmap and zones:
+            pm_col = _draw_colocate_boxes_confidence(self._multi_composite_pixmap, zones)
+            _save_pixmap_png(pm_col, ref_path / f"{dir_name}_multi_colocate_composite.png")
+        if self._multi_circles_composite_pixmap and zones:
+            pm_col_circ = _draw_colocate_boxes_confidence(self._multi_circles_composite_pixmap, zones)
+            _save_pixmap_png(pm_col_circ, ref_path / f"{dir_name}_multi_colocate_circles.png")
 
     def _populate_info_colocate(self, zones: list, json_path):
         # Append below existing triple-features content so both are scrollable
@@ -3933,14 +4060,36 @@ class _LocateTab(QWidget):
                 if zone.get("x1", 0) <= fx <= zone.get("x2", 0) and \
                         zone.get("y1", 0) <= fy <= zone.get("y2", 0):
                     elem_str = " + ".join(zone.get("elements", []))
+                    conf = zone.get("confidence", "")
+                    conf_str = f" — {conf} confidence" if conf else ""
                     lines = [
                         f"<b>Zone {zone.get('id', '?')}  —  {elem_str}</b>",
                         f"bbox: ({zone['x1']:.3f},{zone['y1']:.3f})→({zone['x2']:.3f},{zone['y2']:.3f})",
                     ]
                     if zone.get("llm_suggestion"):
-                        lines.append(f"<b>→ {zone['llm_suggestion']}</b>")
-                    if zone.get("reasoning"):
-                        lines.append(f"<i>{zone['reasoning']}</i>")
+                        lines.append(f"<b>Possible material: {zone['llm_suggestion']}{conf_str}</b>")
+                    reasoning = zone.get("reasoning", {})
+                    if isinstance(reasoning, dict):
+                        if reasoning.get("science"):
+                            lines.append(f"<i><b>Science:</b> {reasoning['science']}</i>")
+                        if reasoning.get("logic"):
+                            lines.append(f"<i><b>Logic:</b> {reasoning['logic']}</i>")
+                        if reasoning.get("location"):
+                            lines.append(f"<i><b>Location:</b> {reasoning['location']}</i>")
+                    elif reasoning:
+                        lines.append(f"<i>{reasoning}</i>")
+                    alts = zone.get("alternatives", [])
+                    if alts:
+                        lines.append("<b>Other possibilities:</b>")
+                        for alt in alts:
+                            if isinstance(alt, dict):
+                                note = f" — {alt['note']}" if alt.get("note") else ""
+                                lines.append(f"&nbsp;&nbsp;• {alt.get('name', '')}{note}")
+                            else:
+                                lines.append(f"&nbsp;&nbsp;• {alt}")
+                    else:
+                        lines.append("<i>No other possible matches identified.</i>")
+                    lines.append("<span style='color:#888;font-size:10px;'>Best guess based on elemental co-location — not confirmed</span>")
                     break
         if not lines:
             for i, (feats, show) in enumerate(zip(self._multi_elem_features, self._multi_show_flags)):
@@ -4007,6 +4156,17 @@ class _LocateTab(QWidget):
         self.status_label.setText(f"Done — {n} feature(s) across {N} elements. Saved: {json_path.name}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
         self._populate_info_multi(self._multi_elem_features, self._multi_elem_names, json_path)
+        # Export element PNGs
+        groups = [
+            (feats, _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)][0])
+            for i, feats in enumerate(self._multi_elem_features)
+        ]
+        if self._multi_composite_pixmap:
+            pm_boxes = _draw_feature_boxes_multi_color(self._multi_composite_pixmap, groups)
+            _save_pixmap_png(pm_boxes, ref_path / f"{dir_name}_multi_elements_composite.png")
+        if self._multi_circles_composite_pixmap:
+            pm_circ_boxes = _draw_feature_boxes_multi_color(self._multi_circles_composite_pixmap, groups)
+            _save_pixmap_png(pm_circ_boxes, ref_path / f"{dir_name}_multi_elements_circles.png")
         QMessageBox.information(self, "Multi Element Analysis Done",
             f"{N} elements analyzed — {n} total feature(s)\nSaved to: {json_path}")
 
@@ -4049,6 +4209,14 @@ class _LocateTab(QWidget):
         self.status_label.setText(f"Co-location done — {n} zone(s). Saved: {json_path.name}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
         self._populate_info_colocate(zones, json_path)
+        # Export co-locate PNGs
+        dir_name = ref_path.name
+        if self._multi_composite_pixmap and zones:
+            pm_col = _draw_colocate_boxes_confidence(self._multi_composite_pixmap, zones)
+            _save_pixmap_png(pm_col, ref_path / f"{dir_name}_multi_colocate_composite.png")
+        if self._multi_circles_composite_pixmap and zones:
+            pm_col_circ = _draw_colocate_boxes_confidence(self._multi_circles_composite_pixmap, zones)
+            _save_pixmap_png(pm_col_circ, ref_path / f"{dir_name}_multi_colocate_circles.png")
 
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0

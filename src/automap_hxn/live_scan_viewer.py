@@ -83,8 +83,22 @@ def _elem_list_from_config(config: dict) -> list[str]:
         return []
 
 
+_PHASE_COMPOSITE_COLORS = [
+    (255, 0,   0),    # Red
+    (0,   255, 0),    # Green
+    (0,   0,   255),  # Blue
+    (255, 220, 0),    # Yellow
+    (180, 0,   255),  # Purple
+    (255, 140, 0),    # Orange
+    (0,   220, 220),  # Cyan
+    (255, 100, 180),  # Pink
+    (100, 255, 60),   # Lime
+    (0,   180, 200),  # Teal
+]
+
+
 def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
-    """Load per-element grayscale TIFFs and composite to an RGB QPixmap.
+    """Load first 3 element TIFFs as fixed R/G/B channels for Union Boxes view.
 
     Returns (pixmap, tiff_width, tiff_height) or (None, 0, 0) on failure.
     """
@@ -113,6 +127,45 @@ def _composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
         return pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation), w, h
     except Exception as exc:
         print(f"[LiveScan] Could not composite {elem_tiff_paths}: {exc}")
+        return None, 0, 0
+
+
+def _phase_composite_to_pixmap(elem_tiff_paths: list[Path], target: int):
+    """Additive false-color composite using all N elements for Phase Detection view.
+
+    Each element gets a cycling color; co-located elements mix additively —
+    same approach as the Multi Element Feature Locator composite.
+    Returns (pixmap, tiff_width, tiff_height) or (None, 0, 0) on failure.
+    """
+    try:
+        arrays = []
+        for p in elem_tiff_paths:
+            arr = np.array(Image.open(p), dtype=np.float32)
+            if arr.max() > 0:
+                arr = arr / arr.max()
+            arrays.append(arr)
+
+        if not arrays:
+            return None, 0, 0
+
+        h = max(a.shape[0] for a in arrays)
+        w = max(a.shape[1] for a in arrays)
+
+        composite = np.zeros((h, w, 3), dtype=np.float32)
+        for i, arr in enumerate(arrays):
+            r, g, b = _PHASE_COMPOSITE_COLORS[i % len(_PHASE_COMPOSITE_COLORS)]
+            padded = np.zeros((h, w), dtype=np.float32)
+            padded[:arr.shape[0], :arr.shape[1]] = arr
+            composite[:, :, 0] = np.clip(composite[:, :, 0] + padded * (r / 255.0), 0, 1)
+            composite[:, :, 1] = np.clip(composite[:, :, 1] + padded * (g / 255.0), 0, 1)
+            composite[:, :, 2] = np.clip(composite[:, :, 2] + padded * (b / 255.0), 0, 1)
+
+        rgb = (composite * 255).astype(np.uint8)
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+        pm = QPixmap.fromImage(qimg)
+        return pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation), w, h
+    except Exception as exc:
+        print(f"[LiveScan] Could not phase composite {elem_tiff_paths}: {exc}")
         return None, 0, 0
 
 
@@ -246,6 +299,8 @@ class LiveScanViewerWidget(QWidget):
         self._tile_scene_pos: dict[int, tuple[float, float]] = {}
         self._tile_highlight: QGraphicsRectItem | None = None
         self._tile_list_items: dict[int, QTreeWidgetItem] = {}
+        self._tile_pix_items: dict[int, QGraphicsPixmapItem] = {}  # idx -> scene item
+        self._tile_elem_paths: dict[int, list] = {}                # idx -> elem_paths
 
         # Selection state
         self._selected_tile_idx: int | None = None
@@ -464,6 +519,16 @@ class LiveScanViewerWidget(QWidget):
         self._phase_list.itemClicked.connect(self._on_phase_list_clicked)
         self._phase_list.installEventFilter(self)
         phase_layout.addWidget(self._phase_list, 1)
+
+        self._export_phase_btn = QPushButton("Export Phase PNGs")
+        self._export_phase_btn.setStyleSheet(
+            "QPushButton { background: #2a5a2a; color: #ccc; border: 1px solid #3a8a3a; "
+            "border-radius: 3px; padding: 4px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #3a7a3a; }"
+            "QPushButton:pressed { background: #1a4a1a; }"
+        )
+        self._export_phase_btn.clicked.connect(self._on_export_phase_pngs)
+        phase_layout.addWidget(self._export_phase_btn)
 
         layout.addWidget(self._phase_panel, 1)
         self._phase_panel.setVisible(False)
@@ -851,6 +916,8 @@ class LiveScanViewerWidget(QWidget):
         self._box_scene_items.clear()
         self._tile_scene_pos.clear()
         self._tile_list_items.clear()
+        self._tile_pix_items.clear()
+        self._tile_elem_paths.clear()
         self._tile_highlight = None
         self._selected_tile_idx = None
         self._selected_box_meta_idx = None
@@ -984,6 +1051,8 @@ class LiveScanViewerWidget(QWidget):
         pix_item = QGraphicsPixmapItem(pm)
         pix_item.setPos(x0, y0)
         self._scene.addItem(pix_item)
+        self._tile_pix_items[idx] = pix_item
+        self._tile_elem_paths[idx] = elem_paths
 
         self._scene.addRect(
             x0, y0, pm.width(), pm.height(),
@@ -1171,6 +1240,81 @@ class LiveScanViewerWidget(QWidget):
             self._phase_meta.append(meta_entry)
 
         self._populate_phase_list()
+        self._export_phase_pngs(tile_idx, scan_id, results_dir, unions, scale)
+
+    def _export_phase_pngs(self, tile_idx: int, scan_id: str, results_dir: Path,
+                            unions: list, scale: float):
+        """Export 2 PNGs: single-element match boxes and multi-element match boxes."""
+        pix_item = self._tile_pix_items.get(tile_idx)
+        if not pix_item:
+            print(f"[Phase Export] No pixmap item for tile {tile_idx}")
+            return
+        try:
+            base = pix_item.pixmap()
+            if base.isNull():
+                print(f"[Phase Export] Null pixmap for tile {tile_idx}")
+                return
+
+            COLOR_MULTI  = QColor(80, 200, 80)
+            COLOR_SINGLE = QColor(220, 200, 50)
+
+            pm_single = base.copy()
+            pm_multi  = base.copy()
+            p_single = QPainter(pm_single)
+            p_multi  = QPainter(pm_multi)
+            p_single.setRenderHint(QPainter.Antialiasing)
+            p_multi.setRenderHint(QPainter.Antialiasing)
+
+            for union in unions:
+                matches = union.get("matches", [])
+                has_match = bool(matches) and "ambiguous" not in matches[0].get("material", "")
+                if not has_match:
+                    continue
+                lib_elems = matches[0].get("elements_in_material", "").split()
+                is_multi = len(lib_elems) > 1
+                ub = union.get("union_box", {})
+                x1 = int(ub.get("x1", 0) * scale)
+                y1 = int(ub.get("y1", 0) * scale)
+                x2 = int(ub.get("x2", 0) * scale)
+                y2 = int(ub.get("y2", 0) * scale)
+                p = p_multi if is_multi else p_single
+                color = COLOR_MULTI if is_multi else COLOR_SINGLE
+                p.setPen(QPen(color, 2))
+                p.drawRect(x1, y1, x2 - x1, y2 - y1)
+
+            p_single.end()
+            p_multi.end()
+
+            png_single = results_dir / f"automap_{scan_id}_phase_single.png"
+            png_multi  = results_dir / f"automap_{scan_id}_phase_multi.png"
+            pm_single.save(str(png_single), "PNG")
+            pm_multi.save(str(png_multi),  "PNG")
+            print(f"[Phase Export] {png_single.name}  |  {png_multi.name}")
+        except Exception as exc:
+            print(f"[Phase Export] Failed for tile {tile_idx}: {exc}")
+
+    def _on_export_phase_pngs(self):
+        """Export phase PNGs for all tiles that have phase data — works on already-completed scans."""
+        if not self._phase_data:
+            return
+        exported = 0
+        for scan_id, unions in self._phase_data.items():
+            idx = self._tile_order.index(scan_id) if scan_id in self._tile_order else None
+            if idx is None:
+                continue
+            tiff_w = self._tile_tiff_w.get(idx, 0)
+            if tiff_w <= 0:
+                continue
+            results_dir = None
+            if self._watch_dir:
+                results_dir = self._watch_dir / f"automap_{scan_id}" / f"automap_{scan_id}_results"
+            if not results_dir or not results_dir.exists():
+                continue
+            scale = CELL_SIZE / tiff_w
+            self._export_phase_pngs(idx, scan_id, results_dir, unions, scale)
+            exported += 1
+        self._export_phase_btn.setText(f"Exported {exported} tile(s) ✓")
+        QTimer.singleShot(3000, lambda: self._export_phase_btn.setText("Export Phase PNGs"))
 
     def _populate_phase_list(self):
         self._phase_list.clear()
@@ -1228,6 +1372,24 @@ class LiveScanViewerWidget(QWidget):
 
     def _on_display_mode_changed(self, index: int):
         in_phase = index == 1
+        # Swap tile background composite
+        for idx, pix_item in self._tile_pix_items.items():
+            if in_phase:
+                # Build all-element paths for this tile from every group
+                tile_scan_id = self._tile_order[idx] if idx < len(self._tile_order) else None
+                if tile_scan_id and self._watch_dir:
+                    tile_dir = self._watch_dir / f"automap_{tile_scan_id}"
+                    all_elems = [e for g in self._all_groups for e in g]
+                    all_paths = [tile_dir / f"scan_{tile_scan_id}_{e}.tiff" for e in all_elems]
+                    all_paths = [p for p in all_paths if p.exists()]
+                    pm, _, _ = _phase_composite_to_pixmap(all_paths, CELL_SIZE)
+                else:
+                    pm = None
+            else:
+                elem_paths = self._tile_elem_paths.get(idx, [])
+                pm, _, _ = _composite_to_pixmap(elem_paths, CELL_SIZE)
+            if pm:
+                pix_item.setPixmap(pm)
         # Toggle panels
         tiles_group_visible = not in_phase
         self._tiles_group.setVisible(tiles_group_visible)
