@@ -1,10 +1,12 @@
 import base64
+import concurrent.futures
 import json
 import os
 import pathlib
 import re
 import subprocess
 import shutil
+import time
 import urllib.request
 
 import cv2
@@ -88,6 +90,11 @@ def _parse_env_lines(text: str) -> "dict[str, str]":
 def _try_load_key(provider: str) -> "tuple[str | None, str]":
     """Check $ENV first, then GPG-encrypted env files. Caches result in _api_keys.
     Returns (key_or_None, diagnostic_message)."""
+    if provider in _api_keys:
+        key = _api_keys[provider]
+        if key is None:
+            return None, "Key unloaded by user — use Reload from GPG or set a key manually."
+        return key, ""  # already set (manually or from a prior load) — don't overwrite
     env_var = _ENV_VAR.get(provider, "")
     val = os.environ.get(env_var, "").strip()
     if val:
@@ -561,6 +568,62 @@ class _ImageDisplay(QLabel):
 
 
 # ── background threads ────────────────────────────────────────────────────────
+
+class _KeyTestThread(QThread):
+    result = Signal(bool, str)  # (ok, message)
+
+    def __init__(self, provider: str, key: str):
+        super().__init__()
+        self._provider = provider
+        self._key = key
+
+    def run(self):
+        try:
+            if self._provider == "anthropic":
+                payload = json.dumps({
+                    "model": _get_anthropic_model(),
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }, ensure_ascii=False).encode("utf-8")
+                req = urllib.request.Request(
+                    _get_anthropic_url(), data=payload,
+                    headers={"Content-Type": "application/json",
+                             "x-api-key": self._key,
+                             "anthropic-version": ANTHROPIC_API_VERSION})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp.read()
+            elif self._provider == "openai":
+                headers = {"Content-Type": "application/json",
+                           **_get_openai_auth_headers(self._key)}
+                if "openai" in _api_urls:
+                    payload = json.dumps({
+                        "model": _get_openai_model(),
+                        "max_tokens": 1,
+                        "input": [{"role": "user", "content": [
+                            {"type": "input_text", "text": "hi"}]}],
+                    }, ensure_ascii=False).encode("utf-8")
+                    req = urllib.request.Request(
+                        _get_openai_url(), data=payload, headers=headers)
+                else:
+                    payload = json.dumps({
+                        "model": _get_openai_model(),
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    }, ensure_ascii=False).encode("utf-8")
+                    req = urllib.request.Request(
+                        _get_openai_url(), data=payload, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp.read()
+            else:
+                self.result.emit(False, f"Test not supported for provider: {self._provider}")
+                return
+            self.result.emit(True, "")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:200]
+            self.result.emit(False, f"HTTP {e.code}: {body}")
+        except Exception as exc:
+            self.result.emit(False, f"Error: {exc}")
+
 
 class _PullThread(QThread):
     log = Signal(str)
@@ -1361,26 +1424,36 @@ class _LocateXRFTripleThread(QThread):
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
 
+    def _process_one(self, i: int, path: str, label: str, cc: tuple):
+        print(f"[Feature Locator XRF] Sending request for '{pathlib.Path(path).name}' "
+              f"({'circles' if self.circles else 'grayscale'}) using '{_active_model}'")
+        img_b64 = _encode_image_for_vlm(
+            path, normalize=self.normalize, upscale=self.upscale,
+            red_circles=self.circles, circle_color=cc)
+        features = self._query(img_b64)
+        return i, label, features
+
     def run(self):
         try:
-            keys = ["r_features", "g_features", "b_features"]
+            result_keys = ["r_features", "g_features", "b_features"]
             labels = ["Red (Element 1)", "Green (Element 2)", "Blue (Element 3)"]
             circle_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
-            combined = {}
-            total = 0
-            for i, (path, key, label, cc) in enumerate(
-                    zip(self.paths, keys, labels, circle_colors)):
-                self.progress.emit(f"Analyzing {label}... ({i+1}/3)")
-                print(f"[Feature Locator XRF] Sending request for '{pathlib.Path(path).name}' "
-                      f"({'circles' if self.circles else 'grayscale'}) using '{_active_model}'")
-                img_b64 = _encode_image_for_vlm(
-                    path, normalize=self.normalize, upscale=self.upscale,
-                    red_circles=self.circles, circle_color=cc)
-                features = self._query(img_b64)
-                combined[key] = features
-                total += len(features)
-                self.progress.emit(f"{label} — {len(features)} feature(s) found.")
-            combined["total_count"] = total
+            self.progress.emit("Sending 3 element images simultaneously...")
+            t0 = time.time()
+            results_by_index = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {
+                    executor.submit(self._process_one, i, path, label, cc): i
+                    for i, (path, label, cc) in enumerate(
+                        zip(self.paths, labels, circle_colors))
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    i, label, features = future.result()
+                    results_by_index[i] = (label, features)
+                    self.progress.emit(f"{label} — {len(features)} feature(s) found ({len(results_by_index)}/3 done).")
+            combined = {result_keys[i]: results_by_index[i][1] for i in range(3)}
+            combined["total_count"] = sum(len(f) for f in combined.values() if isinstance(f, list))
+            combined["duration_seconds"] = round(time.time() - t0, 1)
             self.result.emit(combined)
         except Exception as e:
             self.error.emit(str(e))
@@ -1481,26 +1554,38 @@ class _LocateXRFMultiThread(QThread):
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
 
+    def _process_one(self, i: int, path: str):
+        color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
+        cc = color_entry[1]
+        stem = pathlib.Path(path).stem
+        elem_name = stem.split("_")[-1]
+        print(f"[Feature Locator Multi] Sending '{pathlib.Path(path).name}' using '{_active_model}'")
+        img_b64 = _encode_image_for_vlm(
+            path, normalize=self.normalize, upscale=self.upscale,
+            red_circles=self.circles, circle_color=cc)
+        features = self._query(img_b64)
+        return i, elem_name, features
+
     def run(self):
         try:
             N = len(self.paths)
-            elem_features = []
-            total = 0
-            for i, path in enumerate(self.paths):
-                color_entry = _MULTI_ELEM_COLORS[i % len(_MULTI_ELEM_COLORS)]
-                cc = color_entry[1]
-                stem = pathlib.Path(path).stem
-                elem_name = stem.split("_")[-1]
-                self.progress.emit(f"Analyzing {elem_name} ({i+1}/{N})...")
-                print(f"[Feature Locator Multi] Sending '{pathlib.Path(path).name}' using '{_active_model}'")
-                img_b64 = _encode_image_for_vlm(
-                    path, normalize=self.normalize, upscale=self.upscale,
-                    red_circles=self.circles, circle_color=cc)
-                features = self._query(img_b64)
-                elem_features.append(features)
-                total += len(features)
-                self.progress.emit(f"{elem_name} — {len(features)} feature(s) found.")
-            self.result.emit({"elem_features": elem_features, "total_count": total})
+            self.progress.emit(f"Sending {N} element images simultaneously...")
+            t0 = time.time()
+            results_by_index = {}
+            max_workers = min(N, 8)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._process_one, i, path): i
+                    for i, path in enumerate(self.paths)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    i, elem_name, features = future.result()
+                    results_by_index[i] = (elem_name, features)
+                    self.progress.emit(f"{elem_name} — {len(features)} feature(s) found ({len(results_by_index)}/{N} done).")
+            elem_features = [results_by_index[i][1] for i in range(N)]
+            total = sum(len(f) for f in elem_features)
+            self.result.emit({"elem_features": elem_features, "total_count": total,
+                              "duration_seconds": round(time.time() - t0, 1)})
         except Exception as e:
             self.error.emit(str(e))
 
@@ -3903,6 +3988,7 @@ class _LocateTab(QWidget):
             "elem_features": self._multi_elem_features,
             "total_count": n,
             "model": _active_model,
+            "duration_seconds": data.get("duration_seconds"),
         }
         with open(json_path, "w") as f:
             json.dump(save_data, f, indent=2)
@@ -4088,6 +4174,7 @@ class _ModelTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pull_thread: "_PullThread | None" = None
+        self._km_test_thread: "_KeyTestThread | None" = None
         self._radio_by_model: "dict[str, QRadioButton]" = {}
         self._init_ui()
         QTimer.singleShot(0, self._check_current)
@@ -4135,21 +4222,6 @@ class _ModelTab(QWidget):
         self._status.setWordWrap(True)
         outer.addWidget(self._status)
 
-        self._key_widget = QWidget()
-        kr = QHBoxLayout(self._key_widget)
-        kr.setContentsMargins(0, 4, 0, 0)
-        self._key_label = QLabel("API Key:")
-        kr.addWidget(self._key_label)
-        self._key_input = QLineEdit()
-        self._key_input.setEchoMode(QLineEdit.Password)
-        self._key_input.setPlaceholderText("Paste API key here…")
-        kr.addWidget(self._key_input, 1)
-        save_btn = QPushButton("Use Key")
-        save_btn.clicked.connect(self._save_key)
-        kr.addWidget(save_btn)
-        self._key_widget.setVisible(False)
-        outer.addWidget(self._key_widget)
-
         self._dl_btn = QPushButton(f"Download {_active_model}")
         self._dl_btn.setVisible(False)
         self._dl_btn.clicked.connect(self._start_pull)
@@ -4162,7 +4234,113 @@ class _ModelTab(QWidget):
         self._log.setStyleSheet("font-family: monospace; font-size: 11px;")
         outer.addWidget(self._log)
 
+        # ── API Key Manager ───────────────────────────────────────────────────
+        km_box = QGroupBox("API Keys")
+        km_layout = QVBoxLayout(km_box)
+        km_layout.setSpacing(4)
+
+        prov_row = QHBoxLayout()
+        prov_row.addWidget(QLabel("Provider:"))
+        self._km_provider = QComboBox()
+        self._km_provider.addItems(["anthropic", "openai"])
+        self._km_provider.currentTextChanged.connect(self._km_update_status)
+        prov_row.addWidget(self._km_provider, 1)
+        km_layout.addLayout(prov_row)
+
+        self._km_status = QLabel("")
+        self._km_status.setWordWrap(True)
+        self._km_status.setStyleSheet("font-size: 11px; padding: 2px 0;")
+        km_layout.addWidget(self._km_status)
+
+        key_row = QHBoxLayout()
+        self._km_key_input = QLineEdit()
+        self._km_key_input.setEchoMode(QLineEdit.Password)
+        self._km_key_input.setPlaceholderText("Paste API key here…")
+        self._km_key_input.returnPressed.connect(self._km_set_key)
+        key_row.addWidget(self._km_key_input, 1)
+        set_btn = QPushButton("Set Key")
+        set_btn.clicked.connect(self._km_set_key)
+        key_row.addWidget(set_btn)
+        km_layout.addLayout(key_row)
+
+        action_row = QHBoxLayout()
+        unload_btn = QPushButton("Unload Key")
+        unload_btn.clicked.connect(self._km_unload_key)
+        action_row.addWidget(unload_btn)
+        gpg_btn = QPushButton("Reload from GPG")
+        gpg_btn.clicked.connect(self._km_reload_gpg)
+        action_row.addWidget(gpg_btn)
+        test_btn = QPushButton("Test Key")
+        test_btn.clicked.connect(self._km_test_key)
+        action_row.addWidget(test_btn)
+        km_layout.addLayout(action_row)
+
+        outer.addWidget(km_box)
         outer.addStretch()
+
+        QTimer.singleShot(0, self._km_update_status)
+
+    def _km_update_status(self):
+        provider = self._km_provider.currentText()
+        if provider in _api_keys:
+            if _api_keys[provider]:
+                self._km_status.setText("Key loaded.")
+                self._km_status.setStyleSheet("color: #27ae60; font-size: 11px;")
+            else:
+                self._km_status.setText("Unloaded. GPG disabled — use Reload from GPG or set a key manually.")
+                self._km_status.setStyleSheet("color: #e67e22; font-size: 11px;")
+        else:
+            self._km_status.setText("No key loaded.")
+            self._km_status.setStyleSheet("color: #e67e22; font-size: 11px;")
+
+    def _km_set_key(self):
+        provider = self._km_provider.currentText()
+        key = self._km_key_input.text().strip()
+        if not key:
+            return
+        _api_keys[provider] = key
+        self._km_key_input.clear()
+        self._km_update_status()
+        self._check_current()
+
+    def _km_unload_key(self):
+        provider = self._km_provider.currentText()
+        _api_keys[provider] = None  # sentinel: block GPG auto-reload
+        self._km_update_status()
+        self._check_current()
+
+    def _km_reload_gpg(self):
+        provider = self._km_provider.currentText()
+        _api_keys.pop(provider, None)
+        key, diag = _try_load_key(provider)
+        if key:
+            self._km_status.setText("GPG: key loaded.")
+            self._km_status.setStyleSheet("color: #27ae60; font-size: 11px;")
+        else:
+            self._km_status.setText(f"GPG: {diag}")
+            self._km_status.setStyleSheet("color: #c0392b; font-size: 11px;")
+        self._check_current()
+
+    def _km_test_key(self):
+        provider = self._km_provider.currentText()
+        key = _get_key(provider)
+        if not key:
+            self._km_status.setText("No key to test — set or load one first.")
+            self._km_status.setStyleSheet("color: #e67e22; font-size: 11px;")
+            return
+        self._km_status.setText("Testing…")
+        self._km_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._km_test_thread = _KeyTestThread(provider, key)
+        self._km_test_thread.result.connect(self._km_on_test_result)
+        self._km_test_thread.start()
+
+    def _km_on_test_result(self, ok: bool, msg: str):
+        if ok:
+            self._km_status.setText("Key works.")
+            self._km_status.setStyleSheet("color: #27ae60; font-size: 11px;")
+        else:
+            self._km_status.setText(msg)
+            self._km_status.setStyleSheet("color: #c0392b; font-size: 11px;")
 
     def _select(self, model: str):
         global _active_model
@@ -4177,7 +4355,6 @@ class _ModelTab(QWidget):
             self._select(m)
 
     def _check_current(self):
-        self._key_widget.setVisible(False)
         self._dl_btn.setVisible(False)
         self._log.setVisible(False)
         provider = _get_provider(_active_model)
@@ -4207,22 +4384,9 @@ class _ModelTab(QWidget):
             extra = f" (gateway model: {effective})" if effective != _active_model else ""
             self._set_status(f"{_active_model} is ready.{extra}", "#27ae60")
         else:
-            provider_name = "Anthropic" if provider == "anthropic" else "OpenAI"
             env_var = _ENV_VAR[provider]
-            msg = diag or f"No {env_var} found."
+            msg = diag or f"No {env_var} found. Set a key in the API Keys section below."
             self._set_status(msg, "#e67e22")
-            self._key_label.setText(f"{provider_name} API Key:")
-            self._key_widget.setVisible(True)
-
-    def _save_key(self):
-        provider = _get_provider(_active_model)
-        key = self._key_input.text().strip()
-        if not key:
-            return
-        _api_keys[provider] = key
-        self._key_input.clear()
-        self._key_widget.setVisible(False)
-        self._set_status(f"{_active_model} is ready.", "#27ae60")
 
     def _set_status(self, msg: str, color: str):
         self._status.setText(msg)
