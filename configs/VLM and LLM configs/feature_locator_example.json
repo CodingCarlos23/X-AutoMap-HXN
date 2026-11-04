@@ -1,0 +1,11 @@
+{
+  "input_dir": "/path/to/data/automap_0",
+  "output_dir": "/path/to/output/automap_0",
+  "model": "claude-sonnet-4-6",
+  "circles": true,
+  "normalize": true,
+  "upscale": true,
+  "llm_colocate": true,
+  "sample_context": "Describe your sample here — e.g. urban aerosol PM, mineral dust, ocean sediment, Ti-Al alloy",
+  "elements": []
+}

@@ -1,0 +1,12 @@
+{
+  "input_dir": "/home/codingcarlos/Documents/github/X-AutoMap-HXN/data/automap_0",
+  "output_dir": "/home/codingcarlos/Documents/github/X-AutoMap-HXN/data/automap_0/VLM results",
+  "model": "claude-sonnet-4-6",
+  "mode": "multi",
+  "circles": true,
+  "normalize": true,
+  "upscale": true,
+  "llm_colocate": true,
+  "sample_context": "The sample consists of airborne particulate matter collected from an urban environment. These microscopic particles originate from a mixture of natural and human activities, including vehicle emissions, industrial processes, construction, combustion, and windblown dust. The collected material represents a diverse mixture of environmental particles suspended in the air.",
+  "elements": []
+}

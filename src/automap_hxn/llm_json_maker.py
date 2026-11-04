@@ -12,6 +12,8 @@ import urllib.request
 import cv2
 import numpy as np
 
+from automap_hxn import vlm_pipeline
+
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTextEdit, QPlainTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
@@ -65,11 +67,7 @@ _GPG_ENV_CANDIDATES = [
 
 
 def _get_provider(model: str) -> str:
-    if model.startswith("claude-"):
-        return "anthropic"
-    if model.startswith(("gpt-", "o3", "o4")):
-        return "openai"
-    return "ollama"
+    return vlm_pipeline.get_provider(model)
 
 
 def _parse_env_lines(text: str) -> "dict[str, str]":
@@ -254,57 +252,7 @@ def _parse_responses_text(data: dict) -> str:
 
 
 def _parse_locate_json(content: str) -> dict:
-    # Strip markdown fences
-    if "```" in content:
-        lines = content.splitlines()
-        inner = []
-        in_block = False
-        for line in lines:
-            if line.strip().startswith("```"):
-                in_block = not in_block
-                continue
-            if in_block or not content.startswith("```"):
-                inner.append(line)
-        content = "\n".join(inner).strip() if inner else content
-
-    # Extract outermost { ... }
-    start = content.find("{")
-    end = content.rfind("}")
-    if start >= 0 and end > start:
-        content = content[start:end + 1]
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # Truncated response — try to salvage complete feature objects
-        features = []
-        depth = 0
-        buf = ""
-        in_features = False
-        fid = 1
-        for ch in content:
-            buf += ch
-            if ch == "{":
-                depth += 1
-                if '"features"' in buf and not in_features:
-                    in_features = True
-            elif ch == "}":
-                depth -= 1
-                if in_features and depth == 1:
-                    obj_start = buf.rfind('"id"', 0, len(buf) - 1)
-                    if obj_start < 0:
-                        obj_start = buf.rfind('"x1"', 0, len(buf) - 1)
-                    if obj_start >= 0:
-                        fragment = buf[obj_start - 1:]
-                        try:
-                            feat = json.loads("{" + fragment.lstrip("{"))
-                            if any(k in feat for k in ("x1", "id", "label")):
-                                feat.setdefault("id", fid)
-                                features.append(feat)
-                                fid += 1
-                        except Exception:
-                            pass
-        return {"features": features, "total_count": len(features)}
+    return vlm_pipeline.parse_locate_json(content)
 
 LOCATE_SYSTEM_PROMPT = (
     "You are a scientific image analysis assistant for XRF (X-ray fluorescence) scan data. "
@@ -368,23 +316,7 @@ BOX_COLORS = [
 
 
 def _apply_red_circles_transform(arr: np.ndarray, circle_color=(255, 0, 0)) -> np.ndarray:
-    """Normalize → Gaussian blur → Otsu threshold → contours → draw filled circles on white.
-
-    Helps VLMs count/box particles: converts XRF blobs into unambiguous colored circles.
-    Input must be uint8 grayscale (2-D). Returns uint8 RGB (3-D).
-    circle_color is an (R, G, B) tuple.
-    """
-    if arr.ndim != 2:
-        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(arr, (3, 3), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = np.full((*arr.shape, 3), 255, dtype=np.uint8)  # white background
-    for cnt in contours:
-        (cx, cy), r = cv2.minEnclosingCircle(cnt)
-        r = max(r, 3.0) * 1.3
-        cv2.circle(out, (int(cx), int(cy)), int(r), circle_color, -1)
-    return out
+    return vlm_pipeline.apply_circles_transform(arr, circle_color=circle_color)
 
 
 def _load_image_pixmap(path, dilate_ksize: int = 0, normalize: bool = True, grid_overlay: bool = False,
@@ -816,95 +748,18 @@ _VLM_MAX_DIM = 1024
 
 
 def _draw_coordinate_grid(arr: np.ndarray, steps: int = 10) -> np.ndarray:
-    """Draw a coordinate grid with fractional labels onto a BGR uint8 image."""
-    arr = arr.copy()
-    h, w = arr.shape[:2]
-    line_color = (160, 160, 160)
-    label_bg   = (0, 0, 0)
-    label_fg   = (255, 255, 60)
-    font       = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.35, min(0.55, w / 900))
-    thickness  = 1
-
-    for i in range(steps + 1):
-        frac = i / steps
-        x = int(frac * (w - 1))
-        y = int(frac * (h - 1))
-        cv2.line(arr, (x, 0), (x, h - 1), line_color, 1)
-        cv2.line(arr, (0, y), (w - 1, y), line_color, 1)
-
-        # Only label every 2nd line (0.0, 0.2, 0.4 ...) to avoid crowding
-        if i % 2 != 0:
-            continue
-        label = f"{frac:.1f}"
-        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-
-        # x-axis label: centred above the line, 16px from top
-        lx = max(0, min(x - tw // 2, w - tw - 1))
-        ly = th + 4
-        cv2.rectangle(arr, (lx - 1, 1), (lx + tw + 1, ly + 2), label_bg, -1)
-        cv2.putText(arr, label, (lx, ly), font, font_scale, label_fg, thickness, cv2.LINE_AA)
-
-        # y-axis label: 4px to right of left edge, vertically centred on line
-        rx = 4
-        ry = max(th, min(y + th // 2, h - 2))
-        cv2.rectangle(arr, (rx - 1, ry - th - 1), (rx + tw + 1, ry + 2), label_bg, -1)
-        cv2.putText(arr, label, (rx, ry), font, font_scale, label_fg, thickness, cv2.LINE_AA)
-
-    return arr
+    return vlm_pipeline.draw_coordinate_grid(arr, steps=steps)
 
 
 def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True,
                           grid_overlay: bool = False, upscale: bool = False, colormap: bool = False,
                           red_circles: bool = False, circle_color=(255, 0, 0)):
-    """Load image, optionally normalize and dilate, downsample to max_dim, return base64-PNG string."""
-    arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
-    if arr is None:
-        raise ValueError(f"Could not read image: {path}")
-    arr = arr.astype(np.float32)
-    if normalize:
-        mn, mx = arr.min(), arr.max()
-        if mx > mn:
-            arr = (arr - mn) / (mx - mn)
-        arr = (arr * 255).astype(np.uint8)
-    else:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-    if upscale:
-        h, w = arr.shape[:2]
-        if min(h, w) < 1092:
-            scale = 1092 / min(h, w)
-            arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-    if dilate_ksize > 0:
-        kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
-        arr = cv2.dilate(arr, kernel)
-    if red_circles:
-        if arr.ndim != 2:
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-        rgb = _apply_red_circles_transform(arr, circle_color=circle_color)
-        arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    else:
-        # CLAHE: sharpen local contrast so blob edges are crisper for the VLM
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        if arr.ndim == 2:
-            arr = clahe.apply(arr)
-            if colormap:
-                arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
-            else:
-                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-        else:
-            lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
-            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-            arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    if grid_overlay:
-        arr = _draw_coordinate_grid(arr)
-    h, w = arr.shape[:2]
-    if max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode(".png", arr)
-    if not ok:
-        raise RuntimeError("cv2.imencode failed")
-    return base64.b64encode(buf.tobytes()).decode()
+    """Load image, optionally preprocess, downsample to max_dim, return base64-PNG string."""
+    return vlm_pipeline.encode_image_for_vlm(
+        path, max_dim=max_dim, dilate_ksize=dilate_ksize, normalize=normalize,
+        grid_overlay=grid_overlay, upscale=upscale, colormap=colormap,
+        red_circles=red_circles, circle_color=circle_color,
+    )
 
 
 _LOCATE_USER_PROMPT = (
@@ -944,93 +799,15 @@ class _LocateThread(QThread):
             print(f"[Feature Locator] Sending request for image '{pathlib.Path(self.image_path).name}' "
                   f"with filters [{filter_str}] using model '{_active_model}'")
             provider = _get_provider(_active_model)
-            if provider == "anthropic":
-                parsed = self._query_anthropic(img_b64)
-            elif provider == "openai":
-                parsed = self._query_openai(img_b64)
-            else:
-                parsed = self._query_ollama(img_b64)
+            key = _get_key(provider) or ""
+            features = vlm_pipeline.query_vlm_features(
+                img_b64, self._system_prompt, _active_model, provider, key,
+                anthropic_url=_get_anthropic_url(), openai_url=_get_openai_url(),
+            )
+            parsed = {"features": features, "total_count": len(features)}
             self.result.emit(parsed)
         except Exception as e:
             self.error.emit(str(e))
-
-    def _query_ollama(self, img_b64: str) -> dict:
-        payload = json.dumps({
-            "model": _active_model,
-            "messages": [
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
-            ],
-            "stream": False,
-            "format": "json",
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_URL, data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json(data.get("message", {}).get("content", "{}"))
-
-    def _query_anthropic(self, img_b64: str) -> dict:
-        key = _get_key("anthropic") or ""
-        payload = json.dumps({
-            "model": _get_anthropic_model(),
-            "max_tokens": 4096,
-            "system": self._system_prompt,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                    {"type": "text", "text": _LOCATE_USER_PROMPT},
-                ],
-            }],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _get_anthropic_url(), data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": key,
-                "anthropic-version": ANTHROPIC_API_VERSION,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}"))
-
-    def _query_openai(self, img_b64: str) -> dict:
-        key = _get_key("openai") or ""
-        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
-        if "openai" in _api_urls:
-            payload = json.dumps({
-                "model": _get_openai_model(),
-                "instructions": self._system_prompt,
-                "input": [{"role": "user", "content": [
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
-                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
-                ]}],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(_parse_responses_text(data))
-        else:
-            payload = json.dumps({
-                "model": _active_model,
-                "messages": [
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        {"type": "text", "text": _LOCATE_USER_PROMPT},
-                    ]},
-                ],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            )
 
 
 
@@ -1164,87 +941,10 @@ class _LocateTileThread(QThread):
         return base64.b64encode(buf.tobytes()).decode()
 
     def _query(self, img_b64: str) -> list:
-        if self._provider == "anthropic":
-            return self._query_anthropic(img_b64)
-        if self._provider == "openai":
-            return self._query_openai(img_b64)
-        return self._query_ollama(img_b64)
-
-    def _query_ollama(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
-            ],
-            "stream": False,
-            "format": "json",
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_URL, data=payload,
-            headers={"Content-Type": "application/json"},
+        return vlm_pipeline.query_vlm_features(
+            img_b64, self._system_prompt, self._model, self._provider, self._key,
+            anthropic_url=_get_anthropic_url(), openai_url=_get_openai_url(),
         )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json(data.get("message", {}).get("content", "{}")).get("features", [])
-
-    def _query_anthropic(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": _get_anthropic_model(),
-            "max_tokens": 4096,
-            "system": self._system_prompt,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                    {"type": "text", "text": _LOCATE_USER_PROMPT},
-                ],
-            }],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _get_anthropic_url(), data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": self._key,
-                "anthropic-version": ANTHROPIC_API_VERSION,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
-
-    def _query_openai(self, img_b64: str) -> list:
-        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
-        if "openai" in _api_urls:
-            payload = json.dumps({
-                "model": _get_openai_model(),
-                "instructions": self._system_prompt,
-                "input": [{"role": "user", "content": [
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
-                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
-                ]}],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
-        else:
-            payload = json.dumps({
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        {"type": "text", "text": _LOCATE_USER_PROMPT},
-                    ]},
-                ],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            ).get("features", [])
 
     @staticmethod
     def _dedup(features: list, iou_thresh: float = 0.3) -> list:
@@ -1497,81 +1197,10 @@ class _LocateXRFTripleThread(QThread):
             self.error.emit(str(e))
 
     def _query(self, img_b64: str) -> list:
-        if self._provider == "anthropic":
-            return self._query_anthropic(img_b64)
-        if self._provider == "openai":
-            return self._query_openai(img_b64)
-        return self._query_ollama(img_b64)
-
-    def _query_anthropic(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": _get_anthropic_model(),
-            "max_tokens": 4096,
-            "system": self._system_prompt,
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64",
-                                              "media_type": "image/png", "data": img_b64}},
-                {"type": "text", "text": _LOCATE_USER_PROMPT},
-            ]}],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _get_anthropic_url(), data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": self._key,
-                     "anthropic-version": ANTHROPIC_API_VERSION})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
-
-    def _query_openai(self, img_b64: str) -> list:
-        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
-        if "openai" in _api_urls:
-            payload = json.dumps({
-                "model": _get_openai_model(),
-                "instructions": self._system_prompt,
-                "input": [{"role": "user", "content": [
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
-                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
-                ]}],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
-        else:
-            payload = json.dumps({
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        {"type": "text", "text": _LOCATE_USER_PROMPT},
-                    ]},
-                ],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            ).get("features", [])
-
-    def _query_ollama(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
-            ],
-            "stream": False,
-            "format": "json",
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_URL, data=payload,
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            raw = json.loads(resp.read())
-        return _parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
+        return vlm_pipeline.query_vlm_features(
+            img_b64, self._system_prompt, self._model, self._provider, self._key,
+            anthropic_url=_get_anthropic_url(), openai_url=_get_openai_url(),
+        )
 
 
 class _LocateXRFMultiThread(QThread):
@@ -1628,83 +1257,10 @@ class _LocateXRFMultiThread(QThread):
             self.error.emit(str(e))
 
     def _query(self, img_b64: str) -> list:
-        if self._provider == "anthropic":
-            return self._query_anthropic(img_b64)
-        if self._provider == "openai":
-            return self._query_openai(img_b64)
-        return self._query_ollama(img_b64)
-
-    def _query_anthropic(self, img_b64: str) -> list:
-        key = _get_key("anthropic") or ""
-        payload = json.dumps({
-            "model": _get_anthropic_model(),
-            "max_tokens": 4096,
-            "system": self._system_prompt,
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64",
-                                              "media_type": "image/png", "data": img_b64}},
-                {"type": "text", "text": _LOCATE_USER_PROMPT},
-            ]}],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _get_anthropic_url(), data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": key,
-                     "anthropic-version": ANTHROPIC_API_VERSION})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        return _parse_locate_json((data.get("content") or [{}])[0].get("text", "{}")).get("features", [])
-
-    def _query_openai(self, img_b64: str) -> list:
-        key = _get_key("openai") or ""
-        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(key)}
-        if "openai" in _api_urls:
-            payload = json.dumps({
-                "model": _get_openai_model(),
-                "instructions": self._system_prompt,
-                "input": [{"role": "user", "content": [
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
-                    {"type": "input_text", "text": _LOCATE_USER_PROMPT},
-                ]}],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(_parse_responses_text(data)).get("features", [])
-        else:
-            payload = json.dumps({
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        {"type": "text", "text": _LOCATE_USER_PROMPT},
-                    ]},
-                ],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return _parse_locate_json(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            ).get("features", [])
-
-    def _query_ollama(self, img_b64: str) -> list:
-        payload = json.dumps({
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": _LOCATE_USER_PROMPT, "images": [img_b64]},
-            ],
-            "stream": False,
-            "format": "json",
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_URL, data=payload,
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            raw = json.loads(resp.read())
-        return _parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
+        return vlm_pipeline.query_vlm_features(
+            img_b64, self._system_prompt, self._model, self._provider, self._key,
+            anthropic_url=_get_anthropic_url(), openai_url=_get_openai_url(),
+        )
 
 
 def _box_intersect(a: dict, b: dict) -> dict | None:
@@ -2093,42 +1649,6 @@ class _LocateLLMColocateThread(QThread):
     error = Signal(str)
     progress = Signal(str)
 
-    _SYSTEM = (
-        "You are an XRF (X-ray fluorescence) materials scientist. "
-        "You will receive VLM-detected features for multiple element scans. "
-        "Your task is to identify co-location zones — regions where 2 or more elements "
-        "overlap or are immediately adjacent — and identify the most likely material or phase. "
-        "For each zone, provide: your best-guess primary suggestion, your confidence in that guess "
-        "(high/medium/low), a list of alternative possibilities, and your reasoning. "
-        "Be explicit when evidence is ambiguous — low confidence answers are valid and expected. "
-        "Return ONLY valid JSON. No text outside the JSON object."
-    )
-
-    _SCHEMA = (
-        '{"zones": [{'
-        '"id": 1, '
-        '"elements": ["Fe", "Cr"], '
-        '"x1": 0.10, "y1": 0.20, "x2": 0.35, "y2": 0.45, '
-        '"suggestion": "ferrochrome alloy (FeCr)", '
-        '"confidence": "medium", '
-        '"reasoning": {'
-        '"science": "Iron and chromium are the two primary constituents of ferrochrome, '
-        'an alloy produced by co-smelting iron ore with chromite. Cr is almost always bonded '
-        'with Fe or O in natural and industrial samples — it rarely appears in elemental form.", '
-        '"logic": "No O signal is present to support an oxide phase, which shifts the identification '
-        'toward the metallic alloy. If O were co-located, chromite or Cr2O3 would rank higher.", '
-        '"location": "The Fe and Cr bounding boxes have substantial overlap, consistent with '
-        'a single co-processed grain rather than two neighboring but distinct phases."'
-        '}, '
-        '"alternatives": ['
-        '{"name": "chromite (FeCr2O4)", "note": "Fe and Cr are the key constituents of chromite, '
-        'a spinel mineral common in ultramafic rocks — O co-location would be needed to confirm"}, '
-        '{"name": "Fe-Cr carbide", "note": "occurs in tool steels and cast iron where C is present '
-        'during processing — C signal would be needed to support this"}'
-        ']'
-        '}]}'
-    )
-
     def __init__(self, elem_features: list, elem_names: list, sample_context: str = ""):
         super().__init__()
         self._elem_features = elem_features
@@ -2141,15 +1661,14 @@ class _LocateLLMColocateThread(QThread):
     def run(self):
         try:
             self.progress.emit("Sending VLM results to LLM for spatial co-location analysis...")
-            prompt = self._build_prompt()
+            prompt = vlm_pipeline.build_colocate_prompt(
+                self._elem_features, self._elem_names, self._sample_context)
             print(f"[LLM Co-locate] Sending {sum(len(f) for f in self._elem_features)} total features "
                   f"across {len(self._elem_names)} elements to '{_active_model}'")
-            if self._provider == "anthropic":
-                zones = self._query_anthropic(prompt)
-            elif self._provider == "openai":
-                zones = self._query_openai(prompt)
-            else:
-                zones = self._query_ollama(prompt)
+            zones = vlm_pipeline.query_llm_colocate(
+                prompt, self._model, self._provider, self._key,
+                anthropic_url=_get_anthropic_url(), openai_url=_get_openai_url(),
+            )
             for i, z in enumerate(zones):
                 z["id"] = i + 1
                 z.setdefault("llm_suggestion", z.pop("suggestion", ""))
@@ -2166,111 +1685,6 @@ class _LocateLLMColocateThread(QThread):
             })
         except Exception as e:
             self.error.emit(str(e))
-
-    def _build_prompt(self) -> str:
-        lines = [
-            f"You have VLM detection results for {len(self._elem_names)} XRF element scans.",
-            "Bounding boxes are fractional coordinates (0.0–1.0), (0,0)=top-left, (1,1)=bottom-right.",
-            "",
-        ]
-        if self._sample_context:
-            lines.insert(0, f"Sample context provided by the user: {self._sample_context}. Use this to inform your material suggestions and reasoning.")
-            lines.insert(1, "")
-        for i, (name, feats) in enumerate(zip(self._elem_names, self._elem_features)):
-            lines.append(f"Element {i+1} = {name}:  ({len(feats)} feature(s))")
-            for f in feats:
-                fid = f.get("id", "?")
-                label = f.get("label", "")
-                desc = f.get("description", "")
-                x1, y1 = f.get("x1", 0), f.get("y1", 0)
-                x2, y2 = f.get("x2", 0), f.get("y2", 0)
-                lines.append(f"  #{fid} [{label}] ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})"
-                             + (f'  "{desc}"' if desc else ""))
-            lines.append("")
-        lines += [
-            "TASK: Find ALL regions where 2 or more elements have overlapping or immediately adjacent features.",
-            "For each co-location zone:",
-            "  1. Return the INTERSECTION bounding box — tightest box covering where the elements touch/overlap.",
-            "     If features are adjacent but not overlapping, use the gap-bridging box.",
-            "  2. List which element names are present.",
-            "  3. Give your best-guess material, compound, alloy, or mineral phase as 'suggestion'.",
-            "  4. Rate your confidence as 'high', 'medium', or 'low'. Be conservative — use 'low' when ambiguous.",
-            "  5. In 'reasoning', provide a structured object with exactly three keys:",
-            "     'science': explain what this material is, what role each detected element plays in its",
-            "       chemistry or formation, and what process or environment typically produces it.",
-            "     'logic': explain why this suggestion ranks above alternatives — cite which elements",
-            "       are present or absent and what that rules in or out.",
-            "     'location': describe the spatial relationship between the detected element features —",
-            "       how tightly they overlap, whether they appear to be the same grain or neighboring",
-            "       phases, and how that spatial pattern supports or complicates the identification.",
-            "  6. In 'alternatives', list 2–3 other possibilities as objects with 'name' and 'note'.",
-            "     Each 'note' should explain the science of that alternative — what it is, where it is",
-            "     commonly found, and what additional element signal would be needed to confirm it.",
-            "     If no other plausible alternatives exist, return an empty list [].",
-            "",
-            f"Use this exact JSON schema:\n{self._SCHEMA}",
-        ]
-        return "\n".join(lines)
-
-    def _query_anthropic(self, prompt: str) -> list:
-        payload = json.dumps({
-            "model": _get_anthropic_model(),
-            "max_tokens": 8096,
-            "system": self._SYSTEM,
-            "messages": [{"role": "user", "content": prompt}],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _get_anthropic_url(), data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": self._key,
-                     "anthropic-version": ANTHROPIC_API_VERSION})
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = json.loads(resp.read())
-        text = (data.get("content") or [{}])[0].get("text", "{}")
-        return self._parse(text)
-
-    def _query_openai(self, prompt: str) -> list:
-        headers = {"Content-Type": "application/json", **_get_openai_auth_headers(self._key)}
-        payload = json.dumps({
-            "model": _get_openai_model() if "openai" in _api_urls else self._model,
-            "max_tokens": 8096,
-            "messages": [
-                {"role": "system", "content": self._SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(_get_openai_url(), data=payload, headers=headers)
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = json.loads(resp.read())
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        return self._parse(text)
-
-    def _query_ollama(self, prompt: str) -> list:
-        payload = json.dumps({
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": self._SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False, "format": "json",
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(OLLAMA_URL, data=payload,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            raw = json.loads(resp.read())
-        text = raw.get("message", {}).get("content", "{}")
-        return self._parse(text)
-
-    @staticmethod
-    def _parse(text: str) -> list:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start:end + 1]
-        try:
-            return json.loads(text).get("zones", [])
-        except json.JSONDecodeError:
-            return _LocateXRFColocateThread._safe_parse_zones(text)
 
 
 class _LocateTab(QWidget):
