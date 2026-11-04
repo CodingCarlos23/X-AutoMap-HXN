@@ -14,7 +14,7 @@ import numpy as np
 
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
+    QTextEdit, QPlainTextEdit, QSizePolicy, QLineEdit, QFileDialog, QTabWidget,
     QScrollArea, QMessageBox, QComboBox, QCheckBox, QSpinBox,
     QGroupBox, QRadioButton, QButtonGroup, QSplitter,
 )
@@ -2129,10 +2129,11 @@ class _LocateLLMColocateThread(QThread):
         '}]}'
     )
 
-    def __init__(self, elem_features: list, elem_names: list):
+    def __init__(self, elem_features: list, elem_names: list, sample_context: str = ""):
         super().__init__()
         self._elem_features = elem_features
         self._elem_names = elem_names
+        self._sample_context = sample_context.strip()
         self._provider = _get_provider(_active_model)
         self._model = _active_model
         self._key = _get_key(self._provider) or ""
@@ -2172,6 +2173,9 @@ class _LocateLLMColocateThread(QThread):
             "Bounding boxes are fractional coordinates (0.0–1.0), (0,0)=top-left, (1,1)=bottom-right.",
             "",
         ]
+        if self._sample_context:
+            lines.insert(0, f"Sample context provided by the user: {self._sample_context}. Use this to inform your material suggestions and reasoning.")
+            lines.insert(1, "")
         for i, (name, feats) in enumerate(zip(self._elem_names, self._elem_features)):
             lines.append(f"Element {i+1} = {name}:  ({len(feats)} feature(s))")
             for f in feats:
@@ -2373,6 +2377,15 @@ class _LocateTab(QWidget):
         layout.addWidget(self._preset_widget)
 
         self._active_prompt = LOCATE_SYSTEM_PROMPT
+
+        # Sample context
+        ctx_lbl = QLabel("Optional Sample Context:")
+        ctx_lbl.setStyleSheet("font-size: 11px; color: #aaa; margin-top: 4px;")
+        layout.addWidget(ctx_lbl)
+        self._sample_context_edit = QPlainTextEdit()
+        self._sample_context_edit.setFixedHeight(52)
+        self._sample_context_edit.setStyleSheet("font-size: 11px;")
+        layout.addWidget(self._sample_context_edit)
 
         # Floating hover tooltip
         self._hover_tooltip = QLabel(self)
@@ -3625,7 +3638,8 @@ class _LocateTab(QWidget):
                 self.status_label.setText("LLM analyzing co-locations from VLM results...")
                 self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
                 self._multi_colocate_thread = _LocateLLMColocateThread(
-                    self._multi_elem_features, self._multi_elem_names)
+                    self._multi_elem_features, self._multi_elem_names,
+                    sample_context=self._sample_context_edit.toPlainText().strip())
                 self._multi_colocate_thread.result.connect(self._on_multi_llm_colocate_result)
             else:
                 self.status_label.setText("Running multi-element co-location analysis...")
@@ -3646,7 +3660,9 @@ class _LocateTab(QWidget):
             self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
             labels = self._get_elem_labels()
             elem_features = [self._xrf_r_features, self._xrf_g_features, self._xrf_b_features]
-            self._colocate_thread = _LocateLLMColocateThread(elem_features, labels)
+            self._colocate_thread = _LocateLLMColocateThread(
+                elem_features, labels,
+                sample_context=self._sample_context_edit.toPlainText().strip())
             self._colocate_thread.result.connect(self._on_llm_colocate_result)
         else:
             self.status_label.setText("Running co-location analysis...")
@@ -3699,6 +3715,9 @@ class _LocateTab(QWidget):
         n = data.get("total_zones", len(zones))
         data["mode"] = "triple"
         data["method"] = "llm"
+        ctx = self._sample_context_edit.toPlainText().strip()
+        if ctx:
+            data["sample_context"] = ctx
         # Strip color suffix from element names (e.g. "Fe (Red)" → "Fe")
         import re
         _strip = lambda s: re.sub(r'\s*\([^)]+\)\s*$', '', s).strip()
@@ -3732,6 +3751,9 @@ class _LocateTab(QWidget):
         n = data.get("total_zones", len(zones))
         data["mode"] = "multi"
         data["method"] = "llm"
+        ctx = self._sample_context_edit.toPlainText().strip()
+        if ctx:
+            data["sample_context"] = ctx
         ref_path = pathlib.Path(self._multi_dir_path)
         json_path = ref_path / f"{ref_path.name}_multi_llm_colocate.json"
         with open(json_path, "w") as f:
@@ -3761,6 +3783,10 @@ class _LocateTab(QWidget):
         # Append below existing triple-features content so both are scrollable
         sep = "\n\n" + "─" * 40 + "\n"
         lines = [f"CO-LOCATION ANALYSIS  —  {json_path.name}", ""]
+        ctx = self._sample_context_edit.toPlainText().strip()
+        if ctx:
+            lines.append(f"Sample context: {ctx}")
+            lines.append("")
         for z in zones:
             elem_str = " + ".join(z.get("elements", []))
             lines.append(f"Zone {z['id']}: {elem_str}")
