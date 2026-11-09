@@ -21,6 +21,8 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 VLM_MAX_DIM = 1024  # matches _VLM_MAX_DIM in llm_json_maker.py
+# ~80–100 tokens per box → 8k allows roughly 80–100 features before the reply is cut off
+LOCATE_MAX_TOKENS = 8192
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
@@ -272,11 +274,82 @@ def apply_circles_transform(arr: np.ndarray, circle_color=(255, 0, 0)) -> np.nda
     return out
 
 
+# ── Emoji marker transform (benchmark variants) ───────────────────────────────
+
+EMOJI_MARKERS = {"flower": "\U0001F338", "car": "\U0001F697"}  # 🌸 🚗
+EMOJI_FONT_PATHS = [
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+]
+_EMOJI_SPRITE_CACHE: dict = {}
+
+
+def _emoji_sprite(char: str) -> np.ndarray:
+    """Render an emoji once to a tightly cropped RGBA uint8 array (cached)."""
+    if char in _EMOJI_SPRITE_CACHE:
+        return _EMOJI_SPRITE_CACHE[char]
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = None
+    for fp in EMOJI_FONT_PATHS:
+        if os.path.exists(fp):
+            # Noto Color Emoji is a bitmap font that only renders at size 109
+            font = ImageFont.truetype(fp, 109)
+            break
+    if font is None:
+        raise RuntimeError(f"No emoji font found (looked in {EMOJI_FONT_PATHS})")
+    canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+    ImageDraw.Draw(canvas).text((10, 10), char, font=font, embedded_color=True)
+    canvas = canvas.crop(canvas.getbbox())
+    sprite = np.array(canvas)
+    _EMOJI_SPRITE_CACHE[char] = sprite
+    return sprite
+
+
+def apply_emoji_transform(arr: np.ndarray, marker: str) -> np.ndarray:
+    """Same blob finding + sizing as apply_circles_transform, but stamps an emoji per blob.
+
+    Input: uint8 grayscale (2-D). Returns uint8 RGB (3-D) on a white background.
+    marker is a key of EMOJI_MARKERS ("flower" or "car").
+    """
+    if arr.ndim != 2:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    sprite = _emoji_sprite(EMOJI_MARKERS[marker])
+    blurred = cv2.GaussianBlur(arr, (3, 3), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = np.full((*arr.shape, 3), 255, dtype=np.float32)
+    H, W = arr.shape
+    for cnt in contours:
+        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+        r = max(r, 3.0) * 1.3  # identical sizing to the circle variant
+        d = max(2, int(round(2 * r)))
+        sp = cv2.resize(sprite, (d, d), interpolation=cv2.INTER_AREA).astype(np.float32)
+        x0, y0 = int(cx) - d // 2, int(cy) - d // 2
+        # clip sprite to image bounds
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        dx0, dy0 = max(0, x0), max(0, y0)
+        dx1, dy1 = min(W, x0 + d), min(H, y0 + d)
+        if dx1 <= dx0 or dy1 <= dy0:
+            continue
+        patch = sp[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)]
+        alpha = patch[..., 3:4] / 255.0
+        region = out[dy0:dy1, dx0:dx1]
+        out[dy0:dy1, dx0:dx1] = region * (1 - alpha) + patch[..., :3] * alpha
+    return out.clip(0, 255).astype(np.uint8)
+
+
 def encode_image_for_vlm(path, max_dim: int = VLM_MAX_DIM, dilate_ksize: int = 0,
                           normalize: bool = True, grid_overlay: bool = False,
                           upscale: bool = False, colormap: bool = False,
-                          red_circles: bool = False, circle_color=(255, 0, 0)) -> str:
-    """Load image, optionally preprocess, downsample to max_dim, return base64-PNG string."""
+                          red_circles: bool = False, circle_color=(255, 0, 0),
+                          emoji_marker: "str | None" = None, clahe: bool = True) -> str:
+    """Load image, optionally preprocess, downsample to max_dim, return base64-PNG string.
+
+    emoji_marker ("flower" / "car") stamps emoji instead of circles; ignored if red_circles.
+    clahe=False skips contrast enhancement (grayscale stays min-max scaled only).
+    """
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
     if arr is None:
         raise ValueError(f"Could not read image: {path}")
@@ -301,17 +374,24 @@ def encode_image_for_vlm(path, max_dim: int = VLM_MAX_DIM, dilate_ksize: int = 0
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
         rgb = apply_circles_transform(arr, circle_color=circle_color)
         arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    elif emoji_marker:
+        if arr.ndim != 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        rgb = apply_emoji_transform(arr, emoji_marker)
+        arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     else:
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        _clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)) if clahe else None
         if arr.ndim == 2:
-            arr = clahe.apply(arr)
+            if _clahe is not None:
+                arr = _clahe.apply(arr)
             if colormap:
                 arr = cv2.applyColorMap(arr, cv2.COLORMAP_INFERNO)
             else:
                 arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
         else:
             lab = cv2.cvtColor(arr, cv2.COLOR_BGR2LAB)
-            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            if _clahe is not None:
+                lab[:, :, 0] = _clahe.apply(lab[:, :, 0])
             arr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     if grid_overlay:
         arr = draw_coordinate_grid(arr)
@@ -327,8 +407,8 @@ def encode_image_for_vlm(path, max_dim: int = VLM_MAX_DIM, dilate_ksize: int = 0
 
 # ── JSON parsing ───────────────────────────────────────────────────────────────
 
-def parse_locate_json(content: str) -> dict:
-    """Parse VLM feature-location JSON response, with truncation recovery."""
+def parse_locate_json_status(content: str) -> "tuple[dict, str]":
+    """Like parse_locate_json, also returns 'ok' | 'recovered' (truncated JSON salvaged) | 'failed'."""
     if "```" in content:
         lines = content.splitlines()
         inner = []
@@ -347,7 +427,7 @@ def parse_locate_json(content: str) -> dict:
         content = content[start:end + 1]
 
     try:
-        return json.loads(content)
+        return json.loads(content), "ok"
     except json.JSONDecodeError:
         features = []
         depth = 0
@@ -376,7 +456,13 @@ def parse_locate_json(content: str) -> dict:
                                 fid += 1
                         except Exception:
                             pass
-        return {"features": features, "total_count": len(features)}
+        return ({"features": features, "total_count": len(features)},
+                "recovered" if features else "failed")
+
+
+def parse_locate_json(content: str) -> dict:
+    """Parse VLM feature-location JSON response, with truncation recovery."""
+    return parse_locate_json_status(content)[0]
 
 
 def parse_zones(text: str) -> list:
@@ -413,54 +499,87 @@ def parse_responses_text(data: dict) -> str:
 
 # ── VLM feature query ──────────────────────────────────────────────────────────
 
+_TRUNCATED_REASONS = {"max_tokens", "length", "max_output_tokens"}
+
+
+def _fill_meta(meta, provider: str, data: dict, text: str):
+    """Record stop reason, truncation and token usage from a raw API response (provider-specific shapes)."""
+    if meta is None:
+        return
+    if provider == "anthropic":
+        stop = data.get("stop_reason")
+        u = data.get("usage") or {}
+        tin, tout = u.get("input_tokens"), u.get("output_tokens")
+    elif provider == "openai" and "choices" in data:
+        stop = (data.get("choices") or [{}])[0].get("finish_reason")
+        u = data.get("usage") or {}
+        tin, tout = u.get("prompt_tokens"), u.get("completion_tokens")
+    elif provider == "openai":  # Responses API
+        stop = (data.get("incomplete_details") or {}).get("reason") or data.get("status")
+        u = data.get("usage") or {}
+        tin, tout = u.get("input_tokens"), u.get("output_tokens")
+    else:  # ollama
+        stop = data.get("done_reason")
+        tin, tout = data.get("prompt_eval_count"), data.get("eval_count")
+    meta.update(stop_reason=stop, truncated=stop in _TRUNCATED_REASONS,
+                input_tokens=tin, output_tokens=tout, text=text)
+
+
+def _anthropic_text(data: dict) -> str:
+    """First text block — skips thinking blocks that thinking-on models put first."""
+    for block in data.get("content") or []:
+        if block.get("type") == "text":
+            return block.get("text", "")
+    return ""
+
+
+def _post(url: str, payload: dict, headers: dict) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                 headers=headers)
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        return json.loads(resp.read())
+
+
 def query_vlm_features(img_b64: str, system_prompt: str, model: str, provider: str,
                         key: str = "",
                         anthropic_url: str = ANTHROPIC_API_URL,
-                        openai_url: str = OPENAI_API_URL) -> list:
+                        openai_url: str = OPENAI_API_URL,
+                        meta: "dict | None" = None) -> list:
     """Send a single image to the VLM and return a list of feature dicts.
 
     Detects the OpenAI Responses API (NSLS-II APIM) from openai_url ending with /responses.
+    If `meta` is a dict it is filled with stop_reason, truncated, input/output tokens,
+    parse_status ('ok' | 'recovered' | 'failed') and the raw reply text.
     """
     if provider == "anthropic":
-        payload = json.dumps({
+        data = _post(anthropic_url, {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": LOCATE_MAX_TOKENS,
             "system": system_prompt,
             "messages": [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64",
                                               "media_type": "image/png", "data": img_b64}},
                 {"type": "text", "text": LOCATE_USER_PROMPT},
             ]}],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            anthropic_url, data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": key,
-                     "anthropic-version": ANTHROPIC_API_VERSION})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        text = (data.get("content") or [{}])[0].get("text", "{}")
-        return parse_locate_json(text).get("features", [])
-
-    if provider == "openai":
+        }, {"Content-Type": "application/json", "x-api-key": key,
+            "anthropic-version": ANTHROPIC_API_VERSION})
+        text = _anthropic_text(data) or "{}"
+    elif provider == "openai":
         is_responses_api = openai_url.rstrip("/").endswith("/responses")
         auth_header = {"x-api-key": key} if is_responses_api else {"Authorization": f"Bearer {key}"}
         headers = {"Content-Type": "application/json", **auth_header}
         if is_responses_api:
-            payload = json.dumps({
+            data = _post(openai_url, {
                 "model": model,
                 "instructions": system_prompt,
                 "input": [{"role": "user", "content": [
                     {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
                     {"type": "input_text", "text": LOCATE_USER_PROMPT},
                 ]}],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(openai_url, data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return parse_locate_json(parse_responses_text(data)).get("features", [])
+            }, headers)
+            text = parse_responses_text(data)
         else:
-            payload = json.dumps({
+            data = _post(openai_url, {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -469,29 +588,55 @@ def query_vlm_features(img_b64: str, system_prompt: str, model: str, provider: s
                         {"type": "text", "text": LOCATE_USER_PROMPT},
                     ]},
                 ],
-            }, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(openai_url, data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read())
-            return parse_locate_json(
-                data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            ).get("features", [])
+            }, headers)
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+    else:  # Ollama
+        data = _post(OLLAMA_URL, {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": LOCATE_USER_PROMPT, "images": [img_b64]},
+            ],
+            "stream": False,
+            "format": "json",
+        }, {"Content-Type": "application/json"})
+        text = data.get("message", {}).get("content", "{}")
 
-    # Ollama
-    payload = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": LOCATE_USER_PROMPT, "images": [img_b64]},
-        ],
-        "stream": False,
-        "format": "json",
-    }, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(OLLAMA_URL, data=payload,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        raw = json.loads(resp.read())
-    return parse_locate_json(raw.get("message", {}).get("content", "{}")).get("features", [])
+    parsed, status = parse_locate_json_status(text or "{}")
+    _fill_meta(meta, provider, data, text)
+    if meta is not None:
+        meta["parse_status"] = status
+    return parsed.get("features", [])
+
+
+def query_llm_text(system: str, prompt: str, model: str, provider: str, key: str = "",
+                   anthropic_url: str = ANTHROPIC_API_URL, openai_url: str = OPENAI_API_URL,
+                   max_tokens: int = 16384, meta: "dict | None" = None) -> str:
+    """Text-only LLM call (system + user prompt) → reply text. Fills `meta` like query_vlm_features."""
+    if provider == "anthropic":
+        data = _post(anthropic_url, {
+            "model": model, "max_tokens": max_tokens, "system": system,
+            "messages": [{"role": "user", "content": prompt}],
+        }, {"Content-Type": "application/json", "x-api-key": key,
+            "anthropic-version": ANTHROPIC_API_VERSION})
+        text = _anthropic_text(data) or "{}"
+    elif provider == "openai":
+        is_responses_api = openai_url.rstrip("/").endswith("/responses")
+        auth_header = {"x-api-key": key} if is_responses_api else {"Authorization": f"Bearer {key}"}
+        data = _post(openai_url, {
+            "model": model, "max_tokens": max_tokens,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        }, {"Content-Type": "application/json", **auth_header})
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+    else:  # Ollama
+        data = _post(OLLAMA_URL, {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "stream": False, "format": "json",
+        }, {"Content-Type": "application/json"})
+        text = data.get("message", {}).get("content", "{}")
+    _fill_meta(meta, provider, data, text)
+    return text
 
 
 # ── LLM co-location ────────────────────────────────────────────────────────────
@@ -540,55 +685,13 @@ def build_colocate_prompt(elem_features: list, elem_names: list,
 def query_llm_colocate(prompt: str, model: str, provider: str,
                         key: str = "",
                         anthropic_url: str = ANTHROPIC_API_URL,
-                        openai_url: str = OPENAI_API_URL) -> list:
+                        openai_url: str = OPENAI_API_URL,
+                        meta: "dict | None" = None) -> list:
     """Send co-location prompt to LLM and return list of zone dicts."""
-    if provider == "anthropic":
-        payload = json.dumps({
-            "model": model,
-            "max_tokens": 16384,
-            "system": LLM_COLOCATE_SYSTEM,
-            "messages": [{"role": "user", "content": prompt}],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            anthropic_url, data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": key,
-                     "anthropic-version": ANTHROPIC_API_VERSION})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        text = (data.get("content") or [{}])[0].get("text", "{}")
-        return parse_zones(text)
-
-    if provider == "openai":
-        is_responses_api = openai_url.rstrip("/").endswith("/responses")
-        auth_header = {"x-api-key": key} if is_responses_api else {"Authorization": f"Bearer {key}"}
-        headers = {"Content-Type": "application/json", **auth_header}
-        payload = json.dumps({
-            "model": model,
-            "max_tokens": 16384,
-            "messages": [
-                {"role": "system", "content": LLM_COLOCATE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(openai_url, data=payload, headers=headers)
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            data = json.loads(resp.read())
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        return parse_zones(text)
-
-    # Ollama
-    payload = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": LLM_COLOCATE_SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "format": "json",
-    }, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(OLLAMA_URL, data=payload,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        raw = json.loads(resp.read())
-    return parse_zones(raw.get("message", {}).get("content", "{}"))
+    text = query_llm_text(LLM_COLOCATE_SYSTEM, prompt, model, provider, key,
+                          anthropic_url=anthropic_url, openai_url=openai_url,
+                          max_tokens=16384, meta=meta)
+    zones = parse_zones(text)
+    if meta is not None:
+        meta["parse_status"] = "ok" if (zones or '"zones"' in text) else "failed"
+    return zones

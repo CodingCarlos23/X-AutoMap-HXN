@@ -60,9 +60,34 @@
     .card > p { color: var(--gray-60); margin-bottom: 1rem; font-size: 0.95rem; }
 
     .diagram-wrap {
-      background: #fafafa; border: 1px solid var(--gray-10); border-radius: 4px;
-      padding: 2rem 1rem; margin: 1.25rem 0; overflow-x: auto; text-align: center;
+      background-color: #fbfcfd;
+      background-image: radial-gradient(#d5dbe3 1px, transparent 1px);
+      background-size: 18px 18px;
+      border: 1px solid var(--gray-10); border-radius: 8px;
+      padding: 2rem 1rem 1.25rem; margin: 1.25rem 0; overflow-x: auto; text-align: center;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.04);
     }
+    /* Mermaid polish */
+    .mermaid { visibility: hidden; }
+    .mermaid[data-processed="true"] { visibility: visible; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    .mermaid .node rect, .mermaid .node polygon, .mermaid .node path,
+    .mermaid .node circle, .mermaid .node ellipse {
+      filter: drop-shadow(0 2px 3px rgba(16, 37, 66, 0.14));
+    }
+    .mermaid .cluster rect { filter: none; }
+    .mermaid .cluster-label, .mermaid .cluster-label span {
+      font-weight: 700; font-size: 11.5px; letter-spacing: 0.09em;
+    }
+    .mermaid .nodeLabel b { font-size: 14px; }
+    .mermaid .nodeLabel small { display: inline-block; margin-top: 2px; font-size: 11.5px; opacity: 0.78; font-family: var(--font-mono); }
+    .mermaid .edgeLabel, .mermaid .edgeLabel p { font-size: 12px; font-weight: 600; }
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; justify-content: center;
+      margin-top: 1rem; font-size: 0.78rem; color: var(--gray-60);
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .legend svg { width: 22px; height: 16px; }
 
     .step-list { list-style: none; counter-reset: steps; }
     .step-list li {
@@ -143,6 +168,7 @@
     <a href="index.html">Home</a>
     <a href="vlm_workflow.html" class="active">VLM/LLM Workflow</a>
     <a href="automap.html">AutoMap Pipeline</a>
+    <a href="benchmarks.html">Benchmarks<span style="display:inline-block;margin-left:0.35rem;padding:0.05rem 0.4rem;border-radius:3px;background:#ffbe2e;color:#1b1b1b;font-size:0.65rem;font-weight:800;letter-spacing:0.06em;vertical-align:1px">BETA</span></a>
   </div>
 </nav>
 
@@ -158,39 +184,101 @@
     <p>From raw element TIFFs to structured JSON output and composite images.</p>
     <div class="diagram-wrap">
       <pre class="mermaid">
-flowchart TD
-    A["XRF Element TIFFs\nFe.tiff  O.tiff  Si.tiff  ..."]
+flowchart TB
+    A@{ shape: docs, label: "<b>XRF Element TIFFs</b><br/><small>Fe · O · Si · …</small>" }
 
-    A --> B["OpenCV Preprocessing\nnormalize · CLAHE · upscale 1092 px\ninferno colormap · optional dilation"]
-
-    B --> PAR
-
-    subgraph PAR ["Parallel VLM Calls  —  ThreadPoolExecutor"]
+    subgraph PRE["① OPENCV PREPROCESS — encode&#95;image&#95;for&#95;vlm()"]
         direction LR
-        C1["VLM\nElement 1\nbboxes"]
-        C2["VLM\nElement 2\nbboxes"]
-        C3["VLM\nElement N\nbboxes"]
+        P1("normalize") e2@==> P2("upscale<br/>1092 px") e3@==> P3("dilate<br/><small>single-image mode only</small>") e4@==> MK{"<b>Marker<br/>mode?</b>"}
+        MK e5@== circles ==> CIR("<b>★ Colored circles on white</b><br/><small>blur → Otsu → contours<br/>current best method</small>")
+        MK -- default --> P4("CLAHE") -.-> P5("inferno<br/><small>optional</small>")
     end
 
-    PAR --> D["Merge Results\n{ elem_features, total_count, duration }"]
+    A e1@==> PRE
+    PRE e6@==> FORK@{ shape: fork }
 
-    D --> E["Build Co-location Prompt\nbuild_colocate_prompt()\n+ optional sample_context"]
+    subgraph PAR["② PARALLEL VLM CALLS — ThreadPoolExecutor"]
+        direction LR
+        C1("<b>VLM</b><br/><small>Element 1 → bboxes</small>")
+        C2("<b>VLM</b><br/><small>Element 2 → bboxes</small>")
+        C3("<b>VLM</b><br/><small>Element N → bboxes</small>")
+    end
 
-    E --> F["LLM Co-location Analysis\nquery_llm_colocate()\nIdentifies spatial overlaps\nSuggests material phases"]
+    FORK --> C1 & C2 & C3
+    C1 & C2 & C3 --> JOIN@{ shape: fork }
 
-    F --> OUT["Save Outputs"]
+    subgraph REASON["③ LLM REASONING"]
+        direction TB
+        D[("<b>Merged features</b><br/><small>elem_features · total_count</small>")]
+        CTX@{ shape: lean-l, label: "<b>Sample context</b><br/><small>optional user note</small>" }
+        E("<b>Co-location Prompt</b><br/><small>build_colocate_prompt()</small>")
+        F{{"<b>LLM Co-location Analysis</b><br/><small>query_llm_colocate()<br/>overlaps → material phases</small>"}}
+        D e8@==> E
+        CTX -.-> E
+        E e9@==> F
+    end
 
-    OUT --> O1["*_multi_features.json\nPer-element VLM detections"]
-    OUT --> O2["*_multi_llm_colocate.json\nOverlap zones + reasoning"]
-    OUT --> O3["Composite PNGs\nelements + co-locate overlays"]
+    JOIN e7@==> D
 
-    style A   fill:#e8f4fd,stroke:#005ea2,color:#1a4480
-    style B   fill:#fff3e0,stroke:#e65100,color:#1a4480
-    style D   fill:#e8f5e9,stroke:#2e7d32,color:#1a4480
-    style E   fill:#f3e5f5,stroke:#6a1b9a,color:#1a4480
-    style F   fill:#e8eaf6,stroke:#283593,color:#1a4480
-    style OUT fill:#fce4ec,stroke:#880e4f,color:#1a4480
+    subgraph OUT["④ OUTPUTS"]
+        direction LR
+        O1@{ shape: doc, label: "<b>*_multi_features.json</b><br/><small>per-element detections</small>" }
+        O2@{ shape: doc, label: "<b>*_multi_llm_colocate.json</b><br/><small>zones + reasoning</small>" }
+        O3@{ shape: docs, label: "<b>Composite PNGs</b><br/><small>elements · co-locate</small>" }
+    end
+
+    D -.-> O1
+    F ==> O2
+    F ==> O3
+
+    e1@{ animate: true }
+    e2@{ animate: true }
+    e3@{ animate: true }
+    e4@{ animate: true }
+    e5@{ animate: true }
+    e6@{ animate: true }
+    e7@{ animate: true }
+    e8@{ animate: true }
+    e9@{ animate: true }
+
+    classDef input  fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px,color:#1b5e20
+    classDef proc   fill:#ffffff,stroke:#005ea2,stroke-width:1.5px,color:#1a4480
+    classDef model  fill:#eef1fb,stroke:#3f51b5,stroke-width:1.5px,color:#1a237e
+    classDef store  fill:#e8f4fd,stroke:#005ea2,stroke-width:2px,color:#1a4480
+    classDef phase  fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1.5px,color:#4a148c
+    classDef spatial fill:#fff3e0,stroke:#e65100,stroke-width:1.5px,color:#7a2e00
+    classDef decide fill:#fffde7,stroke:#b28704,stroke-width:1.5px,color:#5d4300
+    classDef out    fill:#fce4ec,stroke:#880e4f,stroke-width:1.5px,color:#5c0a33
+    classDef ai     fill:#1a4480,stroke:#0b2a55,stroke-width:1.5px,color:#ffffff
+    classDef opt    fill:#ffffff,stroke:#8a929c,stroke-width:1.5px,stroke-dasharray:5 4,color:#565c65
+    classDef bar    fill:#1a4480,stroke:#1a4480
+    class A input
+    class P1,P2,P4 proc
+    class P3,P5 opt
+    class MK decide
+    class CIR best
+    classDef best fill:#e8f5e9,stroke:#2e7d32,stroke-width:2.5px,color:#1b5e20
+    class C1,C2,C3 model
+    class FORK,JOIN bar
+    class D store
+    class CTX opt
+    class E phase
+    class F ai
+    class O1,O2,O3 out
+    style PRE fill:#fffaf3,stroke:#e65100,stroke-width:1px,stroke-dasharray:6 4,color:#e65100
+    style PAR fill:#f5f7fd,stroke:#3f51b5,stroke-width:1px,stroke-dasharray:6 4,color:#3f51b5
+    style REASON fill:#faf5fc,stroke:#6a1b9a,stroke-width:1px,stroke-dasharray:6 4,color:#6a1b9a
+    style OUT fill:#fdf5f8,stroke:#880e4f,stroke-width:1px,stroke-dasharray:6 4,color:#880e4f
       </pre>
+    </div>
+    <div class="legend">
+      <span><svg viewBox="0 0 22 16"><path d="M2 2h18v10q-4.5 4-9 0t-9 0z" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>File / artifact</span>
+      <span><svg viewBox="0 0 22 16"><ellipse cx="11" cy="3.5" rx="8" ry="2.5" fill="#fff" stroke="#565c65" stroke-width="1.4"/><path d="M3 3.5v9q8 5 16 0v-9" fill="none" stroke="#565c65" stroke-width="1.4"/></svg>Data store</span>
+      <span><svg viewBox="0 0 22 16"><rect x="2" y="2" width="18" height="12" rx="3" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>Process</span>
+      <span><svg viewBox="0 0 22 16"><path d="M6 2h10l4 6-4 6H6L2 8z" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>Dispatcher</span>
+      <span><svg viewBox="0 0 22 16"><path d="M11 1l9 7-9 7-9-7z" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>Decision</span>
+      <span><svg viewBox="0 0 22 16"><path d="M1 8h20" stroke="#005ea2" stroke-width="2" stroke-dasharray="4 3"/></svg>Main path (animated)</span>
+      <span><svg viewBox="0 0 22 16"><path d="M1 8h20" stroke="#8a929c" stroke-width="1.6" stroke-dasharray="2 3"/></svg>Optional / one-of</span>
     </div>
   </div>
 
@@ -207,7 +295,10 @@ flowchart TD
       <li>
         <div class="step-content">
           <h3>OpenCV Preprocessing</h3>
-          <p>Each TIFF is preprocessed before being sent to the VLM. Options: <code>normalize</code> (min-max to 8-bit), <code>CLAHE</code> (contrast-limited adaptive histogram equalization), <code>upscale</code> to 1092 px, <code>inferno colormap</code> for perceptual contrast, <code>dilation</code> to expand faint blobs. Implemented in <code>vlm_pipeline.py → preprocess_tiff()</code>.</p>
+          <p>Each TIFF is preprocessed by <code>vlm_pipeline.py → encode_image_for_vlm()</code> before being sent to the VLM. Common steps, in order: <code>normalize</code> (min-max to 8-bit) → <code>upscale</code> to 1092 px → <code>dilate</code>. Dilation is only applied in single-image Feature Locator mode (the <em>Dilate image</em> checkbox); the multi-element / 3-element threads and the headless runner never pass a kernel size, so it is skipped in this pipeline. Then one of two marker modes:</p>
+          <p style="margin-top:0.4rem"><strong>★ Colored circles on white (current best):</strong> Gaussian blur → Otsu threshold → contours → each feature drawn as a filled circle on a white background, with radius <code>max(r, 3) × 1.3</code> — so small blobs are enlarged without a separate dilation step. This gives the VLM clean, high-contrast targets and skips CLAHE / colormap entirely. Enabled with the <em>Colored circles on white</em> checkbox (GUI) or <code>circles: true</code> (headless, default).</p>
+          <p style="margin-top:0.4rem"><strong>Default:</strong> <code>CLAHE</code> (contrast-limited adaptive histogram equalization), optionally followed by the <code>inferno</code> colormap. Usually the pipeline stops at CLAHE.</p>
+          <p style="margin-top:0.4rem">Emoji markers (flower / car) also exist as a benchmark-only variant.</p>
         </div>
       </li>
       <li>
@@ -237,7 +328,7 @@ flowchart TD
       <li>
         <div class="step-content">
           <h3>Save Outputs</h3>
-          <p>All results are saved to the TIFF folder automatically — <code>*_multi_features.json</code>, <code>*_multi_llm_colocate.json</code>, and four composite PNGs (elements + co-locate, each with box and circle variants).</p>
+          <p>The GUI saves everything into a <code>&lt;dir&gt;_vlm/</code> subfolder next to the TIFFs — <code>*_multi_features.json</code>, <code>*_multi_llm_colocate.json</code>, and up to four composite PNGs (elements + co-locate, each with box and circle variants). The headless runner uses the same file names but writes to the config's <code>output_dir</code> (default: the input TIFF folder).</p>
         </div>
       </li>
     </ol>
@@ -250,42 +341,81 @@ flowchart TD
     <div class="diagram-wrap">
       <pre class="mermaid">
 flowchart LR
-    M["Model name\nselected in UI"]
+    M@{ shape: stadium, label: "<b>Model name</b><br/><small>selected in UI</small>" }
+    R{"<b>Provider?</b>"}
+    M ==> R
 
-    M -->|"claude-*"| A["Anthropic API\nANTHROPIC_API_KEY"]
-    M -->|"gpt-*  o3  o4-*"| B["OpenAI API\nOPENAI_API_KEY"]
-    M -->|"everything else"| C["Ollama\nlocalhost:11434"]
+    subgraph CLOUD["☁  CLOUD"]
+        direction TB
+        A("<b>Anthropic API</b><br/><small>claude-*</small>")
+        B("<b>OpenAI API</b><br/><small>gpt-* · o3 · o4-*</small>")
+    end
+    subgraph LOCAL["⌂  LOCAL"]
+        C("<b>Ollama</b><br/><small>localhost:11434</small>")
+    end
 
-    A & B --> K["API Key Resolution"]
-    K --> K1["1  Env variable\n$ANTHROPIC_API_KEY\n$OPENAI_API_KEY"]
-    K --> K2["2  GPG decrypt\n~/.private_env.gpg"]
-    K --> K3["3  Manual entry\nModel tab in UI"]
+    R -- "claude-*" --> A
+    R -- "gpt-* · o3 · o4-*" --> B
+    R -- "anything else" --> C
 
-    style A fill:#fff3e0,stroke:#e65100,color:#1a4480
-    style B fill:#e8f5e9,stroke:#2e7d32,color:#1a4480
-    style C fill:#f3e5f5,stroke:#6a1b9a,color:#1a4480
+    subgraph KEYS["🔑  API KEY RESOLUTION — first match wins"]
+        direction TB
+        K1("<b>1 · Environment</b><br/><small>$ANTHROPIC_API_KEY<br/>$OPENAI_API_KEY</small>")
+        K2("<b>2 · GPG decrypt</b><br/><small>~/.private_env.gpg<br/>same variable names</small>")
+        K2b("<b>2b · NSLS-II APIM proxy</b><br/><small>AIFAPIM_API_KEY + AIFAPIM_HOST<br/>reroutes API URL via proxy</small>")
+        K3("<b>3 · Manual entry</b><br/><small>Model tab · session only</small>")
+        K1 -. missing .-> K2 -. "no direct key" .-> K2b -. missing .-> K3
+    end
+
+    A & B ==> KEYS
+
+    classDef input  fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px,color:#1b5e20
+    classDef proc   fill:#ffffff,stroke:#005ea2,stroke-width:1.5px,color:#1a4480
+    classDef model  fill:#eef1fb,stroke:#3f51b5,stroke-width:1.5px,color:#1a237e
+    classDef store  fill:#e8f4fd,stroke:#005ea2,stroke-width:2px,color:#1a4480
+    classDef phase  fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1.5px,color:#4a148c
+    classDef spatial fill:#fff3e0,stroke:#e65100,stroke-width:1.5px,color:#7a2e00
+    classDef decide fill:#fffde7,stroke:#b28704,stroke-width:1.5px,color:#5d4300
+    classDef out    fill:#fce4ec,stroke:#880e4f,stroke-width:1.5px,color:#5c0a33
+    classDef ai     fill:#1a4480,stroke:#0b2a55,stroke-width:1.5px,color:#ffffff
+    classDef opt    fill:#ffffff,stroke:#8a929c,stroke-width:1.5px,stroke-dasharray:5 4,color:#565c65
+    classDef bar    fill:#1a4480,stroke:#1a4480
+    classDef anth fill:#fff3e0,stroke:#d35400,stroke-width:1.5px,color:#7a2e00
+    classDef oai  fill:#e6f6f1,stroke:#10a37f,stroke-width:1.5px,color:#0a5c47
+    classDef olla fill:#f3e5f5,stroke:#7b2d8b,stroke-width:1.5px,color:#4a148c
+    class M input
+    class R decide
+    class A anth
+    class B oai
+    class C olla
+    class K1,K2,K3 proc
+    class K2b opt
+    style CLOUD fill:#f7f9fb,stroke:#565c65,stroke-width:1px,stroke-dasharray:6 4,color:#565c65
+    style LOCAL fill:#f7f9fb,stroke:#565c65,stroke-width:1px,stroke-dasharray:6 4,color:#565c65
+    style KEYS fill:#f4f8fc,stroke:#005ea2,stroke-width:1px,stroke-dasharray:6 4,color:#005ea2
       </pre>
     </div>
     <div class="provider-row">
       <div class="provider-badge">
         <div class="dot dot-anthropic"></div>
-        <div><strong>Anthropic (Claude)</strong><span>claude-sonnet-5, claude-opus-5</span></div>
+        <div><strong>Anthropic (Claude)</strong><span>claude-sonnet-4-6, claude-opus-4-5, claude-fable-5</span></div>
       </div>
       <div class="provider-badge">
         <div class="dot dot-openai"></div>
-        <div><strong>OpenAI</strong><span>gpt-4o, gpt-4.1, o3, o4-*</span></div>
+        <div><strong>OpenAI</strong><span>gpt-4.1, gpt-5.5, gpt-5.6-terra, gpt-5.6-sol (o3 / o4-* also routed)</span></div>
       </div>
       <div class="provider-badge">
         <div class="dot dot-ollama"></div>
-        <div><strong>Ollama (local)</strong><span>llava, mistral, llama3, ...</span></div>
+        <div><strong>Ollama (local)</strong><span>qwen2.5vl:7b (GUI default), qwen2.5vl:3b / 72b, minicpm-v:8b, llava-llama3:8b</span></div>
       </div>
     </div>
+    <p style="margin-top:0.9rem;font-size:0.85rem;color:var(--gray-60)">Models listed in the picker (<code>KNOWN_MODELS</code> in <code>llm_json_maker.py</code>); any other name can be typed in. The headless runner defaults to <code>claude-sonnet-4-6</code>. If the GPG file has no direct key but does contain <code>AIFAPIM_API_KEY</code> and <code>AIFAPIM_HOST</code>, requests go through the NSLS-II APIM proxy (<code>{host}/anthropic/v1/messages</code> or <code>{host}/openai/v1/responses</code>). In the GUI, <code>AIFAPIM_CLAUDE_MODEL</code> / <code>AIFAPIM_CODEX_MODEL</code> in the same file add those models to the picker.</p>
   </div>
 
   <!-- OUTPUT FILES -->
   <div class="card">
     <h2>Output Files</h2>
-    <p>All outputs are written to the input TIFF directory, using the folder name as the filename stem.</p>
+    <p>The GUI writes outputs to <code>&lt;tiff folder&gt;/&lt;tiff folder name&gt;_vlm/</code>, using the folder name as the filename stem. The headless runner writes to <code>output_dir</code> from its config (default: the input TIFF folder).</p>
     <div class="output-grid">
       <div class="output-card">
         <div class="fname">*_multi_features.json</div>
@@ -325,7 +455,7 @@ flowchart LR
         <tr>
           <td><code>vlm_pipeline.py</code></td>
           <td>Core VLM/LLM API calls and prompt construction. Provider-agnostic.</td>
-          <td><code>preprocess_tiff()</code>, <code>query_vlm_features()</code>, <code>build_colocate_prompt()</code>, <code>query_llm_colocate()</code></td>
+          <td><code>encode_image_for_vlm()</code>, <code>apply_circles_transform()</code>, <code>query_vlm_features()</code>, <code>build_colocate_prompt()</code>, <code>query_llm_colocate()</code></td>
         </tr>
         <tr>
           <td><code>llm_json_maker.py</code></td>
@@ -334,8 +464,8 @@ flowchart LR
         </tr>
         <tr>
           <td><code>feature_locator_headless.py</code></td>
-          <td>CLI / headless version of the same pipeline. No GUI required.</td>
-          <td><code>run_multi_element_pipeline()</code></td>
+          <td>CLI / headless version of the same pipeline. No GUI required. Run with <code>feature-locator-headless config.json</code> or <code>python -m automap_hxn.feature_locator_headless config.json</code>.</td>
+          <td><code>run(config)</code>, <code>main()</code></td>
         </tr>
       </tbody>
     </table>
@@ -345,18 +475,22 @@ flowchart LR
 
 <footer>HXN AutoMap &mdash; Brookhaven National Laboratory</footer>
 
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid.min.js"></script>
 <script>
   mermaid.initialize({
     startOnLoad: true,
     theme: 'base',
     themeVariables: {
-      primaryColor: '#e8f4fd', primaryBorderColor: '#005ea2', primaryTextColor: '#1a4480',
-      lineColor: '#565c65', secondaryColor: '#f0f0f0', tertiaryColor: '#eff6fb',
+      fontFamily: '"Public Sans", system-ui, -apple-system, sans-serif',
+      fontSize: '14px',
+      primaryColor: '#ffffff', primaryBorderColor: '#005ea2', primaryTextColor: '#1a4480',
+      lineColor: '#6b7684', secondaryColor: '#f0f0f0', tertiaryColor: '#f7f9fb',
+      clusterBkg: '#f7f9fb', clusterBorder: '#c9d3df',
       edgeLabelBackground: '#ffffff',
     },
-    flowchart: { curve: 'basis', padding: 20 }
+    flowchart: { curve: 'basis', padding: 14, nodeSpacing: 34, rankSpacing: 46, htmlLabels: true }
   });
 </script>
+<script src="export.js"></script>
 </body>
 </html>

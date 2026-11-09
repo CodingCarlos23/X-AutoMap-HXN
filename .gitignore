@@ -198,3 +198,6 @@ CLAUDE.md
 
 # Generated test configs from the JSON Maker tab
 # configs/Generated JSONS/
+
+# Benchmark run outputs (regenerable)
+benchmarks/runs/

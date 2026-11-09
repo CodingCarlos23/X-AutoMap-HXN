@@ -1,0 +1,42 @@
+{
+  "sample_dir": "benchmarks/test_samples",
+  "elements": [],
+  "automap_config": "benchmarks/configs/live_scan_demo_2by2_3groups_intensity_filter.json",
+  "automap_raw": true,
+  "stardist": {
+    "enabled": true,
+    "model_name": "2D_versatile_fluo",
+    "prob_thresh": 0.5,
+    "nms_thresh": 0.4,
+    "min_size": 10
+  },
+  "vlm": {
+    "model": "claude-sonnet-4-6",
+    "variants": [
+      "raw",
+      "standard",
+      "circle",
+      "flower",
+      "car"
+    ],
+    "normalize": true,
+    "upscale": true,
+    "max_workers": 8,
+    "llm_colocate": true,
+    "sample_context": "urban aerosol PM",
+    "prompt_suffix": {
+      "raw": "",
+      "standard": "",
+      "circle": "",
+      "flower": "In this image each particle has been replaced by a flower emoji on a white background; treat every flower as one particle and box it.",
+      "car": "In this image each particle has been replaced by a car emoji on a white background; treat every car as one particle and box it."
+    }
+  },
+  "match_iou": 0.25,
+  "phase_match_overlap": 0.5,
+  "reconcile": {
+    "enabled": true,
+    "model": null,
+    "max_tokens": 16384
+  }
+}

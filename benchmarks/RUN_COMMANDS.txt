@@ -1,0 +1,19 @@
+HXN AutoMap — detection comparison benchmark
+=============================================
+
+Run from the repo root (~/Documents/github/X-AutoMap-HXN).
+
+1) Make sure the API key is loaded in that terminal (Claude models):
+     eval "$(gpg --quiet --batch --yes --decrypt ~/.private_env.gpg)"
+
+2) Full run (OpenCV + StarDist + VLM raw/circle/flower/car):
+     pixi run python benchmarks/run_comparison.py benchmarks/configs/compare_default.json
+
+   Local methods only (no API calls, no cost):
+     pixi run python benchmarks/run_comparison.py benchmarks/configs/compare_default.json --no-vlm
+
+3) Open the report printed at the end, e.g.:
+     xdg-open benchmarks/runs/<timestamp>_test_samples/index.html
+
+Settings live in benchmarks/configs/compare_default.json
+(VLM model, variants, prompt suffixes, StarDist params, OpenCV config path, match IoU).

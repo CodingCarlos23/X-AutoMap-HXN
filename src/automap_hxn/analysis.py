@@ -15,6 +15,68 @@ from .utils import make_json_serializable, wait_for_element_tiffs, formatted_uni
 from .export import create_rgb_tiff, create_all_elements_tiff, create_merged_boxes_tiff
 
 
+def _first_set(*values):
+    """First value that is not None — unlike `a or b`, keeps a legitimate 0."""
+    return next((v for v in values if v is not None), None)
+
+
+def build_method_params(params):
+    """Collect per-method detection kwargs from a config (top-level legacy keys as fallback).
+
+    Shared by analyze_data_local and the benchmark runner so both detect identically.
+    """
+    # Method-specific parameters from JSON config
+    detection_methods = params.get("detection_methods", {})
+    simple_methods = detection_methods.get("simple", {})
+    hough_methods = detection_methods.get("hough", {})
+    watershed_methods = detection_methods.get("watershed", {})
+    cellpose_methods = detection_methods.get("cellpose", {})
+    connected_components_methods = detection_methods.get("connected_components", {})
+    stardist_methods = detection_methods.get("stardist", {})
+
+    method_params = {
+        # Simple blob detector parameters
+        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
+        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
+        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
+        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
+        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
+    
+        # Hough circle parameters
+        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
+        'dp': hough_methods.get('dp') or params.get('hough_dp'),
+        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
+        'param1': hough_methods.get('param1') or params.get('hough_param1'),
+        'param2': hough_methods.get('param2') or params.get('hough_param2'),
+    
+        # Watershed parameters
+        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
+        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
+    
+        # Cellpose parameters
+        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
+        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
+        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
+        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
+        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
+        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
+        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
+        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
+    
+        # Connected components parameters
+        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity'),
+        # StarDist parameters
+        'model_name': stardist_methods.get('model_name'),
+        'prob_thresh': stardist_methods.get('prob_thresh'),
+        'nms_thresh': stardist_methods.get('nms_thresh'),
+        'min_size': stardist_methods.get('min_size'),
+    }
+
+    # Filter out None values to avoid overriding method defaults
+    method_params = {k: v for k, v in method_params.items() if v is not None}
+    return method_params
+
+
 def _dedup_formatted_blobs(formatted_unions, overlap_thresh):
     """Deduplicate individual blob entries (cx/cy/num_x/num_y format) by IoU and containment."""
     keys = sorted(formatted_unions, key=lambda k: formatted_unions[k]['num_x'] * formatted_unions[k]['num_y'], reverse=True)
@@ -255,59 +317,11 @@ def analyze_data_local(scan_id=None,
     element_to_color = {element: COLOR_ORDER[i] for i, element in enumerate(all_elements) if i < len(COLOR_ORDER)}
 
     segmentation = params.get("segmentation_params", {})
-    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
-    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    min_thresh = _first_set(segmentation.get("min_threshold_intensity"), params.get("min_threshold_intensity"))  # 0 is valid
+    min_area = _first_set(segmentation.get("min_threshold_area"), params.get("min_threshold_area"))  # 0 is valid
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
 
-    # Method-specific parameters from JSON config
-    detection_methods = params.get("detection_methods", {})
-    simple_methods = detection_methods.get("simple", {})
-    hough_methods = detection_methods.get("hough", {})
-    watershed_methods = detection_methods.get("watershed", {})
-    cellpose_methods = detection_methods.get("cellpose", {})
-    connected_components_methods = detection_methods.get("connected_components", {})
-    stardist_methods = detection_methods.get("stardist", {})
-    
-    method_params = {
-        # Simple blob detector parameters
-        'max_threshold': simple_methods.get('max_threshold') or params.get('simple_max_threshold'),
-        'max_area': simple_methods.get('max_area') or params.get('simple_max_area'),
-        'threshold_step': simple_methods.get('threshold_step') or params.get('simple_threshold_step'),
-        'filter_by_color': simple_methods.get('filter_by_color') or params.get('simple_filter_by_color'),
-        'filter_by_circularity': simple_methods.get('filter_by_circularity') or params.get('simple_filter_by_circularity'),
-        
-        # Hough circle parameters
-        'max_radius': hough_methods.get('max_radius') or params.get('hough_max_radius'),
-        'dp': hough_methods.get('dp') or params.get('hough_dp'),
-        'min_dist': hough_methods.get('min_dist') or params.get('hough_min_dist'),
-        'param1': hough_methods.get('param1') or params.get('hough_param1'),
-        'param2': hough_methods.get('param2') or params.get('hough_param2'),
-        
-        # Watershed parameters
-        'min_distance': watershed_methods.get('min_distance') or params.get('watershed_min_distance'),
-        'threshold_abs': watershed_methods.get('threshold_abs') or params.get('watershed_threshold_abs'),
-        
-        # Cellpose parameters
-        'diameter': cellpose_methods.get('diameter') or params.get('cellpose_diameter'),
-        'model_type': cellpose_methods.get('model_type') or params.get('cellpose_model_type'),
-        'gpu': cellpose_methods.get('gpu') or params.get('cellpose_gpu'),
-        'flow_threshold': cellpose_methods.get('flow_threshold') or params.get('cellpose_flow_threshold'),
-        'cellprob_threshold': cellpose_methods.get('cellprob_threshold') or params.get('cellpose_cellprob_threshold'),
-        'channels': cellpose_methods.get('channels') or params.get('cellpose_channels'),
-        'min_diameter': cellpose_methods.get('min_diameter') or params.get('cellpose_min_diameter'),
-        'max_diameter': cellpose_methods.get('max_diameter') or params.get('cellpose_max_diameter'),
-        
-        # Connected components parameters
-        'connectivity': connected_components_methods.get('connectivity') or params.get('connected_components_connectivity'),
-        # StarDist parameters
-        'model_name': stardist_methods.get('model_name'),
-        'prob_thresh': stardist_methods.get('prob_thresh'),
-        'nms_thresh': stardist_methods.get('nms_thresh'),
-        'min_size': stardist_methods.get('min_size'),
-    }
-    
-    # Filter out None values to avoid overriding method defaults
-    method_params = {k: v for k, v in method_params.items() if v is not None}
+    method_params = build_method_params(params)
 
     # --- 3. Blob Detection Loop ---
     for element in all_elements:
@@ -327,7 +341,7 @@ def analyze_data_local(scan_id=None,
         # Use configurable normalization and dilation parameters
         morphology = params.get('morphology_params', {})
         kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-        iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+        iterations = _first_set(morphology.get('dilate_iterations'), params.get('dilate_iterations'), 2)  # 0 = no dilation
         tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, kernel_size=kernel_size, iterations=iterations)
 
         img_min, img_max = float(tiff_img.min()), float(tiff_img.max())
@@ -732,8 +746,8 @@ def analyze_data_from_arrays(element_arrays, params):
     
     # --- 1. Extract Analysis Parameters ---
     segmentation = params.get("segmentation_params", {})
-    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
-    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    min_thresh = _first_set(segmentation.get("min_threshold_intensity"), params.get("min_threshold_intensity"))  # 0 is valid
+    min_area = _first_set(segmentation.get("min_threshold_area"), params.get("min_threshold_area"))  # 0 is valid
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
     # Calculate spatial parameters from scan metadata for accuracy
@@ -810,7 +824,7 @@ def analyze_data_from_arrays(element_arrays, params):
     # --- 2. Blob Detection from Arrays ---
     morphology = params.get('morphology_params', {})
     kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-    iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+    iterations = _first_set(morphology.get('dilate_iterations'), params.get('dilate_iterations'), 2)  # 0 = no dilation
     
     for element in all_elements:
         color = element_to_color.get(element)
@@ -827,7 +841,7 @@ def analyze_data_from_arrays(element_arrays, params):
             # Use configurable normalization and dilation parameters
             morphology = params.get('morphology_params', {})
             kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-            iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+            iterations = _first_set(morphology.get('dilate_iterations'), params.get('dilate_iterations'), 2)  # 0 = no dilation
             img_norm, img_dilated = normalize_and_dilate(img, kernel_size=kernel_size, iterations=iterations)
             
             # Detect blobs
@@ -1018,8 +1032,8 @@ def analyze_data_get_fine_scans_table(scan_id=None,
     connected_components_methods = detection_methods.get("connected_components", {})
     stardist_methods = detection_methods.get("stardist", {})
     
-    min_thresh = segmentation.get("min_threshold_intensity") or params.get("min_threshold_intensity")
-    min_area = segmentation.get("min_threshold_area") or params.get("min_threshold_area")
+    min_thresh = _first_set(segmentation.get("min_threshold_intensity"), params.get("min_threshold_intensity"))  # 0 is valid
+    min_area = _first_set(segmentation.get("min_threshold_area"), params.get("min_threshold_area"))  # 0 is valid
     detection_method = segmentation.get("blob_detection_method") or params.get("blob_detection_method")
     
     # Method-specific parameters from JSON config
@@ -1079,7 +1093,7 @@ def analyze_data_get_fine_scans_table(scan_id=None,
         # Use configurable normalization and dilation parameters
         morphology = params.get('morphology_params', {})
         kernel_size = tuple(morphology.get('normalize_kernel_size') or params.get('normalize_kernel_size', [3, 3]))
-        iterations = morphology.get('dilate_iterations') or params.get('dilate_iterations', 2)
+        iterations = _first_set(morphology.get('dilate_iterations'), params.get('dilate_iterations'), 2)  # 0 = no dilation
         tiff_norm, tiff_dilated = normalize_and_dilate(tiff_img, 
                                                         kernel_size=kernel_size, iterations=iterations)
 
