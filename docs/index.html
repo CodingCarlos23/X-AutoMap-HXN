@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HXN AutoMap — Documentation</title>
+  <style>
+    :root {
+      --blue-70: #1a4480;
+      --blue-60: #005ea2;
+      --blue-5:  #eff6fb;
+      --gray-5:  #f0f0f0;
+      --gray-10: #e6e6e6;
+      --gray-60: #565c65;
+      --gray-90: #1b1b1b;
+      --white:   #ffffff;
+      --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+      --max-width: 1100px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 1rem;
+      line-height: 1.6;
+      color: var(--gray-90);
+      background: var(--gray-5);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    .site-header {
+      background: var(--blue-70);
+      color: white;
+      padding: 2.25rem 1.5rem 2rem;
+    }
+    .site-header .inner { max-width: var(--max-width); margin: 0 auto; }
+    .site-header .agency {
+      font-size: 0.8rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      opacity: 0.75;
+      margin-bottom: 0.4rem;
+    }
+    .site-header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .site-header .subtitle { font-size: 1rem; opacity: 0.8; }
+
+    /* ── Nav ── */
+    .site-nav { background: var(--blue-60); padding: 0 1.5rem; }
+    .site-nav .inner { max-width: var(--max-width); margin: 0 auto; display: flex; }
+    .site-nav a {
+      display: inline-block;
+      padding: 0.65rem 1.1rem;
+      color: rgba(255,255,255,0.75);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 600;
+      border-bottom: 3px solid transparent;
+    }
+    .site-nav a.active, .site-nav a:hover { color: white; border-bottom-color: white; }
+
+    /* ── Main ── */
+    main {
+      max-width: var(--max-width);
+      margin: 3rem auto;
+      padding: 0 1.5rem;
+      flex: 1;
+    }
+
+    .page-intro {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+    .page-intro h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--blue-70);
+      margin-bottom: 0.5rem;
+    }
+    .page-intro p {
+      color: var(--gray-60);
+      font-size: 0.95rem;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    /* ── Workflow cards ── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .workflow-card {
+      background: var(--white);
+      border-radius: 6px;
+      border-top: 5px solid var(--blue-60);
+      padding: 2rem 2rem 1.75rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      flex-direction: column;
+      transition: box-shadow 0.15s, transform 0.15s;
+    }
+    .workflow-card:hover {
+      box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+      transform: translateY(-2px);
+    }
+    .workflow-card.card-automap { border-top-color: #2e7d32; }
+
+    .card-icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+      line-height: 1;
+    }
+    .workflow-card h3 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--blue-70);
+      margin-bottom: 0.5rem;
+    }
+    .workflow-card.card-automap h3 { color: #1b5e20; }
+
+    .workflow-card .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.2em 0.6em;
+      border-radius: 3px;
+      margin-bottom: 0.9rem;
+      background: var(--blue-5);
+      color: var(--blue-60);
+    }
+    .card-automap .tag { background: #e8f5e9; color: #2e7d32; }
+
+    .workflow-card p {
+      color: var(--gray-60);
+      font-size: 0.9rem;
+      flex: 1;
+      margin-bottom: 1.5rem;
+    }
+
+    .card-steps {
+      list-style: none;
+      margin-bottom: 1.75rem;
+    }
+    .card-steps li {
+      font-size: 0.84rem;
+      color: var(--gray-60);
+      padding: 0.3rem 0;
+      border-bottom: 1px solid var(--gray-10);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .card-steps li:last-child { border-bottom: none; }
+    .card-steps li::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--blue-60);
+      flex-shrink: 0;
+    }
+    .card-automap .card-steps li::before { background: #2e7d32; }
+
+    .btn-view {
+      display: inline-block;
+      padding: 0.6rem 1.25rem;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      text-decoration: none;
+      text-align: center;
+      background: var(--blue-60);
+      color: white;
+      transition: background 0.15s;
+    }
+    .btn-view:hover { background: var(--blue-70); }
+    .card-automap .btn-view { background: #2e7d32; }
+    .card-automap .btn-view:hover { background: #1b5e20; }
+
+    /* ── Footer ── */
+    footer {
+      background: var(--blue-70);
+      color: rgba(255,255,255,0.65);
+      text-align: center;
+      padding: 1.4rem;
+      font-size: 0.84rem;
+    }
+  </style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <div class="agency">Brookhaven National Laboratory — HXN Beamline</div>
+    <h1>HXN AutoMap</h1>
+    <div class="subtitle">Technical Documentation — Workflow Diagrams</div>
+  </div>
+</header>
+
+<nav class="site-nav">
+  <div class="inner">
+    <a href="index.html" class="active">Home</a>
+    <a href="vlm_workflow.html">VLM/LLM Workflow</a>
+    <a href="automap.html">AutoMap Pipeline</a>
+  </div>
+</nav>
+
+<main>
+  <div class="page-intro">
+    <h2>Workflow Documentation</h2>
+    <p>Interactive diagrams explaining the two core pipelines in HXN AutoMap. Click a card to open the full diagram.</p>
+  </div>
+
+  <div class="card-grid">
+
+    <!-- VLM/LLM card -->
+    <div class="workflow-card">
+      <div class="card-icon">🤖</div>
+      <div class="tag">AI Pipeline</div>
+      <h3>VLM / LLM Workflow</h3>
+      <p>Feature detection on XRF element TIFFs using Vision Language Models, followed by LLM-based co-location reasoning to identify where elements spatially overlap and suggest material phases.</p>
+      <ul class="card-steps">
+        <li>OpenCV preprocessing (normalize, CLAHE, upscale)</li>
+        <li>Parallel VLM calls — one per element</li>
+        <li>Merge results into combined feature dict</li>
+        <li>LLM co-location analysis + phase suggestion</li>
+        <li>Output: feature JSON + composite PNGs</li>
+      </ul>
+      <a href="vlm_workflow.html" class="btn-view">View Diagram &rarr;</a>
+    </div>
+
+    <!-- AutoMap card -->
+    <div class="workflow-card card-automap">
+      <div class="card-icon">🔬</div>
+      <div class="tag">Deterministic Pipeline</div>
+      <h3>AutoMap Pipeline</h3>
+      <p>Deterministic blob detection across XRF element TIFFs using configurable CV models, followed by spatial union logic, intensity filtering, and threshold-based phase matching against a material database.</p>
+      <ul class="card-steps">
+        <li>Load element TIFFs (offline or data broker)</li>
+        <li>Per-element blob detection (8 model choices)</li>
+        <li>Union / co-location across elements</li>
+        <li>Intensity filtering + cross-element merge</li>
+        <li>Phase matching → fine scan queue export</li>
+      </ul>
+      <a href="automap.html" class="btn-view">View Diagram &rarr;</a>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  HXN AutoMap &mdash; Brookhaven National Laboratory
+</footer>
+
+</body>
+</html>

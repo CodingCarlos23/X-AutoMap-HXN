@@ -176,7 +176,7 @@ def analyze_data_local(scan_id=None,
     if scan_id is None:
         scan_id = params.get('scan_params', {}).get('scan_id') or params.get('scan_id')
     out_dir = params.get('export_params', {}).get('out_dir') or params.get('out_dir')
-    results_dir = str(Path(out_dir) / f"{Path(out_dir).name}_results")
+    results_dir = str(Path(out_dir) / f"{Path(out_dir).name}_det")
     os.makedirs(results_dir, exist_ok=True)
     print(f"[ANALYSIS] Starting analysis for Scan {scan_id} in {out_dir}")
     print(f"[ANALYSIS] Results will be written to {results_dir}")

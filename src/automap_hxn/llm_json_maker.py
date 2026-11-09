@@ -973,7 +973,7 @@ class _ChatTab(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(6)
 
         header_row = QHBoxLayout()
         title = QLabel("<b>LLM JSON Maker</b>")
@@ -1000,6 +1000,7 @@ class _ChatTab(QWidget):
         self.chat_area = QTextEdit()
         self.chat_area.setReadOnly(True)
         self.chat_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.chat_area.setMinimumHeight(120)
         self.chat_area.setVisible(False)
         layout.addWidget(self.chat_area, 1)
 
@@ -2909,7 +2910,9 @@ class _LocateTab(QWidget):
             labels = self._get_elem_labels()
             data["elements"] = {"r": labels[0], "g": labels[1], "b": labels[2]}
             ref = pathlib.Path(self._xrf_paths[0])
-            json_path = ref.with_name(ref.stem + "_xrf_triple_features.json")
+            _vlm_dir = ref.parent / f"{ref.parent.name}_vlm"
+            _vlm_dir.mkdir(exist_ok=True)
+            json_path = _vlm_dir / (ref.stem + "_xrf_triple_features.json")
             with open(json_path, "w") as f:
                 json.dump(data, f, indent=2)
             self._xrf_last_triple_json = json_path
@@ -2955,7 +2958,10 @@ class _LocateTab(QWidget):
             n = len(features)
             self._features = features
             stem = pathlib.Path(self._image_path).stem
-            json_path = pathlib.Path(self._image_path).with_name(stem + "_features.json")
+            _img = pathlib.Path(self._image_path)
+            _vlm_dir = _img.parent / f"{_img.parent.name}_vlm"
+            _vlm_dir.mkdir(exist_ok=True)
+            json_path = _vlm_dir / (stem + "_features.json")
             with open(json_path, "w") as f:
                 json.dump(data, f, indent=2)
             print(f"[Feature Locator] Results retrieved from '{_active_model}' — {n} feature(s) found. Saved at: {json_path}")
@@ -3099,7 +3105,9 @@ class _LocateTab(QWidget):
         data.setdefault("mode", "triple")
         data.setdefault("method", "geometric")
         ref = pathlib.Path(self._xrf_paths[0])
-        json_path = ref.with_name(ref.stem + "_xrf_colocate.json")
+        _vlm_dir = ref.parent / f"{ref.parent.name}_vlm"
+        _vlm_dir.mkdir(exist_ok=True)
+        json_path = _vlm_dir / (ref.stem + "_xrf_colocate.json")
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"[XRF Co-locate] {n} zone(s) identified. Saved at: {json_path}")
@@ -3140,7 +3148,9 @@ class _LocateTab(QWidget):
         for z in zones:
             z["elements"] = [_strip(e) for e in z.get("elements", [])]
         ref = pathlib.Path(self._xrf_paths[0])
-        json_path = ref.with_name(ref.stem + "_xrf_llm_colocate.json")
+        _vlm_dir = ref.parent / f"{ref.parent.name}_vlm"
+        _vlm_dir.mkdir(exist_ok=True)
+        json_path = _vlm_dir / (ref.stem + "_xrf_llm_colocate.json")
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"[XRF LLM Co-locate] {n} zone(s) identified. Saved at: {json_path}")
@@ -3169,7 +3179,9 @@ class _LocateTab(QWidget):
         if ctx:
             data["sample_context"] = ctx
         ref_path = pathlib.Path(self._multi_dir_path)
-        json_path = ref_path / f"{ref_path.name}_multi_llm_colocate.json"
+        _vlm_dir = ref_path / f"{ref_path.name}_vlm"
+        _vlm_dir.mkdir(exist_ok=True)
+        json_path = _vlm_dir / f"{ref_path.name}_multi_llm_colocate.json"
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"[Multi LLM Co-locate] {n} zone(s) identified. Saved at: {json_path}")
@@ -3188,10 +3200,10 @@ class _LocateTab(QWidget):
         dir_name = ref_path.name
         if self._multi_composite_pixmap and zones:
             pm_col = _draw_colocate_boxes_confidence(self._multi_composite_pixmap, zones)
-            _save_pixmap_png(pm_col, ref_path / f"{dir_name}_multi_colocate_composite.png")
+            _save_pixmap_png(pm_col, _vlm_dir / f"{dir_name}_multi_colocate_composite.png")
         if self._multi_circles_composite_pixmap and zones:
             pm_col_circ = _draw_colocate_boxes_confidence(self._multi_circles_composite_pixmap, zones)
-            _save_pixmap_png(pm_col_circ, ref_path / f"{dir_name}_multi_colocate_circles.png")
+            _save_pixmap_png(pm_col_circ, _vlm_dir / f"{dir_name}_multi_colocate_circles.png")
 
     def _populate_info_colocate(self, zones: list, json_path):
         # Append below existing triple-features content so both are scrollable
@@ -3571,7 +3583,9 @@ class _LocateTab(QWidget):
         N = len(self._multi_selected_paths)
         ref_path = pathlib.Path(self._multi_dir_path)
         dir_name = ref_path.name
-        json_path = ref_path / f"{dir_name}_multi_features.json"
+        _vlm_dir = ref_path / f"{dir_name}_vlm"
+        _vlm_dir.mkdir(exist_ok=True)
+        json_path = _vlm_dir / f"{dir_name}_multi_features.json"
         save_data = {
             "elements": self._multi_elem_names,
             "elem_features": self._multi_elem_features,
@@ -3603,10 +3617,10 @@ class _LocateTab(QWidget):
         ]
         if self._multi_composite_pixmap:
             pm_boxes = _draw_feature_boxes_multi_color(self._multi_composite_pixmap, groups)
-            _save_pixmap_png(pm_boxes, ref_path / f"{dir_name}_multi_elements_composite.png")
+            _save_pixmap_png(pm_boxes, _vlm_dir / f"{dir_name}_multi_elements_composite.png")
         if self._multi_circles_composite_pixmap:
             pm_circ_boxes = _draw_feature_boxes_multi_color(self._multi_circles_composite_pixmap, groups)
-            _save_pixmap_png(pm_circ_boxes, ref_path / f"{dir_name}_multi_elements_circles.png")
+            _save_pixmap_png(pm_circ_boxes, _vlm_dir / f"{dir_name}_multi_elements_circles.png")
         QMessageBox.information(self, "Multi Element Analysis Done",
             f"{N} elements analyzed — {n} total feature(s)\nSaved to: {json_path}")
 
@@ -3634,7 +3648,9 @@ class _LocateTab(QWidget):
         data.setdefault("mode", "multi")
         data.setdefault("method", "geometric")
         ref_path = pathlib.Path(self._multi_dir_path)
-        json_path = ref_path / f"{ref_path.name}_multi_colocate.json"
+        _vlm_dir = ref_path / f"{ref_path.name}_vlm"
+        _vlm_dir.mkdir(exist_ok=True)
+        json_path = _vlm_dir / f"{ref_path.name}_multi_colocate.json"
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"[Multi Co-locate] {n} zone(s) identified. Saved at: {json_path}")
@@ -3653,10 +3669,10 @@ class _LocateTab(QWidget):
         dir_name = ref_path.name
         if self._multi_composite_pixmap and zones:
             pm_col = _draw_colocate_boxes_confidence(self._multi_composite_pixmap, zones)
-            _save_pixmap_png(pm_col, ref_path / f"{dir_name}_multi_colocate_composite.png")
+            _save_pixmap_png(pm_col, _vlm_dir / f"{dir_name}_multi_colocate_composite.png")
         if self._multi_circles_composite_pixmap and zones:
             pm_col_circ = _draw_colocate_boxes_confidence(self._multi_circles_composite_pixmap, zones)
-            _save_pixmap_png(pm_col_circ, ref_path / f"{dir_name}_multi_colocate_circles.png")
+            _save_pixmap_png(pm_col_circ, _vlm_dir / f"{dir_name}_multi_colocate_circles.png")
 
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0
@@ -4281,6 +4297,7 @@ class _PhaseIDTab(QWidget):
         self._results_text.setReadOnly(True)
         self._results_text.setPlaceholderText("Phase analysis results will appear here…")
         self._results_text.setStyleSheet("font-family: monospace; font-size: 12px;")
+        self._results_text.setMinimumHeight(120)
         layout.addWidget(self._results_text, 1)
 
     def refresh_model(self):
@@ -4375,11 +4392,20 @@ class LLMJsonMakerWidget(QWidget):
         self._locate_tab = _LocateTab()
         self._phase_id_tab = _PhaseIDTab()
 
+        def _scrollable(w):
+            # Wrap so a tall sub-tab scrolls instead of forcing the whole
+            # main window taller than the screen (pushing it under the taskbar).
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QScrollArea.NoFrame)
+            sa.setWidget(w)
+            return sa
+
         tabs = QTabWidget()
-        tabs.addTab(self._model_tab, "Model")
-        tabs.addTab(self._chat_tab, "Chat")
-        tabs.addTab(self._locate_tab, "Feature Locator")
-        tabs.addTab(self._phase_id_tab, "Phase ID")
+        tabs.addTab(_scrollable(self._model_tab), "Model")
+        tabs.addTab(_scrollable(self._chat_tab), "Chat")
+        tabs.addTab(_scrollable(self._locate_tab), "Feature Locator")
+        tabs.addTab(_scrollable(self._phase_id_tab), "Phase ID")
         layout.addWidget(tabs)
 
         self._model_tab.model_changed.connect(self._on_model_changed)

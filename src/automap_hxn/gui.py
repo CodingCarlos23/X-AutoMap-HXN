@@ -165,10 +165,7 @@ class MainWindow(QWidget):
         # Claim available space when embedded in a host layout; the default
         # Preferred policy loses vertical room to Expanding siblings.
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        if parent is None:
-            # A standalone window needs an initial screen size. Embedded hosts
-            # should instead use AutoMap's natural layout size.
-            self.resize(1900, 1000)
+
         self._init_ui_elements()
         self._init_ui()
         self.blob_items = []

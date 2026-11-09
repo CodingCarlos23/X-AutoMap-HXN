@@ -1,16 +1,19 @@
 import sys
-from qtpy.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication, QMainWindow
 
 from .gui import create_automap_widget
 
 def main():
     """Run AutoMap as a standalone application for local development."""
-    # Create the application instance
     app = QApplication.instance() or QApplication(sys.argv)
 
-    main_win = create_automap_widget()
+    widget = create_automap_widget()
 
-    main_win.show()
+    main_win = QMainWindow()
+    main_win.setWindowTitle("X-AutoMap")
+    main_win.setCentralWidget(widget)
+    # Maximize lets the window manager fit the window above the taskbar/panel
+    main_win.showMaximized()
     return app.exec()
 
 

@@ -27,7 +27,7 @@ from qtpy.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QSizePolicy,
     QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem,
     QSplitter, QTreeWidget, QTreeWidgetItem, QCheckBox, QGroupBox,
-    QComboBox, QListWidget, QListWidgetItem,
+    QComboBox, QListWidget, QListWidgetItem, QScrollArea,
 )
 from qtpy.QtCore import Qt, QTimer, QRectF, QPoint, QEvent
 from qtpy.QtGui import QPen, QColor, QPixmap, QImage, QFont, QPainter, QBrush
@@ -393,9 +393,19 @@ class LiveScanViewerWidget(QWidget):
         root.addWidget(splitter, 1)
 
     def _build_right_panel(self) -> QWidget:
+        outer = QWidget()
+        outer.setMinimumWidth(180)
+        outer.setMaximumWidth(280)
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
         panel = QWidget()
-        panel.setMinimumWidth(180)
-        panel.setMaximumWidth(280)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(10)
@@ -481,9 +491,10 @@ class LiveScanViewerWidget(QWidget):
             "QTreeWidget::item { padding: 2px 2px; }"
             "QTreeWidget::item:selected { background: #3a3a50; color: #fff; }"
         )
+        self._tile_tree.setMaximumHeight(280)
         self._tile_tree.itemClicked.connect(self._on_tree_item_clicked)
         tiles_layout.addWidget(self._tile_tree)
-        layout.addWidget(tiles_group, 1)
+        layout.addWidget(tiles_group)
 
         # Phase detection panel (hidden by default, shown when Phase Detection mode active)
         self._phase_panel = QWidget()
@@ -510,16 +521,6 @@ class LiveScanViewerWidget(QWidget):
         phase_filter_row.addWidget(self._phase_multi_btn)
         phase_layout.addLayout(phase_filter_row)
 
-        self._phase_list = QListWidget()
-        self._phase_list.setStyleSheet(
-            "QListWidget { background: #1e1e22; color: #ccc; border: none; font-size: 11px; }"
-            "QListWidget::item { padding: 3px 4px; }"
-            "QListWidget::item:selected { background: #3a3a50; }"
-        )
-        self._phase_list.itemClicked.connect(self._on_phase_list_clicked)
-        self._phase_list.installEventFilter(self)
-        phase_layout.addWidget(self._phase_list, 1)
-
         self._export_phase_btn = QPushButton("Export Phase PNGs")
         self._export_phase_btn.setStyleSheet(
             "QPushButton { background: #2a5a2a; color: #ccc; border: 1px solid #3a8a3a; "
@@ -530,7 +531,17 @@ class LiveScanViewerWidget(QWidget):
         self._export_phase_btn.clicked.connect(self._on_export_phase_pngs)
         phase_layout.addWidget(self._export_phase_btn)
 
-        layout.addWidget(self._phase_panel, 1)
+        self._phase_list = QListWidget()
+        self._phase_list.setStyleSheet(
+            "QListWidget { background: #1e1e22; color: #ccc; border: none; font-size: 11px; }"
+            "QListWidget::item { padding: 3px 4px; }"
+            "QListWidget::item:selected { background: #3a3a50; }"
+        )
+        self._phase_list.itemClicked.connect(self._on_phase_list_clicked)
+        self._phase_list.installEventFilter(self)
+        phase_layout.addWidget(self._phase_list, 1)
+
+        layout.addWidget(self._phase_panel)
         self._phase_panel.setVisible(False)
 
         # Stats
@@ -538,7 +549,11 @@ class LiveScanViewerWidget(QWidget):
         self._stats_lbl.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(self._stats_lbl)
 
-        return panel
+        layout.addStretch()
+
+        scroll.setWidget(panel)
+        outer_layout.addWidget(scroll)
+        return outer
 
     # ------------------------------------------------------------------
     # Slot: load config
@@ -661,7 +676,7 @@ class LiveScanViewerWidget(QWidget):
             elem_paths = [
                 tile_dir / f"scan_{scan_id}_{elem}.tiff" for elem in self._elements
             ]
-            results_dir = tile_dir / f"automap_{scan_id}_results"
+            results_dir = tile_dir / f"automap_{scan_id}_det"
             idx = len(self._tile_order)
             tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir, gname)
             self._seen_tiles.add(scan_id)
@@ -1000,7 +1015,7 @@ class LiveScanViewerWidget(QWidget):
             if not all(p.exists() for p in elem_paths):
                 continue
 
-            results_dir = tile_dir / f"automap_{scan_id}_results"
+            results_dir = tile_dir / f"automap_{scan_id}_det"
             idx = len(self._tile_order)
             gname = "".join(self._elements)
             tiff_w = self._draw_tile(idx, scan_id, elem_paths, results_dir, gname)
@@ -1307,7 +1322,7 @@ class LiveScanViewerWidget(QWidget):
                 continue
             results_dir = None
             if self._watch_dir:
-                results_dir = self._watch_dir / f"automap_{scan_id}" / f"automap_{scan_id}_results"
+                results_dir = self._watch_dir / f"automap_{scan_id}" / f"automap_{scan_id}_det"
             if not results_dir or not results_dir.exists():
                 continue
             scale = CELL_SIZE / tiff_w

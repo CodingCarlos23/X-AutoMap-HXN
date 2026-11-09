@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HXN AutoMap — VLM/LLM Workflow</title>
+  <style>
+    :root {
+      --blue-70: #1a4480;
+      --blue-60: #005ea2;
+      --blue-5:  #eff6fb;
+      --gray-5:  #f0f0f0;
+      --gray-10: #e6e6e6;
+      --gray-60: #565c65;
+      --gray-90: #1b1b1b;
+      --white:   #ffffff;
+      --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+      --font-mono: "Roboto Mono", "Courier New", monospace;
+      --max-width: 1100px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 1rem;
+      line-height: 1.6;
+      color: var(--gray-90);
+      background: var(--gray-5);
+    }
+    .site-header { background: var(--blue-70); color: white; padding: 2rem 1.5rem 1.75rem; }
+    .site-header .inner { max-width: var(--max-width); margin: 0 auto; }
+    .site-header .agency { font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; margin-bottom: 0.4rem; }
+    .site-header h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .site-header .subtitle { font-size: 0.95rem; opacity: 0.8; }
+
+    .site-nav { background: var(--blue-60); padding: 0 1.5rem; }
+    .site-nav .inner { max-width: var(--max-width); margin: 0 auto; display: flex; }
+    .site-nav a {
+      display: inline-block; padding: 0.65rem 1.1rem;
+      color: rgba(255,255,255,0.75); text-decoration: none;
+      font-size: 0.875rem; font-weight: 600;
+      border-bottom: 3px solid transparent;
+    }
+    .site-nav a.active, .site-nav a:hover { color: white; border-bottom-color: white; }
+
+    main { max-width: var(--max-width); margin: 2rem auto; padding: 0 1.5rem; }
+
+    .intro {
+      background: var(--blue-5); border-left: 4px solid var(--blue-60);
+      border-radius: 0 4px 4px 0; padding: 1rem 1.4rem; margin-bottom: 2rem;
+      font-size: 0.95rem; color: var(--gray-60);
+    }
+    .intro strong { color: var(--blue-70); }
+
+    .card {
+      background: var(--white); border-radius: 4px; border-left: 4px solid var(--blue-60);
+      padding: 1.75rem 2rem; margin-bottom: 2rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+    .card h2 { font-size: 1.25rem; font-weight: 700; color: var(--blue-70); margin-bottom: 0.6rem; }
+    .card > p { color: var(--gray-60); margin-bottom: 1rem; font-size: 0.95rem; }
+
+    .diagram-wrap {
+      background: #fafafa; border: 1px solid var(--gray-10); border-radius: 4px;
+      padding: 2rem 1rem; margin: 1.25rem 0; overflow-x: auto; text-align: center;
+    }
+
+    .step-list { list-style: none; counter-reset: steps; }
+    .step-list li {
+      counter-increment: steps; display: flex; gap: 1rem;
+      margin-bottom: 1.2rem; padding-bottom: 1.2rem; border-bottom: 1px solid var(--gray-10);
+    }
+    .step-list li:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .step-list li::before {
+      content: counter(steps);
+      background: var(--blue-5); color: var(--blue-60); border: 2px solid var(--blue-60);
+      border-radius: 50%; width: 2rem; height: 2rem; min-width: 2rem;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.85rem;
+    }
+    .step-content h3 { font-size: 1rem; font-weight: 700; margin-bottom: 0.2rem; }
+    .step-content p  { font-size: 0.9rem; color: var(--gray-60); margin: 0; }
+    .step-content code {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      background: var(--gray-5); padding: 0.1em 0.4em;
+      border-radius: 3px; color: var(--blue-70);
+    }
+
+    .provider-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+    .provider-badge {
+      display: flex; align-items: flex-start; gap: 0.65rem;
+      background: var(--gray-5); border: 1px solid var(--gray-10);
+      border-radius: 4px; padding: 0.75rem 1rem; flex: 1; min-width: 190px;
+    }
+    .dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+    .dot-anthropic { background: #d35400; }
+    .dot-openai    { background: #10a37f; }
+    .dot-ollama    { background: #7b2d8b; }
+    .provider-badge strong { display: block; font-size: 0.9rem; }
+    .provider-badge span   { font-size: 0.78rem; color: var(--gray-60); font-family: var(--font-mono); }
+
+    .output-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem; margin-top: 1rem;
+    }
+    .output-card {
+      background: var(--blue-5); border: 1px solid #c9daea;
+      border-radius: 4px; padding: 0.9rem 1.1rem;
+    }
+    .output-card .fname {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      color: var(--blue-70); font-weight: 700; margin-bottom: 0.35rem;
+    }
+    .output-card p { font-size: 0.84rem; color: var(--gray-60); margin: 0; }
+
+    .file-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .file-table th {
+      text-align: left; padding: 0.65rem 1rem;
+      background: var(--blue-70); color: white; font-weight: 600;
+    }
+    .file-table td { padding: 0.65rem 1rem; border-bottom: 1px solid var(--gray-10); vertical-align: top; }
+    .file-table tr:last-child td { border-bottom: none; }
+    .file-table tr:nth-child(even) td { background: var(--blue-5); }
+    .file-table code { font-family: var(--font-mono); font-size: 0.78rem; color: var(--blue-70); }
+
+    footer {
+      background: var(--blue-70); color: rgba(255,255,255,0.65);
+      text-align: center; padding: 1.4rem; font-size: 0.84rem; margin-top: 3rem;
+    }
+  </style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <div class="agency">Brookhaven National Laboratory — HXN Beamline</div>
+    <h1>HXN AutoMap</h1>
+    <div class="subtitle">VLM + LLM Workflow — Technical Documentation</div>
+  </div>
+</header>
+
+<nav class="site-nav">
+  <div class="inner">
+    <a href="index.html">Home</a>
+    <a href="vlm_workflow.html" class="active">VLM/LLM Workflow</a>
+    <a href="automap.html">AutoMap Pipeline</a>
+  </div>
+</nav>
+
+<main>
+
+  <div class="intro">
+    <strong>What this page documents:</strong> The Feature Locator pipeline — how XRF element TIFFs are preprocessed, sent to a Vision Language Model (VLM) for feature detection, and then analyzed by a Language Model (LLM) for co-location reasoning. This is the AI-powered complement to the deterministic AutoMap pipeline.
+  </div>
+
+  <!-- MAIN WORKFLOW DIAGRAM -->
+  <div class="card">
+    <h2>End-to-End Pipeline</h2>
+    <p>From raw element TIFFs to structured JSON output and composite images.</p>
+    <div class="diagram-wrap">
+      <pre class="mermaid">
+flowchart TD
+    A["XRF Element TIFFs\nFe.tiff  O.tiff  Si.tiff  ..."]
+
+    A --> B["OpenCV Preprocessing\nnormalize · CLAHE · upscale 1092 px\ninferno colormap · optional dilation"]
+
+    B --> PAR
+
+    subgraph PAR ["Parallel VLM Calls  —  ThreadPoolExecutor"]
+        direction LR
+        C1["VLM\nElement 1\nbboxes"]
+        C2["VLM\nElement 2\nbboxes"]
+        C3["VLM\nElement N\nbboxes"]
+    end
+
+    PAR --> D["Merge Results\n{ elem_features, total_count, duration }"]
+
+    D --> E["Build Co-location Prompt\nbuild_colocate_prompt()\n+ optional sample_context"]
+
+    E --> F["LLM Co-location Analysis\nquery_llm_colocate()\nIdentifies spatial overlaps\nSuggests material phases"]
+
+    F --> OUT["Save Outputs"]
+
+    OUT --> O1["*_multi_features.json\nPer-element VLM detections"]
+    OUT --> O2["*_multi_llm_colocate.json\nOverlap zones + reasoning"]
+    OUT --> O3["Composite PNGs\nelements + co-locate overlays"]
+
+    style A   fill:#e8f4fd,stroke:#005ea2,color:#1a4480
+    style B   fill:#fff3e0,stroke:#e65100,color:#1a4480
+    style D   fill:#e8f5e9,stroke:#2e7d32,color:#1a4480
+    style E   fill:#f3e5f5,stroke:#6a1b9a,color:#1a4480
+    style F   fill:#e8eaf6,stroke:#283593,color:#1a4480
+    style OUT fill:#fce4ec,stroke:#880e4f,color:#1a4480
+      </pre>
+    </div>
+  </div>
+
+  <!-- STEP BY STEP -->
+  <div class="card">
+    <h2>Step-by-Step Breakdown</h2>
+    <ol class="step-list">
+      <li>
+        <div class="step-content">
+          <h3>Load Element TIFFs</h3>
+          <p>The user selects a folder of per-element XRF TIFFs in the Feature Locator tab. Each TIFF is a 2D intensity map for one element (Fe, O, Si, etc.). Multi-element mode accepts any number of elements; 3-element mode uses a fixed RGB triple.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>OpenCV Preprocessing</h3>
+          <p>Each TIFF is preprocessed before being sent to the VLM. Options: <code>normalize</code> (min-max to 8-bit), <code>CLAHE</code> (contrast-limited adaptive histogram equalization), <code>upscale</code> to 1092 px, <code>inferno colormap</code> for perceptual contrast, <code>dilation</code> to expand faint blobs. Implemented in <code>vlm_pipeline.py → preprocess_tiff()</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>Parallel VLM Calls</h3>
+          <p>Each preprocessed element image is base64-encoded and sent to the VLM API simultaneously using <code>concurrent.futures.ThreadPoolExecutor</code>. The VLM returns bounding boxes in fractional coordinates (0.0–1.0, top-left origin). Implemented in <code>llm_json_maker.py → _LocateXRFMultiThread</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>Merge Results</h3>
+          <p>Results from all VLM calls are collected as they complete (order preserved by index) and merged into a single dict: <code>{ r_features: [...], g_features: [...], ..., total_count: N }</code>. This becomes the input to the co-location step.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>Build Co-location Prompt</h3>
+          <p><code>build_colocate_prompt()</code> in <code>vlm_pipeline.py</code> formats all element feature lists as structured text. If the user entered a Sample Context (e.g. "iron oxide nanoparticles on silicon substrate") it is prepended to inform material suggestions. Note: sample context only reaches the LLM co-location step — not the initial VLM feature detection calls.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>LLM Co-location Analysis</h3>
+          <p><code>query_llm_colocate()</code> sends the prompt to the selected LLM. The model reasons about which features across different element scans spatially overlap, groups them into co-location zones, and suggests the most likely material phase for each zone. Implemented in <code>llm_json_maker.py → _LocateLLMColocateThread</code>.</p>
+        </div>
+      </li>
+      <li>
+        <div class="step-content">
+          <h3>Save Outputs</h3>
+          <p>All results are saved to the TIFF folder automatically — <code>*_multi_features.json</code>, <code>*_multi_llm_colocate.json</code>, and four composite PNGs (elements + co-locate, each with box and circle variants).</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <!-- PROVIDER ROUTING -->
+  <div class="card">
+    <h2>Provider &amp; API Key Routing</h2>
+    <p>The model is selected in the Feature Locator tab. The provider is detected automatically from the model name string.</p>
+    <div class="diagram-wrap">
+      <pre class="mermaid">
+flowchart LR
+    M["Model name\nselected in UI"]
+
+    M -->|"claude-*"| A["Anthropic API\nANTHROPIC_API_KEY"]
+    M -->|"gpt-*  o3  o4-*"| B["OpenAI API\nOPENAI_API_KEY"]
+    M -->|"everything else"| C["Ollama\nlocalhost:11434"]
+
+    A & B --> K["API Key Resolution"]
+    K --> K1["1  Env variable\n$ANTHROPIC_API_KEY\n$OPENAI_API_KEY"]
+    K --> K2["2  GPG decrypt\n~/.private_env.gpg"]
+    K --> K3["3  Manual entry\nModel tab in UI"]
+
+    style A fill:#fff3e0,stroke:#e65100,color:#1a4480
+    style B fill:#e8f5e9,stroke:#2e7d32,color:#1a4480
+    style C fill:#f3e5f5,stroke:#6a1b9a,color:#1a4480
+      </pre>
+    </div>
+    <div class="provider-row">
+      <div class="provider-badge">
+        <div class="dot dot-anthropic"></div>
+        <div><strong>Anthropic (Claude)</strong><span>claude-sonnet-5, claude-opus-5</span></div>
+      </div>
+      <div class="provider-badge">
+        <div class="dot dot-openai"></div>
+        <div><strong>OpenAI</strong><span>gpt-4o, gpt-4.1, o3, o4-*</span></div>
+      </div>
+      <div class="provider-badge">
+        <div class="dot dot-ollama"></div>
+        <div><strong>Ollama (local)</strong><span>llava, mistral, llama3, ...</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OUTPUT FILES -->
+  <div class="card">
+    <h2>Output Files</h2>
+    <p>All outputs are written to the input TIFF directory, using the folder name as the filename stem.</p>
+    <div class="output-grid">
+      <div class="output-card">
+        <div class="fname">*_multi_features.json</div>
+        <p>Per-element VLM bounding box detections. Contains element names, feature lists with fractional coordinates, total count, model used, and duration.</p>
+      </div>
+      <div class="output-card">
+        <div class="fname">*_multi_llm_colocate.json</div>
+        <p>LLM co-location zones. Each zone has overlapping feature refs across elements, suggested material phase, and LLM reasoning text.</p>
+      </div>
+      <div class="output-card">
+        <div class="fname">*_multi_elements_composite.png</div>
+        <p>Composite image with VLM bounding boxes drawn on each element TIFF side-by-side.</p>
+      </div>
+      <div class="output-card">
+        <div class="fname">*_multi_colocate_composite.png</div>
+        <p>Composite image with co-location zone boxes overlaid on the element images.</p>
+      </div>
+      <div class="output-card">
+        <div class="fname">*_multi_elements_circles.png</div>
+        <p>Same as elements composite but using circle markers instead of rectangles.</p>
+      </div>
+      <div class="output-card">
+        <div class="fname">*_multi_colocate_circles.png</div>
+        <p>Same as co-locate composite but with circle markers.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- KEY SOURCE FILES -->
+  <div class="card">
+    <h2>Key Source Files</h2>
+    <table class="file-table">
+      <thead>
+        <tr><th>File</th><th>Role</th><th>Key symbols</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>vlm_pipeline.py</code></td>
+          <td>Core VLM/LLM API calls and prompt construction. Provider-agnostic.</td>
+          <td><code>preprocess_tiff()</code>, <code>query_vlm_features()</code>, <code>build_colocate_prompt()</code>, <code>query_llm_colocate()</code></td>
+        </tr>
+        <tr>
+          <td><code>llm_json_maker.py</code></td>
+          <td>GUI Feature Locator tab. Owns the Qt threads that drive vlm_pipeline.</td>
+          <td><code>_LocateXRFMultiThread</code>, <code>_LocateLLMColocateThread</code></td>
+        </tr>
+        <tr>
+          <td><code>feature_locator_headless.py</code></td>
+          <td>CLI / headless version of the same pipeline. No GUI required.</td>
+          <td><code>run_multi_element_pipeline()</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>HXN AutoMap &mdash; Brookhaven National Laboratory</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#e8f4fd', primaryBorderColor: '#005ea2', primaryTextColor: '#1a4480',
+      lineColor: '#565c65', secondaryColor: '#f0f0f0', tertiaryColor: '#eff6fb',
+      edgeLabelBackground: '#ffffff',
+    },
+    flowchart: { curve: 'basis', padding: 20 }
+  });
+</script>
+</body>
+</html>

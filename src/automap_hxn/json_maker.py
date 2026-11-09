@@ -12,7 +12,7 @@ from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QCheckBox, QDoubleSpinBox, QSpinBox, QLineEdit,
     QScrollArea, QGroupBox, QFormLayout, QTabWidget, QMessageBox,
-    QFileDialog,
+    QFileDialog, QSizePolicy,
 )
 from qtpy.QtCore import Qt
 
@@ -353,24 +353,25 @@ class JSONMakerWidget(QWidget):
         self.setStyleSheet(
             "QGroupBox {"
             "  font-weight: bold;"
-            "  margin-top: 18px;"
-            "  padding-top: 12px;"
+            "  margin-top: 10px;"
+            "  padding-top: 8px;"
             "}"
         )
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(4)
+        layout.setContentsMargins(8, 6, 8, 8)
 
-        # === HEADER ===
-        header_label = QLabel("<b>JSON Configuration Builder</b>")
-        header_label.setStyleSheet("font-size: 14px; padding: 5px;")
-        layout.addWidget(header_label)
+        title = QLabel("<b>JSON Configuration Builder</b>")
+        title.setStyleSheet("font-size: 13px; padding: 2px 0;")
+        layout.addWidget(title)
 
         # === MODEL SELECTION ===
         model_group = QGroupBox("Detection Method Configuration")
+        model_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         model_layout = QVBoxLayout(model_group)
-        model_layout.setSpacing(8)
-        model_layout.setContentsMargins(10, 24, 10, 10)
+        model_layout.setSpacing(4)
+        model_layout.setAlignment(Qt.AlignTop)
+        model_layout.setContentsMargins(8, 14, 8, 6)
 
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Configuration Type:"))
@@ -418,6 +419,8 @@ class JSONMakerWidget(QWidget):
         config_tabs.addTab(self._create_json_maker_scan_export_tab(), "Scan & Export")
         config_tabs.addTab(self._create_json_maker_advanced_tab(), "Advanced")
 
+        # Tabs take all remaining height; their contents scroll, so the
+        # Reset / Create buttons below always stay on screen.
         layout.addWidget(config_tabs, 1)
 
         # === BOTTOM BUTTON ===
@@ -633,7 +636,12 @@ class JSONMakerWidget(QWidget):
         layout.addWidget(analysis_group)
 
         layout.addStretch()
-        return widget
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
+        return scroll
 
     def _make_json_maker_field(self, key, default, options=None):
         """Build an input widget for one config value based on its default's type."""
