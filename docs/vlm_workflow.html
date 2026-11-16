@@ -168,7 +168,7 @@
     <a href="index.html">Home</a>
     <a href="vlm_workflow.html" class="active">VLM/LLM Workflow</a>
     <a href="automap.html">AutoMap Pipeline</a>
-    <a href="benchmarks.html">Benchmarks<span style="display:inline-block;margin-left:0.35rem;padding:0.05rem 0.4rem;border-radius:3px;background:#ffbe2e;color:#1b1b1b;font-size:0.65rem;font-weight:800;letter-spacing:0.06em;vertical-align:1px">BETA</span></a>
+    <a href="benchmarks.html">Benchmarks</a>
     <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
   </div>
 </nav>
@@ -224,7 +224,7 @@ flowchart TB
     subgraph OUT["④ OUTPUTS"]
         direction LR
         O1@{ shape: doc, label: "<b>*_multi_features.json</b><br/><small>per-element detections</small>" }
-        O2@{ shape: doc, label: "<b>*_multi_llm_colocate.json</b><br/><small>zones + reasoning</small>" }
+        O2@{ shape: doc, label: "<b>*_multi_llm_colocate.json</b><br/><small>zones + reasoning + alternatives</small>" }
         O3@{ shape: docs, label: "<b>Composite PNGs</b><br/><small>elements · co-locate</small>" }
     end
 

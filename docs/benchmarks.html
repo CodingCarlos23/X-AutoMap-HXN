@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HXN AutoMap — Benchmarks (Beta)</title>
+  <title>HXN AutoMap — Benchmarks</title>
   <style>
     :root {
       --blue-70: #1a4480;
@@ -151,19 +151,11 @@
       background: var(--blue-70); color: rgba(255,255,255,0.65);
       text-align: center; padding: 1.4rem; font-size: 0.84rem; margin-top: 3rem;
     }
-    .beta-banner {
-      display: flex; gap: 1rem; align-items: flex-start;
-      background: #fff8e1; border: 1px solid #ffbe2e; border-left: 6px solid #ffbe2e;
+    .note-banner {
+      background: #e8f4fd; border: 1px solid #b7d3f6; border-left: 6px solid var(--blue-60);
       border-radius: 4px; padding: 1rem 1.3rem; margin-bottom: 1.5rem;
-      background-image: repeating-linear-gradient(-45deg, rgba(255,190,46,0.08) 0 12px, transparent 12px 24px);
     }
-    .beta-banner p { margin: 0; font-size: 0.92rem; color: #3d2c00; }
-    .beta-banner code { font-family: var(--font-mono); font-size: 0.8rem; }
-    .beta-tag {
-      flex-shrink: 0; display: inline-block; background: #ffbe2e; color: #1b1b1b;
-      font-size: 0.7rem; font-weight: 800; letter-spacing: 0.08em; padding: 0.25rem 0.55rem; border-radius: 3px;
-    }
-    .beta-tag.small { font-size: 0.62rem; padding: 0.12rem 0.45rem; vertical-align: 3px; margin-left: 0.4rem; }
+    .note-banner p { margin: 0; font-size: 0.92rem; color: var(--gray-90); }
     .card > p code, .intro code { font-family: var(--font-mono); font-size: 0.8rem; }
     pre.cmd {
       background: #1b1b1b; color: #e6e6e6; font-family: var(--font-mono); font-size: 0.8rem;
@@ -180,7 +172,7 @@
   <div class="inner">
     <div class="agency">Brookhaven National Laboratory — HXN Beamline</div>
     <h1>HXN AutoMap</h1>
-    <div class="subtitle">Detection Benchmarks — Beta / Work in Progress</div>
+    <div class="subtitle">Detection Benchmarks</div>
   </div>
 </header>
 
@@ -189,16 +181,15 @@
     <a href="index.html">Home</a>
     <a href="vlm_workflow.html">VLM/LLM Workflow</a>
     <a href="automap.html">AutoMap Pipeline</a>
-    <a href="benchmarks.html" class="active">Benchmarks<span style="display:inline-block;margin-left:0.35rem;padding:0.05rem 0.4rem;border-radius:3px;background:#ffbe2e;color:#1b1b1b;font-size:0.65rem;font-weight:800;letter-spacing:0.06em;vertical-align:1px">BETA</span></a>
+    <a href="benchmarks.html" class="active">Benchmarks</a>
     <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
   </div>
 </nav>
 
 <main>
 
-  <div class="beta-banner">
-    <span class="beta-tag">BETA · WORK IN PROGRESS</span>
-    <p><strong>This page documents a benchmark that is still being built.</strong> The scripts in <code>benchmarks/</code> are under active development and not yet committed, so names, variants and outputs may change. The current scores measure <em>agreement between methods</em>, not accuracy. They show where OpenCV, StarDist and the VLM variants agree, but not which one is right. Hand-labeled ground truth is the next step.</p>
+  <div class="note-banner">
+    <p><strong>Scores measure agreement, not accuracy.</strong> They show where OpenCV, StarDist and the VLM variants agree, but not which one is right. Hand-labeled ground truth is the next step (see Still To Do).</p>
   </div>
 
   <div class="intro">
@@ -206,7 +197,7 @@
   </div>
 
   <div class="card">
-    <h2>Benchmark Pipeline <span class="beta-tag small">BETA</span></h2>
+    <h2>Benchmark Pipeline</h2>
     <p>One run = every method × every sample, written to a timestamped folder with a browsable HTML report.</p>
     <div class="diagram-wrap">
       <pre class="mermaid">
@@ -261,7 +252,7 @@ flowchart TB
     subgraph OUT["④ OUTPUTS — runs/{timestamp}&#95;{sample}/"]
         direction LR
         R1@{ shape: doc, label: "<b>results.json</b><br/><small>everything the report shows</small>" }
-        R2@{ shape: doc, label: "<b>index.html</b><br/><small>self-contained report</small>" }
+        R2@{ shape: doc, label: "<b>index.html</b><br/><small>interactive report: box tooltips<br/>all-methods grids · view toggles</small>" }
         R3@{ shape: doc, label: "<b>API call log</b><br/><small>tokens · cost · truncation</small>" }
         R4@{ shape: docs, label: "<b>Per-method images</b><br/><small>original / model input ± boxes</small>" }
         R1 ~~~ R2 ~~~ R3 ~~~ R4
@@ -324,8 +315,8 @@ flowchart TB
         <tr><td><code>stardist:standard</code> / <code>:raw</code></td><td>Same two inputs as OpenCV</td><td><code>2D_versatile_fluo</code>, prob 0.5, NMS 0.4</td></tr>
         <tr><td><code>vlm:raw</code></td><td>Min-max only, native size</td><td>Baseline: no preprocessing help</td></tr>
         <tr><td><code>vlm:standard</code></td><td>Min-max + upscale 1092 px + CLAHE</td><td>Feature Locator default when circles are off</td></tr>
-        <tr><td><code>vlm:circle</code> ★</td><td>Otsu particles drawn as per-element coloured circles on white</td><td>Current best method; matches the GUI multi-element default</td></tr>
-        <tr><td><code>vlm:flower</code> / <code>vlm:car</code></td><td>Same Otsu particles, stamped as 🌸 / 🚗 emoji</td><td>Experiment: does a familiar object shape help the VLM count?</td></tr>
+        <tr><td><code>vlm:circle</code> ★</td><td>Otsu particles drawn as per-element coloured circles on white</td><td>Current best method; matches the GUI multi-element default. OpenCV (blur → Otsu → contours) finds the particles before the VLM sees the image, so this tests how well the VLM boxes markers, not whether it can find particles</td></tr>
+        <tr><td><code>vlm:flower</code> / <code>vlm:car</code></td><td>Same Otsu particles, stamped as 🌸 / 🚗 emoji</td><td>Experiment: does a familiar object shape help the VLM count? Same as circle: particles are found by Otsu first; the emoji is resized to a square, so the car is squashed</td></tr>
       </tbody>
     </table>
   </div>
@@ -334,7 +325,7 @@ flowchart TB
     <h2>How Scoring Works (current)</h2>
     <ol class="step-list">
       <li><div class="step-content"><h3>Level 1: Box agreement</h3><p>For each element, every pair of methods is compared. Boxes are matched greedily by IoU (threshold <code>match_iou</code>, default 0.25). Reported as F1 = 2 × matched / (boxes in A + boxes in B) and mean IoU of the matches.</p></div></li>
-      <li><div class="step-content"><h3>Level 2: Material regions</h3><p>Each AutoMap method's <code>phase_detections.json</code> regions are matched against each VLM variant's co-location zones by overlap coefficient (≥ <code>phase_match_overlap</code>, default 0.5). Matched pairs also report element-set Jaccard similarity.</p></div></li>
+      <li><div class="step-content"><h3>Level 2: Material regions</h3><p>Each AutoMap method's <code>phase_detections.json</code> regions are matched against each VLM variant's co-location zones by overlap coefficient (≥ <code>phase_match_overlap</code>, default 0.5). Matched pairs also report element-set Jaccard similarity (shared elements ÷ all elements of the pair). Material names are hypotheses, not identifications: an LLM name is its best guess from which elements sit together (its high / medium / low is self-rated), and an AutoMap name is the closest ratio match in <code>materials_library.json</code>. XRF gives elements only, so phases still need confirming with another technique (e.g. XANES, XRD, Raman).</p></div></li>
       <li><div class="step-content"><h3>Level 3: LLM reconciliation</h3><p><code>reconcile.py</code> sends every method's material regions for a sample to an LLM. The LLM groups regions that describe the same particle or phase, even when methods name it differently or not at all. Which methods found or missed each group is then computed in code from region IDs, not from the LLM's counts.</p></div></li>
       <li><div class="step-content"><h3>Cost tracking</h3><p>Every API call is logged with tokens, estimated USD cost, stop reason, truncation and parse status, so variant comparisons include what each one costs to run.</p></div></li>
     </ol>
@@ -358,6 +349,9 @@ xdg-open benchmarks/runs/&lt;timestamp&gt;_test_samples/index.html</pre>
       <li><strong>Open decisions:</strong> what the emoji markers are placed on, model / budget choice, whether to score explanation quality, and whether test TIFFs go in git.</li>
       <li><strong>Prompt bank</strong> (TODO #10): compare several system prompts on the same data and pick the winner for the Feature Locator default.</li>
       <li><strong>Dilation for circle mode:</strong> the GUI multi-element workflow never dilates. Worth adding as a benchmark variant.</li>
+      <li><strong>Circle prompt suffix:</strong> flower and car get a suffix telling the VLM the particles were replaced by markers on white; circle gets none, so its prompt still describes bright particles on a dark background. Add one to <code>compare_default.json</code>.</li>
+      <li><strong>Save the co-location prompt:</strong> each run saves the LLM co-location reply (<code>raw_replies/colocate.txt</code>) but not the prompt that produced it.</li>
+      <li><strong>Minimum area for markers:</strong> the circle / emoji transform has no minimum contour area, so any speck above the Otsu threshold becomes a marker (the car variant gives ~600 boxes per sample).</li>
     </ul>
   </div>
 

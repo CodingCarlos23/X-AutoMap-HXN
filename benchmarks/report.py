@@ -33,6 +33,8 @@ section { background: var(--surface-1); border: 1px solid var(--border); border-
 h2 { font-size: 1.25rem; margin-bottom: .25rem; }
 h3 { font-size: 1.05rem; margin: 1.25rem 0 .5rem; }
 p.note { color: var(--text-secondary); font-size: .9rem; margin-bottom: .75rem; }
+.caveat { border-left: 4px solid #e5a000; background: rgba(229,160,0,.1); padding: .55rem .8rem; border-radius: 4px;
+          font-size: .9rem; margin-bottom: .9rem; }
 table { border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; }
 th, td { padding: .4rem .7rem; border-bottom: 1px solid var(--border); text-align: right; }
 th { color: var(--text-secondary); font-weight: 600; }
@@ -77,9 +79,10 @@ td.score { text-align: center; }
 .pane img { width: 100%; display: block; border-radius: 4px; background: #000; image-rendering: pixelated; }
 .imgwrap { position: relative; }
 .imgwrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.imgwrap rect { fill: transparent; stroke: transparent; stroke-width: 2px; vector-effect: non-scaling-stroke; cursor: crosshair; }
-.imgwrap rect:hover, .imgwrap rect.hl { stroke: #ffbe2e; fill: rgba(255,190,46,.15); }
-.imgwrap rect.hl-weak { stroke: #ffbe2e; stroke-dasharray: 3 2; }
+/* boxes are SVG vectors over the plain image (not baked into the PNG) so they stay crisp at any display size */
+.imgwrap rect { fill: transparent; stroke: var(--c); stroke-width: 1.5px; vector-effect: non-scaling-stroke; cursor: crosshair; }
+.imgwrap rect:hover, .imgwrap rect.hl { stroke: #ff3df2; stroke-width: 3px; fill: rgba(255,61,242,.18); }
+.imgwrap rect.hl-weak { stroke: #ff3df2; stroke-width: 2.5px; stroke-dasharray: 4 3; }
 .mgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-top: .5rem; }
 .mgrid figure { cursor: grab; border: 2px dashed transparent; border-radius: 6px; padding: 2px; }
 .mgrid figure.dragging { opacity: .4; }
@@ -167,7 +170,9 @@ function bestMatch(b, others, fn) {
   return best;
 }
 /* draw invisible hover rects; smaller boxes last so they sit on top of the ones containing them */
-function drawOverlay(svg, boxes, on) {
+const DET_COLOR = '#eda100', MAT_COLOR = '#00e5ff';  // same colours the saved *_boxes.png files use
+function drawOverlay(svg, boxes, on, color) {
+  svg.style.setProperty('--c', color);
   svg.innerHTML = on ? (boxes || []).map((b, k) => [b, k]).sort((p, q) => area(q[0]) - area(p[0]))
     .map(([b, k]) => `<rect data-k="${k}" x="${b.x1}" y="${b.y1}" width="${b.x2 - b.x1}" height="${b.y2 - b.y1}"/>`).join('') : '';
 }
@@ -208,7 +213,7 @@ function makeGrid(g) {
         <svg data-m="${m}" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
         <figcaption><b>${label(m)}</b>${t.caption}</figcaption></figure>`;
     }).join('');
-    g.el.querySelectorAll('svg').forEach(svg => drawOverlay(svg, g.boxes(svg.dataset.m), st.boxes));
+    g.el.querySelectorAll('svg').forEach(svg => drawOverlay(svg, g.boxes(svg.dataset.m), st.boxes, g.color));
   };
   const clearHL = () => g.el.querySelectorAll('rect.hl, rect.hl-weak').forEach(x => x.classList.remove('hl', 'hl-weak'));
   g.el.addEventListener('mousemove', ev => {
@@ -277,7 +282,7 @@ document.querySelectorAll('.seg[data-ctl] button').forEach(b => b.onclick = () =
 function fillSelect(sel, val) { sel.innerHTML = M.map(m => `<option value="${m}"${m === val ? ' selected' : ''}>${label(m)}</option>`).join(''); }
 function pick(imgs, view, boxes) {
   const mode = (view === 'input' && imgs.input) ? 'input' : 'original';
-  return { src: imgs[mode + (boxes ? '_boxes' : '')], mode };
+  return { src: imgs[mode], mode };  // boxes are drawn as SVG on top, not taken from the *_boxes.png
 }
 function paneHTML(m, item) {
   const imgs = (V.images[item.key] || {})[m] || {};
@@ -291,7 +296,7 @@ function paneHTML(m, item) {
 const vItem = () => V.items[st.idx];
 const vBoxes = m => (V.boxes[vItem().key] || {})[m] || [];
 const vGrid = makeGrid({
-  el: $('v-grid'), order: [...M], score: iou, thresh: DATA.match_iou,
+  el: $('v-grid'), order: [...M], color: DET_COLOR, score: iou, thresh: DATA.match_iou,
   rerender: () => renderViewer(),
   tile: m => {
     const err = (V.errors[vItem().key] || {})[m], src = pick((V.images[vItem().key] || {})[m] || {}, st.view, st.boxes).src;
@@ -309,7 +314,7 @@ function renderViewer() {
     const [src, cap] = paneHTML(st[k], item);
     $('v-img-' + k).src = src || ''; $('v-img-' + k).alt = cap.replace(/<[^>]+>/g, '');
     $('v-cap-' + k).innerHTML = cap;
-    drawOverlay($('v-svg-' + k), vBoxes(st[k]), st.boxes);
+    drawOverlay($('v-svg-' + k), vBoxes(st[k]), st.boxes, DET_COLOR);
   }
   vGrid.render();
   vGrid.el.querySelectorAll('figure').forEach(f => f.classList.toggle('on', f.dataset.m === st.a));
@@ -359,22 +364,27 @@ function regTable(regs, shape) {
   return '<table class="phase"><tr><th>#</th><th>Location</th><th>Elements</th><th>Material</th><th>Confidence</th></tr>' +
     regs.map(r => `<tr><td>${r.id}</td><td>${locHTML(r.box, shape)}</td><td>${r.elements.join(', ')}</td><td>${r.material}${r.alts ? `<div class="sub">Alternatives: ${r.alts}</div>` : ''}</td><td>${r.confidence}</td></tr>`).join('') + '</table>';
 }
+/* material name with what it is: an LLM guess (self-rated confidence) or a library ratio match */
+function matText(m, r) {
+  return m.startsWith('vlm:') ? `LLM best guess: ${r.material} (self-rated ${r.confidence})`
+       : r.material === 'no library match' ? r.material : `library match: ${r.material} (${r.confidence})`;
+}
 function ratiosText(r) {
   return Object.entries(r).sort((p, q) => q[1] - p[1]).map(([el, v]) => `${el} ${v}%`).join(', ');
 }
 const mGrid = MS.length && makeGrid({
-  el: $('m-grid'), order: [...M], score: ovl, thresh: DATA.phase_match_overlap,
+  el: $('m-grid'), order: [...M], color: MAT_COLOR, score: ovl, thresh: DATA.phase_match_overlap,
   rerender: () => renderMat(),
   tile: m => {
     const d = MAT[mt.s], imgs = d.images[m] || {}, err = d.errors[m];
-    return { src: st.boxes ? imgs.boxes : imgs.plain,
+    return { src: imgs.plain,
              caption: err ? '<span class="err">error</span>' : `<span>${mRegs(m).length} regions</span>` };
   },
   boxes: m => mRegs(m).map(r => r.box),
   head: (m, i) => {
     const r = mRegs(m)[i];
     return `<b>${label(m)}</b> · region ${r.id}<br>${locHTML(r.box, MAT[mt.s].shape)}` +
-      `<span class="sub"><b>${r.elements.join(', ')}</b> → ${r.material} (${r.confidence})</span>` +
+      `<span class="sub"><b>${r.elements.join(', ')}</b> → ${matText(m, r)}</span>` +
       (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
       (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
       (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '');
@@ -386,10 +396,10 @@ function renderMat() {
   const d = MAT[mt.s];
   for (const k of ['a', 'b']) {
     const m = mt[k], imgs = d.images[m] || {}, regs = mRegs(m), err = d.errors[m];
-    $('m-img-' + k).src = (st.boxes ? imgs.boxes : imgs.plain) || '';
+    $('m-img-' + k).src = imgs.plain || '';
     $('m-cap-' + k).innerHTML = `<b>${label(m)}</b> · ${err ? '<span class="err">error</span>' : regs.length + ' material regions'} · ${st.boxes ? 'with boxes' : 'no boxes'}`;
     $('m-reg-' + k).innerHTML = regTable(regs, d.shape);
-    drawOverlay($('m-svg-' + k), regs.map(r => r.box), st.boxes);
+    drawOverlay($('m-svg-' + k), regs.map(r => r.box), st.boxes, MAT_COLOR);
   }
   mGrid.render();
 }
@@ -407,7 +417,7 @@ if (MS.length) {
     return {
       match: m && m.k,
       html: `<b>${label(mt[k])}</b> · region ${r.id}<br>${locHTML(r.box, d.shape)}` +
-        `<span class="sub"><b>${r.elements.join(', ')}</b> → ${r.material} (${r.confidence})</span>` +
+        `<span class="sub"><b>${r.elements.join(', ')}</b> → ${matText(mt[k], r)}</span>` +
         (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
         (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
         (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '') +
@@ -501,9 +511,9 @@ def _phase_section(results: dict) -> str:
                 trs.append(
                     f"<tr><td class='num'>{r['overlap']:.2f}</td>"
                     f"<td><b>{e(str(A.get('id') or ''))}</b><div>{_loc(A['box'], shape)}</div></td>"
-                    f"<td>{e(', '.join(A['elements']))}</td><td>{e(A['material'])}<div class='sub'>{e(str(A['confidence']))}</div></td>"
+                    f"<td>{e(', '.join(A['elements']))}</td><td>{e(A['material'])}<div class='sub'>match: {e(str(A['confidence']))}</div></td>"
                     f"<td><b>#{e(str(V.get('id') or ''))}</b><div>{_loc(V['box'], shape)}</div></td>"
-                    f"<td>{e(', '.join(V['elements']))}</td><td>{e(V['material'])}<div class='sub'>{e(str(V['confidence']))}</div>"
+                    f"<td>{e(', '.join(V['elements']))}</td><td>{e(V['material'])}<div class='sub'>self-rated: {e(str(V['confidence']))}</div>"
                     + (f"<div class='sub'>Alternatives: {e(_alts_text(V.get('alternatives')))}</div>" if V.get('alternatives') else "")
                     + "</td>"
                     f"<td class='sub'>{e(str(V.get('reasoning', '')))}</td>"
@@ -512,7 +522,7 @@ def _phase_section(results: dict) -> str:
                     f"<th>{e(_label(a))} region / location (px)</th>"
                     f"<th>{e(_label(a))} elements</th><th>{e(_label(a))} library match</th>"
                     f"<th>{e(_label(v))} region / location (px)</th>"
-                    f"<th>{e(_label(v))} elements</th><th>LLM suggestion</th><th>LLM reasoning</th>"
+                    f"<th>{e(_label(v))} elements</th><th>LLM best guess</th><th>LLM reasoning</th>"
                     "<th>Element Jaccard</th></tr>" + "".join(trs) + "</table></div>") if trs else \
                    "<p class='note'>No regions matched.</p>"
             out.append(f"<details><summary>{e(_label(a))} vs {e(_label(v))} — {c['matched']} matched regions, "
@@ -652,7 +662,7 @@ F1 = 2 × matched / (boxes A + boxes B). 1.00 = identical detections, 0.00 = no 
 (the TIFFs are float32 with values far below 1, so 8-bit images need this scaling). <b>Model input</b> is the exact image
 each method analysed; the caption under each panel names every step applied. Images are enlarged with nearest-neighbour
 for display only. With boxes on, <b>hover a box</b> to see its pixel
-location on the TIFF (x/y range, center, size) and its best-overlapping box in the other panel, which is outlined in yellow.</p>
+location on the TIFF (x/y range, center, size) and its best-overlapping box in the other panel, which is outlined in magenta.</p>
 {model_input_table}
 <div class="vbar">
   <button class="navbtn" id="v-prev" aria-label="Previous element">◀</button>
@@ -673,7 +683,7 @@ location on the TIFF (x/y range, center, size) and its best-overlapping box in t
 </div>
 <h3>All methods at a glance</h3>
 <p class="note">Every method on the selected element, four per row. Hover a box: the best-overlapping box in every other
-method is outlined (solid = matched, IoU ≥ {results['match_iou']}; dashed = overlaps but below that) and the tooltip lists them.
+method is outlined in magenta (solid = matched, IoU ≥ {results['match_iou']}; dashed = overlaps but below that) and the tooltip lists them.
 <b>Drag a tile</b> onto another to move it; click a tile to load it in the left panel above.</p>
 <div class="vbar"><span class="seg" data-ctl="view" role="group" aria-label="Image"><button data-v="original">Original</button><button data-v="input">Model input</button></span> <span class="seg" data-ctl="boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span> <span class="seg" data-ctl="tips" role="group" aria-label="Tooltips"><button data-v="on">Tooltips on</button><button data-v="off">Tooltips off</button></span> <button class="navbtn" id="v-grid-reset">Reset order</button></div>
 <div class="mgrid" id="v-grid"></div></section>
@@ -683,6 +693,7 @@ method is outlined (solid = matched, IoU ≥ {results['match_iou']}; dashed = ov
 VLM: LLM co-location zones from <code>_multi_llm_colocate.json</code> with the LLM's suggestion.
 Regions are matched one-to-one when intersection ÷ smaller box ≥ {results.get('phase_match_overlap', 0.5)}
 (AutoMap boxes cover the <i>union</i> of blobs, LLM boxes the <i>intersection</i> of elements, so plain IoU would under-match).</p>
+<p class="caveat"><b>Material names are hypotheses, not identifications.</b> LLM materials are the model's <i>best guess</i> from which elements sit together (plus the sample context); its "high / medium / low" is the LLM's own self-rating, not a measured probability. AutoMap names are the closest entry in <code>materials_library.json</code> by element ratios. XRF gives elements only — no oxidation state, light elements (C, O, H) or crystal structure — so confirm phases with another technique (e.g. XANES, XRD, Raman); the LLM's <i>alternatives</i> say what signal would decide.</p>
 <h3>Materials viewer</h3>
 <p class="note">Pick two methods to compare their material regions on the all-element composite. The table under each image lists that method's regions with their pixel location. With boxes on, <b>hover a box</b>
 for its location, elements, material, ratios / LLM reasoning, and its best-overlapping region in the other panel.</p>
@@ -698,7 +709,7 @@ for its location, elements, material, ratios / LLM reasoning, and its best-overl
 </div>
 <h3>All methods at a glance</h3>
 <p class="note">Every method's material regions on the same composite, four per row. With boxes on, hover a box: the
-best-overlapping region in every other method is outlined (solid = counts as matched, overlap ≥
+best-overlapping region in every other method is outlined in magenta (solid = counts as matched, overlap ≥
 {results.get('phase_match_overlap', 0.5)}; dashed = overlaps but below that), and the tooltip lists what each method
 found at that spot. <b>Drag a tile</b> onto another to move it next to one you want to compare.
 There is no model-input view here: these are all-element composites, not a per-method input image.</p>
@@ -711,7 +722,8 @@ There is no model-input view here: these are all-element composites, not a per-m
 <p class="note">One LLM pass reads every method's material regions (location, elements, name) and groups the ones that
 describe the same particle or phase — even when methods use different names or did not name it at all. Which methods
 found or missed each group is then counted from those groups. Use it to see where deterministic and VLM methods agree,
-disagree, or find things the other missed.</p>
+disagree, or find things the other missed. The group names are also LLM best guesses — agreement between methods
+means they found the same spot and elements, not that the material is confirmed.</p>
 {_reconcile_section(results)}</section>
 
 
@@ -866,7 +878,7 @@ def _reconcile_section(results: dict) -> str:
                          f'<td class="sub">{missing}</td><td class="sub">{e(g["note"])}</td></tr>')
         out.append(f'<h3>Material groups</h3><div class="controls"><label>Show</label>'
                    f'<select class="grp-filter" data-target="grp-{e(s)}">{opts}</select></div>'
-                   f'<div class="scroll"><table class="phase" id="grp-{e(s)}"><tr><th>#</th><th>Material (LLM canonical)</th>'
+                   f'<div class="scroll"><table class="phase" id="grp-{e(s)}"><tr><th>#</th><th>Material (LLM best guess)</th>'
                    '<th>Agreement</th><th>Found by (region: name that method used)</th><th>Missing from</th><th>Note</th></tr>'
                    + "".join(grows) + "</table></div>")
         out.append(f'<p class="note">Files: <code>{e(s)}/material_reconciliation.json</code>, prompt and raw reply '

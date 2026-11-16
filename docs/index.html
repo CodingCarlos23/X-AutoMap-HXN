@@ -182,6 +182,16 @@
     .btn-view:hover { background: var(--blue-70); }
     .card-automap .btn-view { background: #2e7d32; }
     .card-automap .btn-view:hover { background: #1b5e20; }
+    .workflow-card.card-bench { border-top-color: #e65100; }
+    .workflow-card.card-bench h3 { color: #7a2e00; }
+    .card-bench .tag { background: #fff3e0; color: #e65100; }
+    .card-bench .card-steps li::before { background: #e65100; }
+    .card-bench .btn-view { background: #e65100; }
+    .card-bench .btn-view:hover { background: #7a2e00; }
+    .card-bench .btn-row { display: flex; gap: 0.6rem; margin-top: auto; }
+    .card-bench .btn-row .btn-view { flex: 2; }
+    .card-bench .btn-view.secondary { flex: 1; background: transparent; color: #e65100; box-shadow: inset 0 0 0 1.5px #e65100; }
+    .card-bench .btn-view.secondary:hover { background: #fff3e0; }
 
     /* ── Footer ── */
     footer {
@@ -245,7 +255,7 @@
     <a href="index.html" class="active">Home</a>
     <a href="vlm_workflow.html">VLM/LLM Workflow</a>
     <a href="automap.html">AutoMap Pipeline</a>
-    <a href="benchmarks.html">Benchmarks<span style="display:inline-block;margin-left:0.35rem;padding:0.05rem 0.4rem;border-radius:3px;background:#ffbe2e;color:#1b1b1b;font-size:0.65rem;font-weight:800;letter-spacing:0.06em;vertical-align:1px">BETA</span></a>
+    <a href="benchmarks.html">Benchmarks</a>
     <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
   </div>
 </nav>
@@ -253,7 +263,7 @@
 <main>
   <div class="page-intro">
     <h2>Workflow Documentation</h2>
-    <p>Interactive diagrams explaining the two core pipelines in HXN AutoMap. Start with the system overview below, or click a card to open a pipeline's full diagram.</p>
+    <p>Interactive diagrams explaining the two core pipelines in HXN AutoMap and the benchmark that compares them. Start with the system overview below, or click a card to open its full diagram.</p>
   </div>
 
   <div class="card-grid">
@@ -290,11 +300,30 @@
       <a href="automap.html" class="btn-view">View Diagram &rarr;</a>
     </div>
 
+    <!-- Benchmark card -->
+    <div class="workflow-card card-bench">
+      <div class="card-icon">📊</div>
+      <div class="tag">Comparison</div>
+      <h3>Benchmark Report</h3>
+      <p>Runs both pipelines on the same sample TIFFs and compares them side by side: OpenCV and StarDist against five VLM image variants, at the detection, material-region and LLM-reconciliation levels, with API cost per run.</p>
+      <ul class="card-steps">
+        <li>AutoMap (OpenCV · StarDist) and VLM variants on one sample set</li>
+        <li>Level 1: box agreement per element (IoU → F1)</li>
+        <li>Level 2: material regions, AutoMap vs LLM co-location</li>
+        <li>Level 3: LLM groups the same material across methods</li>
+        <li>Interactive report: box tooltips, all-methods grids, cost log</li>
+      </ul>
+      <div class="btn-row">
+        <a href="benchmarks.html" class="btn-view">View Diagram &rarr;</a>
+        <a href="../benchmarks/runs/index.html" class="btn-view secondary" target="_blank" rel="noopener" title="Local only — benchmarks/runs/ is gitignored">Results</a>
+      </div>
+    </div>
+
   </div>
 
   <div class="overview card">
     <h2>System Overview</h2>
-    <p>Both pipelines read the same element TIFFs. The deterministic pipeline drives the fine scan queue today; the AI pipeline runs alongside it, and a side-by-side benchmark of the two is in progress (<a href="benchmarks.html">Benchmarks, beta</a>).</p>
+    <p>Both pipelines read the same element TIFFs. The deterministic pipeline drives the fine scan queue today; the AI pipeline runs alongside it, and the <a href="benchmarks.html">benchmark</a> compares the two side by side.</p>
     <div class="diagram-wrap">
       <pre class="mermaid">
 flowchart TB
@@ -329,7 +358,7 @@ flowchart TB
 
     DO e5@==> Q@{ shape: stadium, label: "<b>Fine scan queue</b><br/><small>beamline queue server</small>" }
     DO --> LSV("<b>Live Scan Viewer</b><br/><small>phase overlays per tile</small>")
-    DO -.-> CMP("<b>Benchmarks · BETA</b><br/><small>VLM vs OpenCV / StarDist<br/>benchmarks/run_comparison.py</small>")
+    DO -.-> CMP("<b>Benchmark report</b><br/><small>VLM vs OpenCV / StarDist<br/>benchmarks/run_comparison.py</small>")
     VO -.-> CMP
 
     e1@{ animate: true }
@@ -359,7 +388,7 @@ flowchart TB
     class DO,VO store
     class Q ai
     class LSV proc
-    class CMP opt
+    class CMP spatial
     style DET fill:#f4faf4,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:6 4,color:#2e7d32
     style AI fill:#f4f8fc,stroke:#005ea2,stroke-width:1px,stroke-dasharray:6 4,color:#005ea2
       </pre>
