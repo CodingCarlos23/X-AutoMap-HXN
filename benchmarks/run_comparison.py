@@ -364,7 +364,8 @@ def _vlm_regions(zones: list) -> list:
         out.append({"id": z.get("id"), "elements": sorted(z.get("elements", [])), "box": b,
                     "material": z.get("llm_suggestion") or z.get("suggestion", ""),
                     "confidence": z.get("confidence", "—"),
-                    "reasoning": z.get("reasoning", "")})
+                    "reasoning": z.get("reasoning", ""),
+                    "alternatives": z.get("alternatives", [])})
     return out
 
 

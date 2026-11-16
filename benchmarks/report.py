@@ -75,13 +75,24 @@ td.score { text-align: center; }
 .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .pane .phead { display: flex; gap: .5rem; align-items: center; margin-bottom: .4rem; }
 .pane img { width: 100%; display: block; border-radius: 4px; background: #000; image-rendering: pixelated; }
+.imgwrap { position: relative; }
+.imgwrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.imgwrap rect { fill: transparent; stroke: transparent; stroke-width: 2px; vector-effect: non-scaling-stroke; cursor: crosshair; }
+.imgwrap rect:hover, .imgwrap rect.hl { stroke: #ffbe2e; fill: rgba(255,190,46,.15); }
+.imgwrap rect.hl-weak { stroke: #ffbe2e; stroke-dasharray: 3 2; }
+.mgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-top: .5rem; }
+.mgrid figure { cursor: grab; border: 2px dashed transparent; border-radius: 6px; padding: 2px; }
+.mgrid figure.dragging { opacity: .4; }
+.mgrid figure.drop { border-color: var(--blue-60); }
+.mgrid figure.on { border-style: solid; border-color: var(--blue-60); }
+.mgrid figure img { image-rendering: pixelated; }
+.mgrid figcaption { font-size: .9rem; margin-top: .35rem; }
+@media (max-width: 900px) { .mgrid { grid-template-columns: repeat(2, 1fr); } }
+#tip { max-width: 380px; }
+#tip .sub { display: block; }
 .pane .cap { font-size: .85rem; color: var(--text-secondary); margin-top: .35rem; }
 .pane .cap b { color: var(--text-primary); }
 .pane .cap .err { color: var(--error); }
-.strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .6rem; margin-top: 1rem; }
-.strip figure { cursor: pointer; border: 2px solid transparent; border-radius: 6px; padding: 2px; }
-.strip figure.on { border-color: var(--blue-60); }
-.strip img { image-rendering: pixelated; }
 .regions { max-height: 320px; overflow: auto; margin-top: .6rem; }
 @media (max-width: 900px) { .panes { grid-template-columns: 1fr; } }
 ul.mlist { margin: 0; padding-left: 1rem; font-size: .85rem; }
@@ -133,10 +144,136 @@ const sel = document.getElementById('heat-sel');
 sel.addEventListener('change', () => renderHeat(sel.value));
 renderHeat('__all__');
 
-/* ---------- detection viewer ---------- */
+/* ---------- box hover overlay (boxes are fractional 0–1; shape = [h, w] of the TIFF) ---------- */
+function px(b, shape) {
+  const [h, w] = shape;
+  return { x1: b.x1 * w, x2: b.x2 * w, y1: b.y1 * h, y2: b.y2 * h };
+}
+function locHTML(b, shape) {
+  const p = px(b, shape), f = v => v.toFixed(0);
+  return `x ${f(p.x1)}–${f(p.x2)}, y ${f(p.y1)}–${f(p.y2)} px` +
+    `<span class="sub">center (${f((p.x1 + p.x2) / 2)}, ${f((p.y1 + p.y2) / 2)}) · ${f(p.x2 - p.x1)}×${f(p.y2 - p.y1)} px` +
+    ` · image ${shape[1]}×${shape[0]}</span>`;
+}
+function inter(a, b) {
+  return Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1)) * Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+}
+const area = b => (b.x2 - b.x1) * (b.y2 - b.y1);
+const iou = (a, b) => { const i = inter(a, b); return i ? i / (area(a) + area(b) - i) : 0; };
+const ovl = (a, b) => { const i = inter(a, b); return i ? i / Math.min(area(a), area(b)) : 0; };
+function bestMatch(b, others, fn) {
+  let best = null;
+  (others || []).forEach((o, k) => { const s = fn(b, o); if (s > 0 && (!best || s > best.s)) best = { k, s }; });
+  return best;
+}
+/* draw invisible hover rects; smaller boxes last so they sit on top of the ones containing them */
+function drawOverlay(svg, boxes, on) {
+  svg.innerHTML = on ? (boxes || []).map((b, k) => [b, k]).sort((p, q) => area(q[0]) - area(p[0]))
+    .map(([b, k]) => `<rect data-k="${k}" x="${b.x1}" y="${b.y1}" width="${b.x2 - b.x1}" height="${b.y2 - b.y1}"/>`).join('') : '';
+}
+function showTip(ev, h) {
+  if (!st.tips) { tip.style.display = 'none'; return; }
+  tip.innerHTML = h; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(ev.clientX + 14, innerWidth - r.width - 8) + 'px';
+  tip.style.top = Math.min(ev.clientY + 14, innerHeight - r.height - 8) + 'px';
+}
+/* hover on a pane's box → tooltip; also outline the best-matching box in the other pane */
+function hookOverlay(prefix, describe) {
+  for (const [k, o] of [['a', 'b'], ['b', 'a']]) {
+    const svg = $(prefix + '-svg-' + k);
+    svg.addEventListener('mousemove', ev => {
+      const r = ev.target.closest('rect');
+      document.querySelectorAll(`#${prefix}-svg-${o} rect.hl`).forEach(x => x.classList.remove('hl'));
+      if (!r) { tip.style.display = 'none'; return; }
+      const { html, match } = describe(k, o, +r.dataset.k);
+      if (match != null) { const m = document.querySelector(`#${prefix}-svg-${o} rect[data-k="${match}"]`); if (m) m.classList.add('hl'); }
+      showTip(ev, html);
+    });
+    svg.addEventListener('mouseleave', () => {
+      tip.style.display = 'none';
+      document.querySelectorAll(`#${prefix}-svg-${o} rect.hl`).forEach(x => x.classList.remove('hl'));
+    });
+  }
+}
+
+/* ---------- "all methods" grid: 4 tiles per row, linked hover, drag to reorder ----------
+   g = { el, order: [...methods], tile(m) → {src, caption}, boxes(m) → [box], head(m, i) → html,
+         score: iou | ovl, thresh, line(m, i, o, best) → html, rerender(), click(m)? } */
+function makeGrid(g) {
+  g.render = () => {
+    g.el.innerHTML = g.order.map(m => {
+      const t = g.tile(m);
+      return `<figure draggable="true" data-m="${m}"><div class="imgwrap"><img draggable="false" loading="lazy" src="${t.src || ''}" alt="${label(m)}">
+        <svg data-m="${m}" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
+        <figcaption><b>${label(m)}</b>${t.caption}</figcaption></figure>`;
+    }).join('');
+    g.el.querySelectorAll('svg').forEach(svg => drawOverlay(svg, g.boxes(svg.dataset.m), st.boxes));
+  };
+  const clearHL = () => g.el.querySelectorAll('rect.hl, rect.hl-weak').forEach(x => x.classList.remove('hl', 'hl-weak'));
+  g.el.addEventListener('mousemove', ev => {
+    const rect = ev.target.closest('rect');
+    clearHL();
+    if (!rect) { tip.style.display = 'none'; return; }
+    const m = rect.closest('svg').dataset.m, i = +rect.dataset.k, b = g.boxes(m)[i];
+    const lines = M.filter(o => o !== m).map(o => {
+      const best = bestMatch(b, g.boxes(o), g.score);
+      if (best) {
+        const el = g.el.querySelector(`svg[data-m="${CSS.escape(o)}"] rect[data-k="${best.k}"]`);
+        if (el) el.classList.add(best.s >= g.thresh ? 'hl' : 'hl-weak');
+      }
+      return `<span class="sub">${!best ? '—' : best.s >= g.thresh ? '✓' : '~'} ${label(o)}: ${best ? g.line(m, i, o, best) : 'nothing here'}</span>`;
+    });
+    showTip(ev, g.head(m, i) + `<br><b>Same spot in other methods</b> (✓ matched · ~ overlaps · — none)` + lines.join(''));
+  });
+  g.el.addEventListener('mouseleave', () => { tip.style.display = 'none'; clearHL(); });
+  if (g.click) g.el.addEventListener('click', ev => { const f = ev.target.closest('figure'); if (f) g.click(f.dataset.m); });
+  /* drag a tile onto another to move it there */
+  let dragM = null;
+  const clearDrop = () => g.el.querySelectorAll('figure.drop').forEach(f => f.classList.remove('drop'));
+  g.el.addEventListener('dragstart', ev => {
+    const f = ev.target.closest('figure'); if (!f) return;
+    dragM = f.dataset.m; f.classList.add('dragging'); tip.style.display = 'none';
+    ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', dragM);
+  });
+  g.el.addEventListener('dragover', ev => {
+    const f = ev.target.closest('figure'); if (!f || !dragM) return;
+    ev.preventDefault(); clearDrop(); if (f.dataset.m !== dragM) f.classList.add('drop');
+  });
+  g.el.addEventListener('drop', ev => {
+    ev.preventDefault();
+    const f = ev.target.closest('figure');
+    if (f && dragM && f.dataset.m !== dragM) {
+      const to = g.order.indexOf(f.dataset.m);
+      g.order.splice(g.order.indexOf(dragM), 1);
+      g.order.splice(to, 0, dragM);
+      g.rerender();
+    }
+  });
+  g.el.addEventListener('dragend', () => { dragM = null; clearDrop();
+    g.el.querySelectorAll('figure.dragging').forEach(f => f.classList.remove('dragging')); });
+  return g;
+}
+
+/* ---------- shared view controls: every .seg[data-ctl] on the page shows and sets the same state ---------- */
 const V = DATA.viewer, M = DATA.methods;
-const st = { idx: 0, boxes: true, view: 'original', a: M[0], b: DATA.vlm[0] || M[1] || M[0] };
+const st = { idx: 0, boxes: true, view: 'original', tips: true, a: M[0], b: DATA.vlm[0] || M[1] || M[0] };
 const $ = id => document.getElementById(id);
+function syncControls() {
+  const cur = { boxes: st.boxes ? 'on' : 'off', view: st.view, tips: st.tips ? 'on' : 'off' };
+  document.querySelectorAll('.seg[data-ctl] button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.v === cur[b.parentNode.dataset.ctl])));
+}
+function renderAll() { renderViewer(); renderMat(); syncControls(); }
+document.querySelectorAll('.seg[data-ctl] button').forEach(b => b.onclick = () => {
+  const c = b.parentNode.dataset.ctl, v = b.dataset.v;
+  if (c === 'boxes') st.boxes = v === 'on';
+  else if (c === 'view') st.view = v;
+  else if (c === 'tips') { st.tips = v === 'on'; tip.style.display = 'none'; }
+  renderAll();
+});
+
+/* ---------- detection viewer ---------- */
 function fillSelect(sel, val) { sel.innerHTML = M.map(m => `<option value="${m}"${m === val ? ' selected' : ''}>${label(m)}</option>`).join(''); }
 function pick(imgs, view, boxes) {
   const mode = (view === 'input' && imgs.input) ? 'input' : 'original';
@@ -151,21 +288,31 @@ function paneHTML(m, item) {
   return [src, `<b>${label(m)}</b> · ${err ? `<span class="err" title="${err.replace(/"/g, '&quot;')}">error</span>` : `${n} boxes`}`
                + ` · ${what}${st.boxes ? ', with boxes' : ', no boxes'}`];
 }
+const vItem = () => V.items[st.idx];
+const vBoxes = m => (V.boxes[vItem().key] || {})[m] || [];
+const vGrid = makeGrid({
+  el: $('v-grid'), order: [...M], score: iou, thresh: DATA.match_iou,
+  rerender: () => renderViewer(),
+  tile: m => {
+    const err = (V.errors[vItem().key] || {})[m], src = pick((V.images[vItem().key] || {})[m] || {}, st.view, st.boxes).src;
+    return { src, caption: err ? '<span class="err">error</span>' : `<span>${vBoxes(m).length} boxes</span>` };
+  },
+  boxes: vBoxes,
+  head: (m, i) => `<b>${label(m)}</b> · box #${i + 1} of ${vBoxes(m).length} · ${vItem().label}<br>${locHTML(vBoxes(m)[i], V.shape[vItem().key])}`,
+  line: (m, i, o, best) => `box #${best.k + 1}, IoU ${best.s.toFixed(2)}`,
+  click: m => { st.a = m; $('v-sel-a').value = m; renderViewer(); },
+});
 function renderViewer() {
-  const item = V.items[st.idx];
+  const item = vItem();
   $('v-el').value = String(st.idx);
   for (const k of ['a', 'b']) {
     const [src, cap] = paneHTML(st[k], item);
     $('v-img-' + k).src = src || ''; $('v-img-' + k).alt = cap.replace(/<[^>]+>/g, '');
     $('v-cap-' + k).innerHTML = cap;
+    drawOverlay($('v-svg-' + k), vBoxes(st[k]), st.boxes);
   }
-  $('v-strip').innerHTML = M.map(m => {
-    const [src, cap] = paneHTML(m, item);
-    return `<figure data-m="${m}" class="${m === st.a ? 'on' : ''}"><img loading="lazy" src="${src || ''}" alt="${label(m)}">
-            <figcaption><b>${label(m)}</b><span>${(V.counts[item.key] || {})[m] ?? ''}</span></figcaption></figure>`;
-  }).join('');
-  document.querySelectorAll('#v-boxes button').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.v === 'on') === st.boxes)));
-  document.querySelectorAll('#v-view button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === st.view)));
+  vGrid.render();
+  vGrid.el.querySelectorAll('figure').forEach(f => f.classList.toggle('on', f.dataset.m === st.a));
 }
 $('v-el').innerHTML = V.items.map((it, i) => `<option value="${i}">${it.label}</option>`).join('');
 fillSelect($('v-sel-a'), st.a); fillSelect($('v-sel-b'), st.b);
@@ -174,17 +321,28 @@ $('v-prev').onclick = () => { st.idx = (st.idx - 1 + V.items.length) % V.items.l
 $('v-next').onclick = () => { st.idx = (st.idx + 1) % V.items.length; renderViewer(); };
 $('v-sel-a').onchange = e => { st.a = e.target.value; renderViewer(); };
 $('v-sel-b').onchange = e => { st.b = e.target.value; renderViewer(); };
-document.querySelectorAll('#v-boxes button').forEach(b => b.onclick = () => { st.boxes = b.dataset.v === 'on'; renderViewer(); renderMat(); });
-document.querySelectorAll('#v-view button').forEach(b => b.onclick = () => { st.view = b.dataset.v; renderViewer(); });
-$('v-strip').onclick = e => { const f = e.target.closest('figure'); if (f) { st.a = f.dataset.m; $('v-sel-a').value = st.a; renderViewer(); } };
+$('v-grid-reset').onclick = () => { vGrid.order = [...M]; renderViewer(); };
 document.addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   if (e.key === 'ArrowRight') $('v-next').click();
   else if (e.key === 'ArrowLeft') $('v-prev').click();
-  else if (e.key === 'b') { st.boxes = !st.boxes; renderViewer(); renderMat(); }
-  else if (e.key === 'i') { st.view = st.view === 'input' ? 'original' : 'input'; renderViewer(); }
+  else if (e.key === 'b') { st.boxes = !st.boxes; renderAll(); }
+  else if (e.key === 'i') { st.view = st.view === 'input' ? 'original' : 'input'; renderAll(); }
+  else if (e.key === 't') { st.tips = !st.tips; tip.style.display = 'none'; syncControls(); }
 });
-renderViewer();
+hookOverlay('v', (k, o, i) => {
+  const item = vItem(), shape = V.shape[item.key];
+  const b = vBoxes(st[k])[i], m = bestMatch(b, vBoxes(st[o]), iou);
+  const other = `<b>${label(st[o])}</b>`;
+  return {
+    match: m && m.k,
+    html: `<b>${label(st[k])}</b> · box #${i + 1} of ${vBoxes(st[k]).length} · ${item.label}<br>${locHTML(b, shape)}` +
+      (m ? `<span class="sub">Best overlap in ${other}: box #${m.k + 1}, IoU ${m.s.toFixed(2)}` +
+           `${m.s >= DATA.match_iou ? ' (counts as matched)' : ` (below ${DATA.match_iou}, not matched)`}</span>` +
+           `<span class="sub">${other} box: ${locHTML(vBoxes(st[o])[m.k], shape).replace(/<[^>]+>/g, ' ')}</span>`
+         : `<span class="sub">No overlapping box in ${other}</span>`)
+  };
+});
 
 /* ---------- material-group filter ---------- */
 document.querySelectorAll('.grp-filter').forEach(sel => sel.onchange = () => {
@@ -195,21 +353,45 @@ document.querySelectorAll('.grp-filter').forEach(sel => sel.onchange = () => {
 /* ---------- materials viewer ---------- */
 const MAT = DATA.materials, MS = Object.keys(MAT);
 const mt = { s: MS[0], a: M[0], b: DATA.vlm[0] || M[1] || M[0] };
-function regTable(regs) {
+const mRegs = m => (MAT[mt.s].regions[m] || []);
+function regTable(regs, shape) {
   if (!regs || !regs.length) return '<p class="note">No multi-element regions.</p>';
-  return '<table class="phase"><tr><th>#</th><th>Elements</th><th>Material</th><th>Confidence</th></tr>' +
-    regs.map(r => `<tr><td>${r.id ?? ''}</td><td>${r.elements.join(', ')}</td><td>${r.material}</td><td>${r.confidence}</td></tr>`).join('') + '</table>';
+  return '<table class="phase"><tr><th>#</th><th>Location</th><th>Elements</th><th>Material</th><th>Confidence</th></tr>' +
+    regs.map(r => `<tr><td>${r.id}</td><td>${locHTML(r.box, shape)}</td><td>${r.elements.join(', ')}</td><td>${r.material}${r.alts ? `<div class="sub">Alternatives: ${r.alts}</div>` : ''}</td><td>${r.confidence}</td></tr>`).join('') + '</table>';
 }
+function ratiosText(r) {
+  return Object.entries(r).sort((p, q) => q[1] - p[1]).map(([el, v]) => `${el} ${v}%`).join(', ');
+}
+const mGrid = MS.length && makeGrid({
+  el: $('m-grid'), order: [...M], score: ovl, thresh: DATA.phase_match_overlap,
+  rerender: () => renderMat(),
+  tile: m => {
+    const d = MAT[mt.s], imgs = d.images[m] || {}, err = d.errors[m];
+    return { src: st.boxes ? imgs.boxes : imgs.plain,
+             caption: err ? '<span class="err">error</span>' : `<span>${mRegs(m).length} regions</span>` };
+  },
+  boxes: m => mRegs(m).map(r => r.box),
+  head: (m, i) => {
+    const r = mRegs(m)[i];
+    return `<b>${label(m)}</b> · region ${r.id}<br>${locHTML(r.box, MAT[mt.s].shape)}` +
+      `<span class="sub"><b>${r.elements.join(', ')}</b> → ${r.material} (${r.confidence})</span>` +
+      (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
+      (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
+      (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '');
+  },
+  line: (m, i, o, best) => { const mr = mRegs(o)[best.k]; return `${mr.elements.join(', ')} → ${mr.material} (overlap ${best.s.toFixed(2)})`; },
+});
 function renderMat() {
   if (!MS.length) return;
   const d = MAT[mt.s];
   for (const k of ['a', 'b']) {
-    const m = mt[k], imgs = d.images[m] || {}, regs = d.regions[m] || [], err = d.errors[m];
+    const m = mt[k], imgs = d.images[m] || {}, regs = mRegs(m), err = d.errors[m];
     $('m-img-' + k).src = (st.boxes ? imgs.boxes : imgs.plain) || '';
     $('m-cap-' + k).innerHTML = `<b>${label(m)}</b> · ${err ? '<span class="err">error</span>' : regs.length + ' material regions'} · ${st.boxes ? 'with boxes' : 'no boxes'}`;
-    $('m-reg-' + k).innerHTML = regTable(regs);
+    $('m-reg-' + k).innerHTML = regTable(regs, d.shape);
+    drawOverlay($('m-svg-' + k), regs.map(r => r.box), st.boxes);
   }
-  document.querySelectorAll('#m-boxes button').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.v === 'on') === st.boxes)));
+  mGrid.render();
 }
 if (MS.length) {
   $('m-sample').innerHTML = MS.map(s => `<option>${s}</option>`).join('');
@@ -217,9 +399,25 @@ if (MS.length) {
   fillSelect($('m-sel-a'), mt.a); fillSelect($('m-sel-b'), mt.b);
   $('m-sel-a').onchange = e => { mt.a = e.target.value; renderMat(); };
   $('m-sel-b').onchange = e => { mt.b = e.target.value; renderMat(); };
-  document.querySelectorAll('#m-boxes button').forEach(b => b.onclick = () => { st.boxes = b.dataset.v === 'on'; renderMat(); renderViewer(); });
-  renderMat();
+  $('m-grid-reset').onclick = () => { mGrid.order = [...M]; renderMat(); };
+  hookOverlay('m', (k, o, i) => {
+    const d = MAT[mt.s], r = mRegs(mt[k])[i];
+    const m = bestMatch(r.box, mRegs(mt[o]).map(x => x.box), ovl);
+    const other = `<b>${label(mt[o])}</b>`, mr = m && mRegs(mt[o])[m.k];
+    return {
+      match: m && m.k,
+      html: `<b>${label(mt[k])}</b> · region ${r.id}<br>${locHTML(r.box, d.shape)}` +
+        `<span class="sub"><b>${r.elements.join(', ')}</b> → ${r.material} (${r.confidence})</span>` +
+        (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
+        (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
+        (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '') +
+        (m ? `<span class="sub">Best overlap in ${other}: region ${mr.id} (${mr.elements.join(', ')} → ${mr.material}), ` +
+             `overlap ${m.s.toFixed(2)}${m.s >= DATA.phase_match_overlap ? ' (counts as matched)' : ' (not matched)'}</span>`
+           : `<span class="sub">No overlapping region in ${other}</span>`)
+    };
+  });
 }
+renderAll();
 """
 
 
@@ -235,12 +433,27 @@ def _ramp(v: float) -> tuple:
     return _RAMP[i], ("#ffffff" if i >= 7 else "#1b1b1b")
 
 
+def _sample_shape(sd: dict) -> list:
+    """[h, w] of the sample's TIFFs (every element is resized to AutoMap's common shape)."""
+    return next(iter(sd["elements"].values()), {}).get("shape") or [1, 1]
+
+
+def _loc(b: dict, shape: list) -> str:
+    """Pixel location of a fractional box on the TIFF: x range, y range, center."""
+    h, w = shape
+    x1, x2, y1, y2 = b["x1"] * w, b["x2"] * w, b["y1"] * h, b["y2"] * h
+    return (f"x {x1:.0f}–{x2:.0f}, y {y1:.0f}–{y2:.0f}"
+            f"<div class='sub'>center ({(x1 + x2) / 2:.0f}, {(y1 + y2) / 2:.0f}) · "
+            f"{x2 - x1:.0f}×{y2 - y1:.0f} px</div>")
+
+
 def _phase_section(results: dict) -> str:
     e = html.escape
     am, vv = results.get("automap_methods", []), results.get("vlm_variants", [])
     out = []
     for s, sd in results["samples"].items():
         ph = sd["phase"]
+        shape = _sample_shape(sd)
         out.append(f"<h3>{e(s)}</h3>")
         # summary grid: AutoMap method × VLM variant
         if am and vv and ph["comparisons"]:
@@ -287,12 +500,18 @@ def _phase_section(results: dict) -> str:
                 A, V = r["automap"], r["vlm"]
                 trs.append(
                     f"<tr><td class='num'>{r['overlap']:.2f}</td>"
+                    f"<td><b>{e(str(A.get('id') or ''))}</b><div>{_loc(A['box'], shape)}</div></td>"
                     f"<td>{e(', '.join(A['elements']))}</td><td>{e(A['material'])}<div class='sub'>{e(str(A['confidence']))}</div></td>"
-                    f"<td>{e(', '.join(V['elements']))}</td><td>{e(V['material'])}<div class='sub'>{e(str(V['confidence']))}</div></td>"
+                    f"<td><b>#{e(str(V.get('id') or ''))}</b><div>{_loc(V['box'], shape)}</div></td>"
+                    f"<td>{e(', '.join(V['elements']))}</td><td>{e(V['material'])}<div class='sub'>{e(str(V['confidence']))}</div>"
+                    + (f"<div class='sub'>Alternatives: {e(_alts_text(V.get('alternatives')))}</div>" if V.get('alternatives') else "")
+                    + "</td>"
                     f"<td class='sub'>{e(str(V.get('reasoning', '')))}</td>"
                     f"<td class='num'>{r['element_jaccard']:.2f}</td></tr>")
             body = ("<div class='scroll'><table class='phase'><tr><th>Overlap</th>"
+                    f"<th>{e(_label(a))} region / location (px)</th>"
                     f"<th>{e(_label(a))} elements</th><th>{e(_label(a))} library match</th>"
+                    f"<th>{e(_label(v))} region / location (px)</th>"
                     f"<th>{e(_label(v))} elements</th><th>LLM suggestion</th><th>LLM reasoning</th>"
                     "<th>Element Jaccard</th></tr>" + "".join(trs) + "</table></div>") if trs else \
                    "<p class='note'>No regions matched.</p>"
@@ -301,7 +520,40 @@ def _phase_section(results: dict) -> str:
     return "".join(out)
 
 
+def _alts_text(alts) -> str:
+    """LLM alternative materials → 'name (note); name (note)'."""
+    out = []
+    for a in alts or []:
+        if isinstance(a, dict):
+            out.append(str(a.get("name", "")) + (f" ({a['note']})" if a.get("note") else ""))
+        else:
+            out.append(str(a))
+    return "; ".join(x for x in out if x)
+
+
+def _backfill_alternatives(results: dict, run_dir: pathlib.Path):
+    """Runs made before 'alternatives' was kept in results.json: read them from each variant's
+    <sample>_multi_llm_colocate.json on disk (matched by zone id). Read-only; the run folder is not modified."""
+    for s, sd in results["samples"].items():
+        ph = sd["phase"]
+        for mid, regs in ph["regions"].items():
+            if not mid.startswith("vlm:") or all("alternatives" in r for r in regs):
+                continue
+            f = run_dir / s / f"vlm_{mid[4:]}" / f"{s}_multi_llm_colocate.json"
+            try:
+                alts = {z.get("id"): z.get("alternatives", []) for z in json.loads(f.read_text())["overlap_zones"]}
+            except Exception:
+                continue
+            for r in regs:
+                r.setdefault("alternatives", alts.get(r.get("id"), []))
+            for key, c in ph["comparisons"].items():
+                if key.endswith("|" + mid):
+                    for row in c["rows"]:
+                        row["vlm"].setdefault("alternatives", alts.get(row["vlm"].get("id"), []))
+
+
 def write_report(results: dict, out: pathlib.Path):
+    _backfill_alternatives(results, out.parent)
     methods = results["methods"]
     samples = results["samples"]
     e = html.escape
@@ -329,7 +581,7 @@ def write_report(results: dict, out: pathlib.Path):
         for s, sd in samples.items() for el in sd["elements"]]
 
     # viewer data: every element × method → its four image paths
-    viewer = {"items": [], "images": {}, "counts": {}, "errors": {}}
+    viewer = {"items": [], "images": {}, "counts": {}, "errors": {}, "boxes": {}, "shape": {}}
     for s_, sd in samples.items():
         for el, d in sd["elements"].items():
             key = f"{s_}/{el}"
@@ -337,9 +589,15 @@ def write_report(results: dict, out: pathlib.Path):
             viewer["images"][key] = d["images"]
             viewer["counts"][key] = {m: len(d["boxes"].get(m, [])) for m in methods}
             viewer["errors"][key] = d["errors"]
+            viewer["boxes"][key] = d["boxes"]
+            viewer["shape"][key] = d["shape"]
     materials = {s_: {"images": sd["phase"]["images"], "errors": sd["phase"]["errors"],
-                      "regions": {m: [{"id": r.get("id"), "elements": r["elements"],
-                                       "material": e(str(r["material"])), "confidence": e(str(r["confidence"]))}
+                      "shape": _sample_shape(sd),
+                      "regions": {m: [{"id": e(str(r.get("id") or "")), "elements": r["elements"],
+                                       "material": e(str(r["material"])), "confidence": e(str(r["confidence"])),
+                                       "box": r["box"], "ratios": r.get("ratios") or {},
+                                       "reasoning": e(str(r.get("reasoning") or "")),
+                                       "alts": e(_alts_text(r.get("alternatives")))}
                                       for r in regs]
                                   for m, regs in sd["phase"]["regions"].items()}}
                  for s_, sd in samples.items()}
@@ -355,6 +613,8 @@ def write_report(results: dict, out: pathlib.Path):
                          + "".join(f"<tr><td>{e(_label(m))}</td><td>{e(mi.get(m, '?'))}</td></tr>" for m in methods)
                          + '</table></div></details>')
     data_json = json.dumps({"methods": methods, "vlm": results.get("vlm_variants", []), "model_input": mi,
+                            "match_iou": results["match_iou"],
+                            "phase_match_overlap": results.get("phase_match_overlap", 0.5),
                             "viewer": viewer, "materials": materials,
                             "overall_agreement": results["overall_agreement"],
                             "samples": {s: {"elements": {el: {"agreement": d["agreement"]}
@@ -391,23 +651,32 @@ F1 = 2 × matched / (boxes A + boxes B). 1.00 = identical detections, 0.00 = no 
 <p class="note"><b>Original</b> is the element TIFF min-max scaled to 0–255 — the least processing any method can use
 (the TIFFs are float32 with values far below 1, so 8-bit images need this scaling). <b>Model input</b> is the exact image
 each method analysed; the caption under each panel names every step applied. Images are enlarged with nearest-neighbour
-for display only. Click a thumbnail to put it in the left panel.</p>
+for display only. With boxes on, <b>hover a box</b> to see its pixel
+location on the TIFF (x/y range, center, size) and its best-overlapping box in the other panel, which is outlined in yellow.</p>
 {model_input_table}
 <div class="vbar">
   <button class="navbtn" id="v-prev" aria-label="Previous element">◀</button>
   <select id="v-el" aria-label="Element"></select>
   <button class="navbtn" id="v-next" aria-label="Next element">▶</button>
-  <span class="seg" id="v-view" role="group" aria-label="Image"><button data-v="original">Original</button><button data-v="input">Model input</button></span>
-  <span class="seg" id="v-boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span>
-  <span class="kbd">keys: ← → element · b boxes · i image</span>
+  <span class="seg" data-ctl="view" role="group" aria-label="Image"><button data-v="original">Original</button><button data-v="input">Model input</button></span>
+  <span class="seg" data-ctl="boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span>
+  <span class="seg" data-ctl="tips" role="group" aria-label="Tooltips"><button data-v="on">Tooltips on</button><button data-v="off">Tooltips off</button></span>
+  <span class="kbd">keys: ← → element · b boxes · i image · t tooltips</span>
 </div>
 <div class="panes">
   <div class="pane"><div class="phead"><label for="v-sel-a">Left</label><select id="v-sel-a"></select></div>
-    <img id="v-img-a" alt=""><div class="cap" id="v-cap-a"></div></div>
+    <div class="imgwrap"><img id="v-img-a" alt=""><svg id="v-svg-a" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
+    <div class="cap" id="v-cap-a"></div></div>
   <div class="pane"><div class="phead"><label for="v-sel-b">Right</label><select id="v-sel-b"></select></div>
-    <img id="v-img-b" alt=""><div class="cap" id="v-cap-b"></div></div>
+    <div class="imgwrap"><img id="v-img-b" alt=""><svg id="v-svg-b" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
+    <div class="cap" id="v-cap-b"></div></div>
 </div>
-<div class="strip" id="v-strip"></div></section>
+<h3>All methods at a glance</h3>
+<p class="note">Every method on the selected element, four per row. Hover a box: the best-overlapping box in every other
+method is outlined (solid = matched, IoU ≥ {results['match_iou']}; dashed = overlaps but below that) and the tooltip lists them.
+<b>Drag a tile</b> onto another to move it; click a tile to load it in the left panel above.</p>
+<div class="vbar"><span class="seg" data-ctl="view" role="group" aria-label="Image"><button data-v="original">Original</button><button data-v="input">Model input</button></span> <span class="seg" data-ctl="boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span> <span class="seg" data-ctl="tips" role="group" aria-label="Tooltips"><button data-v="on">Tooltips on</button><button data-v="off">Tooltips off</button></span> <button class="navbtn" id="v-grid-reset">Reset order</button></div>
+<div class="mgrid" id="v-grid"></div></section>
 
 <section id="phase"><h2>Level 2 · Phase / material regions</h2>
 <p class="note">AutoMap: multi-element unions from <code>phase_detections.json</code> with their materials-library match.
@@ -415,15 +684,26 @@ VLM: LLM co-location zones from <code>_multi_llm_colocate.json</code> with the L
 Regions are matched one-to-one when intersection ÷ smaller box ≥ {results.get('phase_match_overlap', 0.5)}
 (AutoMap boxes cover the <i>union</i> of blobs, LLM boxes the <i>intersection</i> of elements, so plain IoU would under-match).</p>
 <h3>Materials viewer</h3>
-<p class="note">Pick two methods to compare their material regions on the all-element composite. The table under each image lists that method's regions.</p>
+<p class="note">Pick two methods to compare their material regions on the all-element composite. The table under each image lists that method's regions with their pixel location. With boxes on, <b>hover a box</b>
+for its location, elements, material, ratios / LLM reasoning, and its best-overlapping region in the other panel.</p>
 <div class="vbar"><label for="m-sample">Sample</label><select id="m-sample"></select>
-<span class="seg" id="m-boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span></div>
+<span class="seg" data-ctl="boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span> <span class="seg" data-ctl="tips" role="group" aria-label="Tooltips"><button data-v="on">Tooltips on</button><button data-v="off">Tooltips off</button></span></div>
 <div class="panes">
   <div class="pane"><div class="phead"><label for="m-sel-a">Left</label><select id="m-sel-a"></select></div>
-    <img id="m-img-a" alt=""><div class="cap" id="m-cap-a"></div><div class="regions scroll" id="m-reg-a"></div></div>
+    <div class="imgwrap"><img id="m-img-a" alt=""><svg id="m-svg-a" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
+    <div class="cap" id="m-cap-a"></div><div class="regions scroll" id="m-reg-a"></div></div>
   <div class="pane"><div class="phead"><label for="m-sel-b">Right</label><select id="m-sel-b"></select></div>
-    <img id="m-img-b" alt=""><div class="cap" id="m-cap-b"></div><div class="regions scroll" id="m-reg-b"></div></div>
+    <div class="imgwrap"><img id="m-img-b" alt=""><svg id="m-svg-b" viewBox="0 0 1 1" preserveAspectRatio="none"></svg></div>
+    <div class="cap" id="m-cap-b"></div><div class="regions scroll" id="m-reg-b"></div></div>
 </div>
+<h3>All methods at a glance</h3>
+<p class="note">Every method's material regions on the same composite, four per row. With boxes on, hover a box: the
+best-overlapping region in every other method is outlined (solid = counts as matched, overlap ≥
+{results.get('phase_match_overlap', 0.5)}; dashed = overlaps but below that), and the tooltip lists what each method
+found at that spot. <b>Drag a tile</b> onto another to move it next to one you want to compare.
+There is no model-input view here: these are all-element composites, not a per-method input image.</p>
+<div class="vbar"><span class="seg" data-ctl="boxes" role="group" aria-label="Boxes"><button data-v="on">Boxes on</button><button data-v="off">Boxes off</button></span> <span class="seg" data-ctl="tips" role="group" aria-label="Tooltips"><button data-v="on">Tooltips on</button><button data-v="off">Tooltips off</button></span> <button class="navbtn" id="m-grid-reset">Reset order</button></div>
+<div class="mgrid" id="m-grid"></div>
 <h3>AutoMap vs VLM summary</h3>
 {_phase_section(results)}</section>
 
