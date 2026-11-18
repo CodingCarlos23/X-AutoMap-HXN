@@ -182,6 +182,9 @@
     <a href="vlm_workflow.html">VLM/LLM Workflow</a>
     <a href="automap.html">AutoMap Pipeline</a>
     <a href="benchmarks.html" class="active">Benchmarks</a>
+    <a href="opencv_llm.html">OpenCV + LLM</a>
+    <a href="car_standalone.html">Car Standalone</a>
+    <a href="tuner.html">Tuner</a>
     <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
   </div>
 </nav>
@@ -225,13 +228,23 @@ flowchart TB
         V3(["<b>★ circle</b><br/><small>GUI default</small>"])
         V4(["<b>flower</b><br/><small>emoji marker</small>"])
         V5(["<b>car</b><br/><small>emoji marker</small>"])
+        V6(["<b>car&#95;standalone</b><br/><small>car mosaic · no OpenCV<br/>1 car per 5 px cell</small>"])
         V1 ~~~ V4
         V2 ~~~ V5
-        V3
+        V3 ~~~ V6
+    end
+
+    subgraph HY["②b OPENCV + LLM — materials only, no image"]
+        direction TB
+        H1(["<b>opencv:…:standard:llm</b><br/><small>all standard blobs + intensities<br/>→ LLM co-location</small>"])
+        H2(["<b>opencv:…:raw:llm</b><br/><small>all raw blobs + intensities<br/>→ LLM co-location</small>"])
+        H1 ~~~ H2
     end
 
     COPY e2@==> AM
     COPY e3@==> VL
+    AM == "same blobs + intensities" ==> HY
+    HY ==> NORM
 
     NORM[("<b>Common schema</b><br/><small>_all_blobs.json · _materials.json<br/>fractional boxes 0–1</small>")]
     AM ==> NORM
@@ -240,7 +253,7 @@ flowchart TB
     subgraph SCORE["③ SCORING — agreement between methods"]
         direction LR
         L1("<b>Level 1 · Boxes</b><br/><small>every method pair, per element<br/>greedy IoU ≥ 0.25 → F1 · mean IoU</small>")
-        L2("<b>Level 2 · Materials</b><br/><small>AutoMap vs VLM regions<br/>overlap ≥ 0.5 · element Jaccard</small>")
+        L2("<b>Level 2 · Materials</b><br/><small>AutoMap vs VLM regions<br/>+ OpenCV library vs OpenCV + LLM<br/>overlap ≥ 0.5 · element Jaccard</small>")
         L3{{"<b>Level 3 · LLM reconciliation</b><br/><small>groups the same particle across methods<br/>→ found / missed per method</small>"}}
         L1 ~~~ L2 ~~~ L3
     end
@@ -278,9 +291,11 @@ flowchart TB
     classDef opt    fill:#ffffff,stroke:#8a929c,stroke-width:1.5px,stroke-dasharray:5 4,color:#565c65
     classDef bar    fill:#1a4480,stroke:#1a4480
     classDef best fill:#e8f5e9,stroke:#2e7d32,stroke-width:2.5px,color:#1b5e20
+    classDef planned fill:#faf5fc,stroke:#6a1b9a,stroke-width:1.5px,stroke-dasharray:5 4,color:#4a148c
+    class H1,H2 ai
     class SMP,CFGB input
     class COPY proc
-    class A1,A2,A3,A4,V1,V2,V4,V5 model
+    class A1,A2,A3,A4,V1,V2,V4,V5,V6 model
     class V3 best
     class NORM store
     class L1,L2 spatial
@@ -291,6 +306,7 @@ flowchart TB
     style VL fill:#f4f8fc,stroke:#005ea2,stroke-width:1px,stroke-dasharray:6 4,color:#005ea2
     style SCORE fill:#fffaf3,stroke:#e65100,stroke-width:1px,stroke-dasharray:6 4,color:#e65100
     style OUT fill:#fdf5f8,stroke:#880e4f,stroke-width:1px,stroke-dasharray:6 4,color:#880e4f
+    style HY fill:#f5f7fd,stroke:#1a4480,stroke-width:1px,stroke-dasharray:6 4,color:#1a4480
       </pre>
     </div>
     <div class="legend">
@@ -313,9 +329,11 @@ flowchart TB
         <tr><td><code>opencv:&lt;method&gt;:standard</code></td><td>Min-max normalized + dilated (config kernel × iterations)</td><td>Detector taken from the AutoMap config (e.g. <code>simple</code>)</td></tr>
         <tr><td><code>opencv:&lt;method&gt;:raw</code></td><td>Min-max normalized, no dilation</td><td>Shows how much dilation changes detections</td></tr>
         <tr><td><code>stardist:standard</code> / <code>:raw</code></td><td>Same two inputs as OpenCV</td><td><code>2D_versatile_fluo</code>, prob 0.5, NMS 0.4</td></tr>
+        <tr><td><code>opencv:&lt;method&gt;:standard:llm</code> / <code>:raw:llm</code></td><td>No image: all per-element blobs of that OpenCV run, with their measured intensities, sent to the LLM co-location step</td><td>Same detections as the matching OpenCV run, so Level 2 compares library naming vs LLM naming directly</td></tr>
         <tr><td><code>vlm:raw</code></td><td>Min-max only, native size</td><td>Baseline: no preprocessing help</td></tr>
         <tr><td><code>vlm:standard</code></td><td>Min-max + upscale 1092 px + CLAHE</td><td>Feature Locator default when circles are off</td></tr>
         <tr><td><code>vlm:circle</code> ★</td><td>Otsu particles drawn as per-element coloured circles on white</td><td>Current best method; matches the GUI multi-element default. OpenCV (blur → Otsu → contours) finds the particles before the VLM sees the image, so this tests how well the VLM boxes markers, not whether it can find particles</td></tr>
+        <tr><td><code>vlm:car_standalone</code></td><td>Car mosaic: one car emoji per 5×5 px cell, opacity = that cell's brightness (stretched to the 95th percentile); native size, no upscale</td><td>No OpenCV detection (no threshold, contours or blob finding): the VLM groups the cars into particles itself. Compare with <code>vlm:car</code>, whose particles are found by Otsu. Cell size and stretch: <code>car_cell_px</code>, <code>car_stretch_pct</code></td></tr>
         <tr><td><code>vlm:flower</code> / <code>vlm:car</code></td><td>Same Otsu particles, stamped as 🌸 / 🚗 emoji</td><td>Experiment: does a familiar object shape help the VLM count? Same as circle: particles are found by Otsu first; the emoji is resized to a square, so the car is squashed</td></tr>
       </tbody>
     </table>
@@ -350,7 +368,7 @@ xdg-open benchmarks/runs/&lt;timestamp&gt;_test_samples/index.html</pre>
       <li><strong>Prompt bank</strong> (TODO #10): compare several system prompts on the same data and pick the winner for the Feature Locator default.</li>
       <li><strong>Dilation for circle mode:</strong> the GUI multi-element workflow never dilates. Worth adding as a benchmark variant.</li>
       <li><strong>Circle prompt suffix:</strong> flower and car get a suffix telling the VLM the particles were replaced by markers on white; circle gets none, so its prompt still describes bright particles on a dark background. Add one to <code>compare_default.json</code>.</li>
-      <li><strong>Save the co-location prompt:</strong> each run saves the LLM co-location reply (<code>raw_replies/colocate.txt</code>) but not the prompt that produced it.</li>
+      <li><strong>OpenCV + LLM in the GUI:</strong> built in the benchmark; the Feature Locator option is next.</li>
       <li><strong>Minimum area for markers:</strong> the circle / emoji transform has no minimum contour area, so any speck above the Otsu threshold becomes a marker (the car variant gives ~600 boxes per sample).</li>
     </ul>
   </div>

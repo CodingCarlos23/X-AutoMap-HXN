@@ -177,6 +177,9 @@
     <a href="vlm_workflow.html">VLM/LLM Workflow</a>
     <a href="automap.html" class="active">AutoMap Pipeline</a>
     <a href="benchmarks.html">Benchmarks</a>
+    <a href="opencv_llm.html">OpenCV + LLM</a>
+    <a href="car_standalone.html">Car Standalone</a>
+    <a href="tuner.html">Tuner</a>
     <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
   </div>
 </nav>
@@ -392,7 +395,7 @@ flowchart TB
       <li>
         <div class="step-content">
           <h3>Phase Matching (on raw detections)</h3>
-          <p><code>run_phase_matching()</code> in <code>phase_matching.py</code> runs directly on <code>MASTER_raw_detections.json</code>, independently of the union loop. <code>_build_centroid_union_clusters()</code> groups blobs from different elements whose centres lie within <code>proximity_px</code>; each cluster's elemental intensity ratios are then scored against <code>configs/materials_library.json</code> by <code>score_against_library()</code>. Writes <code>phase_detections.json</code> plus <code>phase_all_boxes.png</code>, <code>phase_matches.png</code>, and <code>phase_all_unions.png</code>. Failures here are non-fatal — the rest of the pipeline continues.</p>
+          <p><code>run_phase_matching()</code> in <code>phase_matching.py</code> runs directly on <code>MASTER_raw_detections.json</code>, independently of the union loop. <code>_build_centroid_union_clusters()</code> groups blobs from different elements whose centres lie within <code>proximity_px</code>; each cluster's elemental intensity ratios are then scored against <code>configs/materials_library.json</code> by <code>score_against_library()</code>. Writes <code>phase_detections.json</code> plus <code>phase_all_boxes.png</code>, <code>phase_matches.png</code>, and <code>phase_all_unions.png</code>. Failures here are non-fatal — the rest of the pipeline continues. <em>Planned:</em> the same raw detections, with their intensities, can also go to the LLM co-location step for an LLM material guess to compare with the library match (see <a href="vlm_workflow.html">VLM/LLM Workflow</a>).</p>
         </div>
       </li>
       <li>
