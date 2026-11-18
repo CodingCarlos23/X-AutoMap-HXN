@@ -90,6 +90,13 @@ LLM_COLOCATE_SYSTEM = (
     "Return ONLY valid JSON. No text outside the JSON object."
 )
 
+
+
+def colocate_system(source: str = "VLM") -> str:
+    """Co-location system prompt for features detected by `source` ("VLM" keeps the original text exactly)."""
+    return LLM_COLOCATE_SYSTEM.replace("VLM-detected features", f"{source}-detected features")
+
+
 LLM_COLOCATE_SCHEMA = (
     '{"zones": [{'
     '"id": 1, '
@@ -340,14 +347,57 @@ def apply_emoji_transform(arr: np.ndarray, marker: str) -> np.ndarray:
     return out.clip(0, 255).astype(np.uint8)
 
 
+def apply_car_mosaic(arr: np.ndarray, cell: int = 5, stretch_pct: float = 95) -> np.ndarray:
+    """Car mosaic: one car emoji per cell×cell block of the image, opacity = the block's brightness.
+
+    No detection of any kind (no threshold, contours or blob finding): every cell gets a car, and
+    bright regions simply show as clusters of opaque cars. The VLM has to group them into particles.
+    Opacity = cell mean / the stretch_pct-th percentile of cell means, clipped to 1 (a contrast stretch,
+    so one very bright particle does not wash out every other cell). Cars keep their real aspect ratio.
+
+    Input: uint8 grayscale (2-D) at native resolution. Returns uint8 RGB on white, scaled so that
+    fractional coordinates map 1:1 onto the input image.
+    """
+    if arr.ndim != 2:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    H, W = arr.shape
+    ny, nx = -(-H // cell), -(-W // cell)
+    cell_px = int(min(96, max(24, VLM_MAX_DIM // max(nx, ny))))  # rendered size of a full cell
+    k = cell_px / cell
+    means = np.array([[arr[y:y + cell, x:x + cell].mean() for x in range(0, W, cell)]
+                      for y in range(0, H, cell)], dtype=np.float32)
+    top = float(np.percentile(means, stretch_pct)) or float(means.max()) or 1.0
+    sprite = _emoji_sprite(EMOJI_MARKERS["car"])
+    sh, sw = sprite.shape[:2]
+    out = np.full((int(round(H * k)), int(round(W * k)), 3), 255, dtype=np.float32)
+    for iy, y in enumerate(range(0, H, cell)):
+        for ix, x in enumerate(range(0, W, cell)):
+            a = min(1.0, means[iy, ix] / top)
+            if a < 1 / 255:
+                continue  # fully transparent anyway
+            X0, X1 = int(round(x * k)), int(round(min(x + cell, W) * k))
+            Y0, Y1 = int(round(y * k)), int(round(min(y + cell, H) * k))
+            scale = min(0.9 * (X1 - X0) / sw, 0.9 * (Y1 - Y0) / sh)
+            w, h = max(1, int(sw * scale)), max(1, int(sh * scale))
+            sp = cv2.resize(sprite, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32)
+            ox, oy = X0 + (X1 - X0 - w) // 2, Y0 + (Y1 - Y0 - h) // 2
+            alpha = sp[..., 3:4] / 255.0 * a
+            region = out[oy:oy + h, ox:ox + w]
+            out[oy:oy + h, ox:ox + w] = region * (1 - alpha) + sp[..., :3] * alpha
+    return out.clip(0, 255).astype(np.uint8)
+
+
 def encode_image_for_vlm(path, max_dim: int = VLM_MAX_DIM, dilate_ksize: int = 0,
                           normalize: bool = True, grid_overlay: bool = False,
                           upscale: bool = False, colormap: bool = False,
                           red_circles: bool = False, circle_color=(255, 0, 0),
-                          emoji_marker: "str | None" = None, clahe: bool = True) -> str:
+                          emoji_marker: "str | None" = None, clahe: bool = True,
+                          car_mosaic: int = 0, car_stretch_pct: float = 95) -> str:
     """Load image, optionally preprocess, downsample to max_dim, return base64-PNG string.
 
     emoji_marker ("flower" / "car") stamps emoji instead of circles; ignored if red_circles.
+    car_mosaic=N draws one car per N×N px cell with opacity = brightness (no detection); it works on
+    the native-size image, so upscale / dilate / markers are skipped.
     clahe=False skips contrast enhancement (grayscale stays min-max scaled only).
     """
     arr = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
@@ -361,15 +411,20 @@ def encode_image_for_vlm(path, max_dim: int = VLM_MAX_DIM, dilate_ksize: int = 0
         arr = (arr * 255).astype(np.uint8)
     else:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
-    if upscale:
+    if upscale and not car_mosaic:
         h, w = arr.shape[:2]
         if min(h, w) < 1092:
             scale = 1092 / min(h, w)
             arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-    if dilate_ksize > 0:
+    if dilate_ksize > 0 and not car_mosaic:
         kernel = np.ones((dilate_ksize, dilate_ksize), np.uint8)
         arr = cv2.dilate(arr, kernel)
-    if red_circles:
+    if car_mosaic:
+        if arr.ndim != 2:
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        rgb = apply_car_mosaic(arr, cell=car_mosaic, stretch_pct=car_stretch_pct)
+        arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    elif red_circles:
         if arr.ndim != 2:
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
         rgb = apply_circles_transform(arr, circle_color=circle_color)
@@ -642,18 +697,27 @@ def query_llm_text(system: str, prompt: str, model: str, provider: str, key: str
 # ── LLM co-location ────────────────────────────────────────────────────────────
 
 def build_colocate_prompt(elem_features: list, elem_names: list,
-                           sample_context: str = "") -> str:
-    """Build the user prompt for LLM co-location analysis."""
+                           sample_context: str = "", source: str = "VLM") -> str:
+    """Build the user prompt for LLM co-location analysis.
+
+    Features may carry mean_intensity_raw / max_intensity_raw (OpenCV blobs); those are listed per
+    feature with a note on how to read them. VLM features have none, so their prompt is unchanged.
+    """
+    has_intensity = any("mean_intensity_raw" in f for feats in elem_features for f in feats)
     lines = []
     if sample_context:
         lines.append(f"Sample context provided by the user: {sample_context}. "
                      "Use this to inform your material suggestions and reasoning.")
         lines.append("")
     lines += [
-        f"You have VLM detection results for {len(elem_names)} XRF element scans.",
+        f"You have {source} detection results for {len(elem_names)} XRF element scans.",
         "Bounding boxes are fractional coordinates (0.0–1.0), (0,0)=top-left, (1,1)=bottom-right.",
-        "",
     ]
+    if has_intensity:
+        lines.append("Each feature also lists its mean / max raw XRF intensity inside the box. Each element is on "
+                     "its own scale: compare intensities within an element, and treat cross-element ratios as rough "
+                     "relative abundance.")
+    lines.append("")
     for i, (name, feats) in enumerate(zip(elem_names, elem_features)):
         lines.append(f"Element {i+1} = {name}:  ({len(feats)} feature(s))")
         for f in feats:
@@ -662,7 +726,9 @@ def build_colocate_prompt(elem_features: list, elem_names: list,
             desc = f.get("description", "")
             x1, y1 = f.get("x1", 0), f.get("y1", 0)
             x2, y2 = f.get("x2", 0), f.get("y2", 0)
-            lines.append(f"  #{fid} [{label}] ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})"
+            inten = (f"  mean {f['mean_intensity_raw']:.3g} max {f.get('max_intensity_raw', 0):.3g}"
+                     if "mean_intensity_raw" in f else "")
+            lines.append(f"  #{fid} [{label}] ({x1:.3f},{y1:.3f})→({x2:.3f},{y2:.3f})" + inten
                          + (f'  "{desc}"' if desc else ""))
         lines.append("")
     lines += [
@@ -686,9 +752,9 @@ def query_llm_colocate(prompt: str, model: str, provider: str,
                         key: str = "",
                         anthropic_url: str = ANTHROPIC_API_URL,
                         openai_url: str = OPENAI_API_URL,
-                        meta: "dict | None" = None) -> list:
+                        meta: "dict | None" = None, system: "str | None" = None) -> list:
     """Send co-location prompt to LLM and return list of zone dicts."""
-    text = query_llm_text(LLM_COLOCATE_SYSTEM, prompt, model, provider, key,
+    text = query_llm_text(system or LLM_COLOCATE_SYSTEM, prompt, model, provider, key,
                           anthropic_url=anthropic_url, openai_url=openai_url,
                           max_tokens=16384, meta=meta)
     zones = parse_zones(text)

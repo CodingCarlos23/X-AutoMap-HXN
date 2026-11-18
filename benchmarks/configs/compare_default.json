@@ -17,19 +17,24 @@
       "standard",
       "circle",
       "flower",
-      "car"
+      "car",
+      "car_standalone"
     ],
     "normalize": true,
     "upscale": true,
+    "car_cell_px": 5,
+    "car_stretch_pct": 95,
     "max_workers": 8,
     "llm_colocate": true,
+    "opencv_llm": true,
     "sample_context": "urban aerosol PM",
     "prompt_suffix": {
       "raw": "",
       "standard": "",
       "circle": "",
       "flower": "In this image each particle has been replaced by a flower emoji on a white background; treat every flower as one particle and box it.",
-      "car": "In this image each particle has been replaced by a car emoji on a white background; treat every car as one particle and box it."
+      "car": "In this image each particle has been replaced by a car emoji on a white background; treat every car as one particle and box it.",
+      "car_standalone": "In this image the scan has been redrawn as a grid of small car emoji on a white background. Each car is one small patch of the scan: the more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car."
     }
   },
   "match_iou": 0.25,

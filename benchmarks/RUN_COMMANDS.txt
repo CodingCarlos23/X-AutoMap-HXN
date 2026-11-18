@@ -6,7 +6,8 @@ Run from the repo root (~/Documents/github/X-AutoMap-HXN).
 1) Make sure the API key is loaded in that terminal (Claude models):
      eval "$(gpg --quiet --batch --yes --decrypt ~/.private_env.gpg)"
 
-2) Full run (OpenCV + StarDist + VLM raw/circle/flower/car):
+2) Full run (OpenCV + StarDist + VLM raw/standard/circle/flower/car/car_standalone
+   + OpenCV + LLM materials + LLM reconciliation):
      pixi run python benchmarks/run_comparison.py benchmarks/configs/compare_default.json
 
    Local methods only (no API calls, no cost):

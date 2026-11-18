@@ -59,7 +59,7 @@ from automap_hxn.feature_locator_headless import (  # noqa: E402
 from report import write_report, write_runs_index  # noqa: E402
 import reconcile  # noqa: E402
 
-VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car")
+VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car", "car_standalone")
 
 # USD per 1M tokens (input, output) — Anthropic first-party list prices; override via config "pricing".
 DEFAULT_PRICING = {
@@ -228,6 +228,10 @@ def encode_variant(path: pathlib.Path, variant: str, elem_idx: int, vcfg: dict) 
         kw.update(red_circles=True, circle_color=cc)
     elif variant in ("flower", "car"):
         kw.update(emoji_marker=variant)
+    elif variant == "car_standalone":  # car mosaic: no OpenCV detection, native size, no upscale
+        return vlm_pipeline.encode_image_for_vlm(str(path), normalize=True, upscale=False,
+                                                 car_mosaic=int(vcfg.get("car_cell_px", 5)),
+                                                 car_stretch_pct=float(vcfg.get("car_stretch_pct", 95)))
     return vlm_pipeline.encode_image_for_vlm(str(path), **kw)
 
 
@@ -318,14 +322,32 @@ def write_method_outputs(mid, s_dir, run_dir, sname, sample, elements, phase,
             imgs.update(input=rel(inp), input_boxes=rel(ib))
         d["images"][mid] = imgs
     (mdir / f"{mdir.name}_all_blobs.json").write_text(json.dumps(all_blobs, indent=2))
+    write_materials_outputs(mid, s_dir, run_dir, sname, sample, phase, comp, shape)
 
+
+def _source_note(mid: str) -> "tuple[str, str]":
+    if mid.endswith(":llm"):
+        return (f"{method_dir(pathlib.Path(), mid).name}/{{sample}}_multi_llm_colocate.json",
+                "LLM co-location zones from every OpenCV blob + intensity (box = where the elements intersect)")
+    if mid.startswith("vlm:"):
+        return ("{sample}_multi_llm_colocate.json", "LLM co-location zones (box = where the elements intersect)")
+    return (f"{method_dir(pathlib.Path(), mid).name}_det/phase_detections.json",
+            "multi-element unions (box = union of the blobs) with materials-library match")
+
+
+def write_materials_outputs(mid, s_dir, run_dir, sname, sample, phase, comp, shape):
+    """<folder>_materials.json + materials_composite(.png / _boxes.png) for one method."""
+    th, tw = shape
+    mdir = method_dir(s_dir, mid)
+    idir = mdir / "images"
+    idir.mkdir(parents=True, exist_ok=True)
+    rel = lambda p: str(p.relative_to(run_dir))
+    src, note = _source_note(mid)
     regs = phase["regions"].get(mid, [])
     (mdir / f"{mdir.name}_materials.json").write_text(json.dumps({
         "method": mid, "sample": sname, "scan_id": sample["scan_id"], "image_shape": [th, tw],
-        "source": (f"{sname}_multi_llm_colocate.json" if is_vlm
-                   else f"{mdir.name}_det/phase_detections.json"),
-        "note": ("LLM co-location zones (box = where the elements intersect)" if is_vlm else
-                 "multi-element unions (box = union of the blobs) with materials-library match"),
+        "source": src.format(sample=sname),
+        "note": note,
         "error": phase["errors"].get(mid),
         "total": len(regs),
         "regions": [{**r, "px": _px(r["box"], tw, th)} for r in regs]}, indent=2))
@@ -434,8 +456,11 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
     model = vcfg.get("model", "claude-sonnet-4-6")
     colocate = bool(vcfg.get("llm_colocate", True))
     sample_context = vcfg.get("sample_context", "").strip()
+    # OpenCV + LLM: every blob of each OpenCV run (+ intensities) → the same LLM co-location step
+    llm_methods = ([f"{mid}:llm" for mid, *_ in automap_methods if mid.startswith("opencv:")]
+                   if (not no_vlm and vcfg.get("opencv_llm", False)) else [])
     provider = key = a_url = o_url = None
-    if variants:
+    if variants or llm_methods:
         provider = vlm_pipeline.get_provider(model)
         key, a_url, o_url = vlm_pipeline.resolve_key(provider)
         if provider != "ollama" and not key:
@@ -451,16 +476,27 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         "circle": f"min-max + {up}particles (Otsu) drawn as per-element coloured circles on white",
         "flower": f"min-max + {up}particles (Otsu) drawn as flower emoji on white",
         "car": f"min-max + {up}particles (Otsu) drawn as car emoji on white",
+        "car_standalone": (f"min-max, native size → one car per {vcfg.get('car_cell_px', 5)}×"
+                           f"{vcfg.get('car_cell_px', 5)} px cell, opacity = cell brightness "
+                           f"(stretched to p{vcfg.get('car_stretch_pct', 95)}); no OpenCV detection"),
     }
     for v in variants:
         model_input_desc[f"vlm:{v}"] = vlm_desc[v]
+    for lm in llm_methods:
+        model_input_desc[lm] = (f"no image: every per-element blob of {lm[:-4]} with its mean / max raw intensity, "
+                                "sent to the LLM co-location step")
     methods = [mid for mid, *_ in automap_methods] + [f"vlm:{v}" for v in variants]
+    phase_methods = methods + llm_methods  # Level 2 / 3 only: OpenCV+LLM reuses its base run's boxes
     print(f"[Compare] Samples: {', '.join(samples)}")
     print(f"[Compare] Methods: {', '.join(methods)}")
+    if llm_methods:
+        print(f"[Compare] OpenCV + LLM (materials only): {', '.join(llm_methods)}")
     if variants:
         n_el = sum(len(s["tiffs"]) for s in samples.values())
         print(f"[Compare] VLM model: {model} ({provider}) — {n_el * len(variants)} image calls"
               + (f" + {len(variants) * len(samples)} co-location calls" if colocate else ""))
+    if llm_methods:
+        print(f"[Compare] OpenCV + LLM: {len(llm_methods) * len(samples)} co-location calls")
 
     pricing = {**DEFAULT_PRICING, **config.get("pricing", {})}
     calls = []  # every API call: tokens, cost, stop reason, parse status
@@ -475,6 +511,7 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         elements = {e: {"file": p.name, "shape": [th, tw], "boxes": {}, "images": {},
                         "errors": {}} for e, p in sample["tiffs"].items()}
         phase = {"regions": {}, "times": {}, "errors": {}, "images": {}, "comparisons": {}}
+        masters = {}  # AutoMap method → MASTER_raw_detections (OpenCV + LLM reads these)
 
         # ── AutoMap (sequential: TensorFlow is not thread-safe) ──
         for mid, det, block, dilate in automap_methods:
@@ -490,6 +527,7 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
                     elements[e]["errors"][mid] = msg
                     elements[e]["boxes"][mid] = []
                 continue
+            masters[mid] = r["master"]
             for e in elements:
                 elements[e]["boxes"][mid] = []
             for blob in r["master"].values():
@@ -571,9 +609,10 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
                     ef = [feats_by[v].get(e, []) for e in elem_names]
                     meta = {}
                     t0 = time.time()
+                    prompt = vlm_pipeline.build_colocate_prompt(ef, elem_names, sample_context)
+                    (s_dir / f"vlm_{v}" / "raw_replies" / "colocate_prompt.txt").write_text(prompt)
                     zones = vlm_pipeline.query_llm_colocate(
-                        vlm_pipeline.build_colocate_prompt(ef, elem_names, sample_context),
-                        model, provider, key or "", anthropic_url=a_url, openai_url=o_url, meta=meta)
+                        prompt, model, provider, key or "", anthropic_url=a_url, openai_url=o_url, meta=meta)
                     (s_dir / f"vlm_{v}" / "raw_replies" / "colocate.txt").write_text(meta.get("text") or "")
                     colo_meta[v] = meta
                     for k, z in enumerate(zones):  # normalise exactly like the headless runner
@@ -627,6 +666,71 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
                                                           "elements": r["elements"]} for r in zones_v]),
                               vdir / f"{sname}_multi_colocate_composite.png")
 
+        # ── OpenCV + LLM: every OpenCV blob (+ intensities) → LLM co-location ──
+        todo = [lm for lm in llm_methods if lm[:-4] in masters]
+        for lm in llm_methods:
+            if lm[:-4] not in masters:
+                phase["errors"][lm] = phase["errors"].get(lm[:-4], "base OpenCV run failed")
+                phase["regions"][lm] = []
+        if todo:
+            print(f"\n[{sname}] OpenCV + LLM co-location: {len(todo)} call(s) …")
+
+            def _ocv_llm(lm):
+                ef = {e: [] for e in elem_names}
+                for blob in masters[lm[:-4]].values():
+                    e = blob.get("element")
+                    if e not in ef:
+                        continue
+                    (cx, cy), rad = blob["image_center"], blob["image_radius"]
+                    ef[e].append({"id": len(ef[e]) + 1, "label": "blob",
+                                  **_frac_box(cx - rad, cy - rad, cx + rad, cy + rad, tw, th),
+                                  "mean_intensity_raw": blob.get("mean_intensity_raw", 0.0),
+                                  "max_intensity_raw": blob.get("max_intensity_raw", 0.0)})
+                feats = [ef[e] for e in elem_names]
+                ldir = method_dir(s_dir, lm)
+                (ldir / "raw_replies").mkdir(parents=True, exist_ok=True)
+                prompt = vlm_pipeline.build_colocate_prompt(feats, elem_names, sample_context, source="OpenCV")
+                (ldir / "raw_replies" / "colocate_prompt.txt").write_text(prompt)
+                meta, t0 = {}, time.time()
+                zones = vlm_pipeline.query_llm_colocate(
+                    prompt, model, provider, key or "", anthropic_url=a_url, openai_url=o_url, meta=meta,
+                    system=vlm_pipeline.colocate_system("OpenCV"))
+                (ldir / "raw_replies" / "colocate.txt").write_text(meta.get("text") or "")
+                for i, z in enumerate(zones):  # same normalisation as the VLM co-location zones
+                    z["id"] = i + 1
+                    z.setdefault("llm_suggestion", z.pop("suggestion", ""))
+                    z.setdefault("confidence", "medium")
+                    z.setdefault("alternatives", [])
+                (ldir / f"{sname}_multi_llm_colocate.json").write_text(json.dumps({
+                    "elements": elem_names, "model": model, "method": "llm", "mode": "multi",
+                    "source": f"{lm[:-4]} MASTER_raw_detections.json", "input_blobs": sum(map(len, feats)),
+                    "overlap_zones": zones, "total_zones": len(zones),
+                    **({"sample_context": sample_context} if sample_context else {})}, indent=2))
+                return zones, meta, time.time() - t0, ldir
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(todo)) as ex:
+                futs = {ex.submit(_ocv_llm, lm): lm for lm in todo}
+                for fut in concurrent.futures.as_completed(futs):
+                    lm = futs[fut]
+                    try:
+                        zones, meta, dt, ldir = fut.result()
+                    except Exception as err:
+                        phase["errors"][lm] = f"{type(err).__name__}: {err}"
+                        phase["regions"][lm] = []
+                        calls.append(call_record("colocate", lm, None, {}, 0.0, pricing, model,
+                                                 error=phase["errors"][lm]))
+                        print(f"  [ERROR] {lm}: {phase['errors'][lm]}")
+                        continue
+                    rec = call_record("colocate", lm, None, meta, dt, pricing, model,
+                                      raw_path=str((ldir / "raw_replies" / "colocate.txt").relative_to(run_dir)))
+                    calls.append(rec)
+                    if rec["truncated"] or rec["parse_status"] == "failed":
+                        phase.setdefault("flags", {})[lm] = (
+                            "reply cut off at max_tokens" if rec["truncated"] else "reply could not be parsed")
+                    phase["regions"][lm] = _vlm_regions(zones)
+                    phase["times"][lm] = round(dt, 2)
+                    print(f"  {lm:<28} {len(zones)} zone(s)")
+
         # ── Per-method outputs: normalised JSONs + with/without-box images ──
         raw_imgs = {}
         for e, p in sample["tiffs"].items():
@@ -637,13 +741,19 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         for mid in methods:
             write_method_outputs(mid, s_dir, run_dir, sname, sample, elements, phase,
                                  displays, comp, (th, tw), feats_by, raw_imgs, (k, it))
+        for lm in llm_methods:
+            write_materials_outputs(lm, s_dir, run_dir, sname, sample, phase, comp, (th, tw))
         for e in elements:
             elements[e]["agreement"] = {
                 f"{a}|{b}": box_agreement(elements[e]["boxes"].get(a, []), elements[e]["boxes"].get(b, []), match_iou)
                 for i, a in enumerate(methods) for b in methods[i + 1:]}
 
-        # ── Level 2: AutoMap vs VLM material regions ──
-        for mid, *_ in automap_methods:
+        # ── Level 2: AutoMap (and OpenCV + LLM) vs VLM material regions; library vs LLM on the same blobs ──
+        for lm in llm_methods:
+            if lm[:-4] in phase["regions"] and lm in phase["regions"]:
+                phase["comparisons"][f"{lm[:-4]}|{lm}"] = compare_phase(
+                    phase["regions"][lm[:-4]], phase["regions"][lm], phase_thresh)
+        for mid in [m for m, *_ in automap_methods] + llm_methods:
             for v in variants:
                 vm = f"vlm:{v}"
                 if mid in phase["regions"] and vm in phase["regions"]:
@@ -653,11 +763,11 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         # ── Level 3: one LLM pass reconciling every method's material regions ──
         recon = None
         rcfg = config.get("reconcile", {})
-        if variants and rcfg.get("enabled", True) and phase["regions"]:
+        if (variants or llm_methods) and rcfg.get("enabled", True) and phase["regions"]:
             r_model = rcfg.get("model") or model
             r_provider = vlm_pipeline.get_provider(r_model)
             r_key, r_a, r_o = (key, a_url, o_url) if r_provider == provider else vlm_pipeline.resolve_key(r_provider)
-            regs = {m: phase["regions"][m] for m in methods if m in phase["regions"]}
+            regs = {m: phase["regions"][m] for m in phase_methods if m in phase["regions"]}
             prompt, id_map = reconcile.build_prompt(regs, model_input_desc, sample_context)
             print(f"\n[{sname}] LLM material reconciliation: {len(id_map)} regions from {len(regs)} methods …")
             (s_dir / "material_reconciliation_prompt.txt").write_text(prompt)
@@ -709,15 +819,17 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         "automap_config": str(_resolve(config["automap_config"])),
         "methods": methods,
         "automap_methods": [mid for mid, *_ in automap_methods],
+        "llm_methods": llm_methods,
+        "phase_methods": phase_methods,
         "model_input": model_input_desc,
         "vlm_variants": [f"vlm:{v}" for v in variants],
-        "vlm_model": model if variants else None,
+        "vlm_model": model if (variants or llm_methods) else None,
         "prompts": prompts,
         "match_iou": match_iou,
         "phase_match_overlap": phase_thresh,
         "overall_agreement": overall,
         "calls": calls,
-        "pricing_per_mtok": pricing.get(model) if variants else None,
+        "pricing_per_mtok": pricing.get(model) if (variants or llm_methods) else None,
     })
     (run_dir / "results.json").write_text(json.dumps(results, indent=2))
     write_report(results, run_dir / "index.html")

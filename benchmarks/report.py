@@ -110,7 +110,7 @@ _JS = r"""
 const DATA = JSON.parse(document.getElementById('data').textContent);
 const RAMP = %RAMP%;
 const tip = document.getElementById('tip');
-function label(m) { return m.replace('opencv:', 'OpenCV ').replace('vlm:', 'VLM ').replace('stardist', 'StarDist').replace(/:/g, ' · '); }
+function label(m) { return m.replace('opencv:', 'OpenCV ').replace('vlm:', 'VLM ').replace('stardist', 'StarDist').replace(/:/g, ' · ').replace(/_/g, ' '); }
 function rampColor(v) { return RAMP[Math.min(RAMP.length - 1, Math.floor(v * RAMP.length))]; }
 function inkFor(v) { return Math.floor(v * RAMP.length) >= 7 ? '#ffffff' : '#1b1b1b'; }
 
@@ -221,7 +221,7 @@ function makeGrid(g) {
     clearHL();
     if (!rect) { tip.style.display = 'none'; return; }
     const m = rect.closest('svg').dataset.m, i = +rect.dataset.k, b = g.boxes(m)[i];
-    const lines = M.filter(o => o !== m).map(o => {
+    const lines = g.order.filter(o => o !== m).map(o => {
       const best = bestMatch(b, g.boxes(o), g.score);
       if (best) {
         const el = g.el.querySelector(`svg[data-m="${CSS.escape(o)}"] rect[data-k="${best.k}"]`);
@@ -279,7 +279,7 @@ document.querySelectorAll('.seg[data-ctl] button').forEach(b => b.onclick = () =
 });
 
 /* ---------- detection viewer ---------- */
-function fillSelect(sel, val) { sel.innerHTML = M.map(m => `<option value="${m}"${m === val ? ' selected' : ''}>${label(m)}</option>`).join(''); }
+function fillSelect(sel, val, list = M) { sel.innerHTML = list.map(m => `<option value="${m}"${m === val ? ' selected' : ''}>${label(m)}</option>`).join(''); }
 function pick(imgs, view, boxes) {
   const mode = (view === 'input' && imgs.input) ? 'input' : 'original';
   return { src: imgs[mode], mode };  // boxes are drawn as SVG on top, not taken from the *_boxes.png
@@ -357,6 +357,7 @@ document.querySelectorAll('.grp-filter').forEach(sel => sel.onchange = () => {
 
 /* ---------- materials viewer ---------- */
 const MAT = DATA.materials, MS = Object.keys(MAT);
+const MP = DATA.phase_methods || M;  // Level 2 methods: M + OpenCV + LLM
 const mt = { s: MS[0], a: M[0], b: DATA.vlm[0] || M[1] || M[0] };
 const mRegs = m => (MAT[mt.s].regions[m] || []);
 function regTable(regs, shape) {
@@ -366,14 +367,14 @@ function regTable(regs, shape) {
 }
 /* material name with what it is: an LLM guess (self-rated confidence) or a library ratio match */
 function matText(m, r) {
-  return m.startsWith('vlm:') ? `LLM best guess: ${r.material} (self-rated ${r.confidence})`
+  return (m.startsWith('vlm:') || m.endsWith(':llm')) ? `LLM best guess: ${r.material} (self-rated ${r.confidence})`
        : r.material === 'no library match' ? r.material : `library match: ${r.material} (${r.confidence})`;
 }
 function ratiosText(r) {
   return Object.entries(r).sort((p, q) => q[1] - p[1]).map(([el, v]) => `${el} ${v}%`).join(', ');
 }
 const mGrid = MS.length && makeGrid({
-  el: $('m-grid'), order: [...M], color: MAT_COLOR, score: ovl, thresh: DATA.phase_match_overlap,
+  el: $('m-grid'), order: [...MP], color: MAT_COLOR, score: ovl, thresh: DATA.phase_match_overlap,
   rerender: () => renderMat(),
   tile: m => {
     const d = MAT[mt.s], imgs = d.images[m] || {}, err = d.errors[m];
@@ -406,10 +407,10 @@ function renderMat() {
 if (MS.length) {
   $('m-sample').innerHTML = MS.map(s => `<option>${s}</option>`).join('');
   $('m-sample').onchange = e => { mt.s = e.target.value; renderMat(); };
-  fillSelect($('m-sel-a'), mt.a); fillSelect($('m-sel-b'), mt.b);
+  fillSelect($('m-sel-a'), mt.a, MP); fillSelect($('m-sel-b'), mt.b, MP);
   $('m-sel-a').onchange = e => { mt.a = e.target.value; renderMat(); };
   $('m-sel-b').onchange = e => { mt.b = e.target.value; renderMat(); };
-  $('m-grid-reset').onclick = () => { mGrid.order = [...M]; renderMat(); };
+  $('m-grid-reset').onclick = () => { mGrid.order = [...MP]; renderMat(); };
   hookOverlay('m', (k, o, i) => {
     const d = MAT[mt.s], r = mRegs(mt[k])[i];
     const m = bestMatch(r.box, mRegs(mt[o]).map(x => x.box), ovl);
@@ -435,7 +436,7 @@ renderAll();
 
 def _label(m: str) -> str:
     return (m.replace("opencv:", "OpenCV ").replace("vlm:", "VLM ").replace("stardist", "StarDist")
-             .replace(":", " · "))
+             .replace(":", " · ").replace("_", " "))
 
 
 def _ramp(v: float) -> tuple:
@@ -457,17 +458,53 @@ def _loc(b: dict, shape: list) -> str:
             f"{x2 - x1:.0f}×{y2 - y1:.0f} px</div>")
 
 
+def _is_llm(m: str) -> bool:
+    """Materials named by an LLM: VLM variants and OpenCV + LLM methods (vs the library match)."""
+    return m.startswith("vlm:") or m.endswith(":llm")
+
+
+def _phase_methods(results: dict) -> list:
+    return results.get("phase_methods") or results["methods"]
+
+
+def _library_vs_llm(results: dict, ph: dict) -> str:
+    """OpenCV + LLM vs the library match on the same OpenCV blobs: one row per OpenCV run."""
+    e = html.escape
+    rows = []
+    for lm in results.get("llm_methods", []):
+        base = lm[:-4]
+        c = ph["comparisons"].get(f"{base}|{lm}")
+        lib = ph["regions"].get(base, [])
+        named = sum(r["material"] != "no library match" for r in lib)
+        if not c:
+            err = ph["errors"].get(lm, "not run")
+            rows.append(f'<tr><td>{e(_label(base))}</td><td class="err" colspan="5" title="{e(err)}">error</td></tr>')
+            continue
+        bg, ink = _ramp(c["f1"])
+        rows.append(f"<tr><td>{e(_label(base))}</td><td class='num'>{len(lib)} <span class='sub'>({named} named)</span></td>"
+                    f"<td class='num'>{c['n_vlm']}</td><td class='score' style='background:{bg};color:{ink}'>{c['f1']:.2f}</td>"
+                    f"<td class='num'>{c['matched']}</td><td class='num'>{c['mean_element_jaccard']:.2f}</td></tr>")
+    if not rows:
+        return ""
+    return ('<h4 style="margin:.75rem 0 .3rem">Library vs LLM on the same OpenCV blobs</h4>'
+            '<p class="note">Same detections, two namers: the materials library (ratio match on the union) and the LLM '
+            '(every blob + intensity → co-location). Open the matching "side by side" table below to compare names.</p>'
+            '<div class="scroll"><table class="phase"><tr><th>OpenCV run</th><th>Library regions</th><th>LLM zones</th>'
+            '<th>Region F1</th><th>Matched</th><th>Element Jaccard</th></tr>' + "".join(rows) + "</table></div>")
+
+
 def _phase_section(results: dict) -> str:
     e = html.escape
-    am, vv = results.get("automap_methods", []), results.get("vlm_variants", [])
+    am, vv = results.get("automap_methods", []) + results.get("llm_methods", []), results.get("vlm_variants", [])
     out = []
     for s, sd in results["samples"].items():
         ph = sd["phase"]
         shape = _sample_shape(sd)
         out.append(f"<h3>{e(s)}</h3>")
-        # summary grid: AutoMap method × VLM variant
+        out.append(_library_vs_llm(results, ph))
+        # summary grid: AutoMap method (and OpenCV + LLM) × VLM variant
         if am and vv and ph["comparisons"]:
-            head = "<tr><th>AutoMap method</th>" + "".join(f"<th>{e(_label(v))}</th>" for v in vv) + "</tr>"
+            head = "<tr><th>Method</th>" + "".join(f"<th>{e(_label(v))}</th>" for v in vv) + "</tr>"
             rows = []
             for a in am:
                 cells = []
@@ -479,7 +516,7 @@ def _phase_section(results: dict) -> str:
                     bg, ink = _ramp(c["f1"])
                     cells.append(
                         f'<td class="score" style="background:{bg};color:{ink}" '
-                        f'title="{c["matched"]} matched of {c["n_automap"]} AutoMap unions / {c["n_vlm"]} LLM zones; '
+                        f'title="{c["matched"]} matched of {c["n_automap"]} {"LLM zones" if _is_llm(a) else "AutoMap unions"} / {c["n_vlm"]} LLM zones; '
                         f'mean element Jaccard {c["mean_element_jaccard"]:.2f}">'
                         f'F1 {c["f1"]:.2f}<br><span style="font-size:.75rem">{c["matched"]} of '
                         f'{c["n_automap"]} / {c["n_vlm"]} · elem {c["mean_element_jaccard"]:.2f}</span></td>')
@@ -490,7 +527,7 @@ def _phase_section(results: dict) -> str:
                        '(1.00 = same elements). Hover for details.</p>')
         # counts + time per method
         rows = []
-        for mid in results["methods"]:
+        for mid in _phase_methods(results):
             n = len(ph["regions"].get(mid, [])) if mid in ph["regions"] else None
             t = ph["times"].get(mid)
             err = ph["errors"].get(mid)
@@ -511,7 +548,7 @@ def _phase_section(results: dict) -> str:
                 trs.append(
                     f"<tr><td class='num'>{r['overlap']:.2f}</td>"
                     f"<td><b>{e(str(A.get('id') or ''))}</b><div>{_loc(A['box'], shape)}</div></td>"
-                    f"<td>{e(', '.join(A['elements']))}</td><td>{e(A['material'])}<div class='sub'>match: {e(str(A['confidence']))}</div></td>"
+                    f"<td>{e(', '.join(A['elements']))}</td><td>{e(A['material'])}<div class='sub'>{'self-rated' if _is_llm(a) else 'match'}: {e(str(A['confidence']))}</div></td>"
                     f"<td><b>#{e(str(V.get('id') or ''))}</b><div>{_loc(V['box'], shape)}</div></td>"
                     f"<td>{e(', '.join(V['elements']))}</td><td>{e(V['material'])}<div class='sub'>self-rated: {e(str(V['confidence']))}</div>"
                     + (f"<div class='sub'>Alternatives: {e(_alts_text(V.get('alternatives')))}</div>" if V.get('alternatives') else "")
@@ -520,7 +557,7 @@ def _phase_section(results: dict) -> str:
                     f"<td class='num'>{r['element_jaccard']:.2f}</td></tr>")
             body = ("<div class='scroll'><table class='phase'><tr><th>Overlap</th>"
                     f"<th>{e(_label(a))} region / location (px)</th>"
-                    f"<th>{e(_label(a))} elements</th><th>{e(_label(a))} library match</th>"
+                    f"<th>{e(_label(a))} elements</th><th>{e(_label(a))} {'LLM best guess' if _is_llm(a) else 'library match'}</th>"
                     f"<th>{e(_label(v))} region / location (px)</th>"
                     f"<th>{e(_label(v))} elements</th><th>LLM best guess</th><th>LLM reasoning</th>"
                     "<th>Element Jaccard</th></tr>" + "".join(trs) + "</table></div>") if trs else \
@@ -620,9 +657,11 @@ def write_report(results: dict, out: pathlib.Path):
     model_input_table = ('<details><summary>What each method was given (model input)</summary>'
                          '<div class="scroll"><table class="phase" style="margin-top:.5rem"><tr><th>Method</th>'
                          '<th>Model input</th></tr>'
-                         + "".join(f"<tr><td>{e(_label(m))}</td><td>{e(mi.get(m, '?'))}</td></tr>" for m in methods)
+                         + "".join(f"<tr><td>{e(_label(m))}</td><td>{e(mi.get(m, '?'))}</td></tr>"
+                                   for m in _phase_methods(results))
                          + '</table></div></details>')
-    data_json = json.dumps({"methods": methods, "vlm": results.get("vlm_variants", []), "model_input": mi,
+    data_json = json.dumps({"methods": methods, "phase_methods": _phase_methods(results),
+                            "vlm": results.get("vlm_variants", []), "model_input": mi,
                             "match_iou": results["match_iou"],
                             "phase_match_overlap": results.get("phase_match_overlap", 0.5),
                             "viewer": viewer, "materials": materials,
@@ -691,6 +730,8 @@ method is outlined in magenta (solid = matched, IoU ≥ {results['match_iou']}; 
 <section id="phase"><h2>Level 2 · Phase / material regions</h2>
 <p class="note">AutoMap: multi-element unions from <code>phase_detections.json</code> with their materials-library match.
 VLM: LLM co-location zones from <code>_multi_llm_colocate.json</code> with the LLM's suggestion.
+OpenCV + LLM (<code>…:llm</code>): no image — every blob of that OpenCV run, with its intensities, goes to the same
+LLM co-location step, so it names materials on exactly the same detections as the library.
 Regions are matched one-to-one when intersection ÷ smaller box ≥ {results.get('phase_match_overlap', 0.5)}
 (AutoMap boxes cover the <i>union</i> of blobs, LLM boxes the <i>intersection</i> of elements, so plain IoU would under-match).</p>
 <p class="caveat"><b>Material names are hypotheses, not identifications.</b> LLM materials are the model's <i>best guess</i> from which elements sit together (plus the sample context); its "high / medium / low" is the LLM's own self-rating, not a measured probability. AutoMap names are the closest entry in <code>materials_library.json</code> by element ratios. XRF gives elements only — no oxidation state, light elements (C, O, H) or crystal structure — so confirm phases with another technique (e.g. XANES, XRD, Raman); the LLM's <i>alternatives</i> say what signal would decide.</p>
@@ -759,7 +800,7 @@ def _calls_section(results: dict) -> str:
     calls = results.get("calls") or []
     if not calls:
         return '<p class="note">No API calls in this run (--no-vlm).</p>'
-    order = results["methods"] + ["reconcile"]
+    order = _phase_methods(results) + ["reconcile"]
     agg = {}
     for c in calls:
         a = agg.setdefault(c["method"], {"n": 0, "tin": 0, "tout": 0, "cost": 0.0, "cost_known": True,
@@ -902,7 +943,7 @@ def write_runs_index(runs_dir: pathlib.Path):
         cut = sum(c["truncated"] for c in calls)
         bad = sum(c["parse_status"] in ("failed", "error") for c in calls)
         boxes = {m: 0 for m in r["methods"]}
-        mats = {m: 0 for m in r["methods"]}
+        mats = {m: 0 for m in _phase_methods(r)}
         groups, shared = 0, 0
         for sd in r["samples"].values():
             for d in sd["elements"].values():
@@ -913,7 +954,8 @@ def write_runs_index(runs_dir: pathlib.Path):
             rc = sd.get("reconcile") or {}
             groups += len(rc.get("groups", []))
             shared += sum(g["agreement"] in ("all", "det+vlm") for g in rc.get("groups", []))
-        per = "".join(f"<li>{e(_label(m))}: {boxes[m]} boxes · {mats[m]} materials</li>" for m in r["methods"])
+        per = "".join(f"<li>{e(_label(m))}: {boxes.get(m, '—')} boxes · {mats[m]} materials</li>"
+                      for m in _phase_methods(r))
         rows.append(
             f'<tr><td><a href="{e(rd.name)}/index.html">{e(rd.name)}</a></td><td>{e(r.get("created", ""))}</td>'
             f'<td>{e(str(r.get("vlm_model") or "—"))}</td><td>{e(", ".join(r["samples"]))}</td>'
