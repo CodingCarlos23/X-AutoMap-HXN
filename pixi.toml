@@ -22,6 +22,7 @@ matplotlib-inline = ">=0.2.1,<0.3"
 ipympl = ">=0.10.0,<0.11"
 pytorch = "2.7.*"
 torchvision = "0.22.*"
+xraydb = ">=4.5.3,<5"
 
 [tasks]
 automap = "python -m automap_hxn.main"

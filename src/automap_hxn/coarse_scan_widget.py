@@ -427,6 +427,33 @@ class CoarseScanWidget(QWidget):
             QMessageBox.critical(self, "Invalid Config", f"Cannot start scan — bad mosaic_params:\n\n{err}")
             return
 
+        # Validate fine_scan_selection if present
+        fine_scan_selection = self._json_params.get("fine_scan_selection", [])
+        elem_list_of_lists = self._json_params.get("export_params", {}).get("elem_list", [])
+        proceed_with_fine_scan = ep.get("proceed_with_fine_scan", False)
+
+        if fine_scan_selection:
+            from automap_hxn.utils import validate_fine_scan_selection
+            is_valid, error_msg = validate_fine_scan_selection(fine_scan_selection, elem_list_of_lists)
+            if not is_valid:
+                QMessageBox.critical(
+                    self, "Invalid fine_scan_selection",
+                    f"Cannot start scan — invalid fine_scan_selection:\n\n{error_msg}"
+                )
+                return
+
+        # Warn if fine scans enabled but no selection
+        if proceed_with_fine_scan and not fine_scan_selection:
+            reply = QMessageBox.warning(
+                self, "No Fine Scan Selection",
+                "proceed_with_fine_scan is true but fine_scan_selection is empty.\n\n"
+                "No fine scans will be submitted!\n\n"
+                "Do you want to continue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
         mode = ep.get("mode", "?")
         confirm = QMessageBox.question(
             self,

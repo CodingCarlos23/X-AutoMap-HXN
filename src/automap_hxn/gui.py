@@ -43,7 +43,7 @@ from automap_hxn.utils import (
     resize_if_needed, normalize_and_dilate,
     make_json_serializable
 )
-from .blobs.processing import find_union_blobs
+from .blobs.processing import find_union_blobs_by_category
 
 from .json_maker import JSONMakerWidget
 from .coarse_scan_widget import CoarseScanWidget
@@ -117,11 +117,18 @@ class ZoomableGraphicsView(QGraphicsView):
 
 
 class ChannelCheckBox(QCheckBox):
-    """Checkbox with a durable channel-colored outline and checkmark."""
+    """Tri-state checkbox with colored outline, checkmark, and X mark.
+
+    States:
+    - Unchecked: Element not shown
+    - Checked: Show boxes containing this element
+    - PartiallyChecked (X): Exclude boxes overlapping with this element
+    """
 
     def __init__(self, text, color, parent=None):
         super().__init__(text, parent)
         self._channel_color = QColor(color)
+        self.setTristate(True)
         self.setStyleSheet(
             "QCheckBox::indicator {"
             " width: 14px; height: 14px;"
@@ -132,7 +139,9 @@ class ChannelCheckBox(QCheckBox):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.isChecked():
+
+        state = self.checkState()
+        if state == Qt.Unchecked:
             return
 
         option = QStyleOptionButton()
@@ -143,10 +152,20 @@ class ChannelCheckBox(QCheckBox):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(QPen(self._channel_color, 2))
-        painter.drawLine(indicator.left() + 3, indicator.center().y(),
-                         indicator.center().x() - 1, indicator.bottom() - 3)
-        painter.drawLine(indicator.center().x() - 1, indicator.bottom() - 3,
-                         indicator.right() - 2, indicator.top() + 3)
+
+        if state == Qt.Checked:
+            # Draw checkmark
+            painter.drawLine(indicator.left() + 3, indicator.center().y(),
+                             indicator.center().x() - 1, indicator.bottom() - 3)
+            painter.drawLine(indicator.center().x() - 1, indicator.bottom() - 3,
+                             indicator.right() - 2, indicator.top() + 3)
+        elif state == Qt.PartiallyChecked:
+            # Draw X mark
+            painter.drawLine(indicator.left() + 3, indicator.top() + 3,
+                             indicator.right() - 3, indicator.bottom() - 3)
+            painter.drawLine(indicator.right() - 3, indicator.top() + 3,
+                             indicator.left() + 3, indicator.bottom() - 3)
+
         painter.end()
 
 
@@ -173,6 +192,36 @@ class MainWindow(QWidget):
         self._init_ui()
         self.blob_items = []
         self.union_box_items = []
+        self.union_categories = {
+            '3-element': {},
+            '2-element': {},
+            '1-element': {},
+        }
+        self.blob_union_membership = {}  # Maps blob_id -> set of colors it overlaps with
+
+        # Confidence scoring parameters - ADJUST THESE after testing
+        self.scoring_weights = {
+            '1-element': {
+                'brightness': 0.5,    # Weight for intensity score
+                'size': 0.3,          # Weight for size score
+                'compactness': 0.2,   # Weight for shape quality
+            },
+            '2-element': {
+                'brightness': 0.4,    # Both elements should be bright
+                'size': 0.2,          # Reasonable size
+                'overlap': 0.25,      # Good spatial overlap
+                'balance': 0.15,      # Balanced intensity ratio
+            },
+            '3-element': {
+                'brightness': 0.35,   # All three elements bright
+                'size': 0.15,         # Reasonable size
+                'overlap': 0.3,       # Tight co-localization
+                'balance': 0.2,       # Balanced across all three
+            }
+        }
+        # Size preferences (in pixels) - ADJUST based on your typical particles
+        self.optimal_size_range = (50, 500)  # Min and max "good" size in pixels
+
         # A blob calculation continues in a background thread.  Keep a
         # generation number so events/results from a discarded analysis view
         # cannot update the next one.
@@ -783,6 +832,7 @@ class MainWindow(QWidget):
             if fname.lower().endswith(('.tif', '.tiff')):
                 item = QListWidgetItem()
                 checkbox = ChannelCheckBox(fname, "#6b7280")
+                checkbox.setTristate(False)  # File selection is binary
                 item.setSizeHint(checkbox.sizeHint())
                 self.file_list_widget.addItem(item)
                 self.file_list_widget.setItemWidget(item, checkbox)
@@ -1000,7 +1050,10 @@ class MainWindow(QWidget):
         # Lists and buttons
         self.union_list_widget.setSelectionMode(QListWidget.MultiSelection)
         self.union_list_widget.itemSelectionChanged.connect(self.on_union_item_selected)
-        
+
+        self.queue_server_list.setSelectionMode(QListWidget.MultiSelection)
+        self.queue_server_list.itemSelectionChanged.connect(self.on_queue_item_selected)
+
         send_to_list_btn = QPushButton("Add to list")
         send_to_list_btn.clicked.connect(self.send_to_list)
         get_elements_btn = QPushButton("Get all elements")
@@ -1061,6 +1114,7 @@ class MainWindow(QWidget):
             legend_layout.addWidget(cb)
 
         self.union_checkbox = ChannelCheckBox("Union Boxes", "black")
+        self.union_checkbox.setTristate(False)  # Union checkbox is binary on/off
         self.union_checkbox.setChecked(True)
         self.union_checkbox.setStyleSheet(
             "QCheckBox { color: black; }"
@@ -1073,6 +1127,7 @@ class MainWindow(QWidget):
         self.union_checkbox.stateChanged.connect(self.update_boxes)
         legend_layout.addWidget(self.union_checkbox)
         self.checkboxes['union'] = self.union_checkbox
+
         legend_layout.addStretch()
         controls_layout.addLayout(legend_layout)
 
@@ -1366,10 +1421,22 @@ class MainWindow(QWidget):
     def update_boxes(self):
         if self.graphics_view is None:
             return
-        selected_colors = {c for c, cb in self.checkboxes.items() if cb.isChecked() and c != 'union'}
+
+        # Separate checked (included) and partially checked (excluded) colors
+        included_colors = set()
+        excluded_colors = set()
+        for c, cb in self.checkboxes.items():
+            if c == 'union':
+                continue
+            state = cb.checkState()
+            if state == Qt.Checked:
+                included_colors.add(c)
+            elif state == Qt.PartiallyChecked:
+                excluded_colors.add(c)
+
         blobs = self.get_current_blobs()
-        self.graphics_view.update_blobs(blobs, selected_colors)
-        self.redraw_boxes(blobs, selected_colors)
+        self.graphics_view.update_blobs(blobs, included_colors)
+        self.redraw_boxes(blobs, included_colors, excluded_colors)
 
     def get_current_blobs(self):
         blobs = []
@@ -1385,16 +1452,35 @@ class MainWindow(QWidget):
                     blobs.extend(self.app_state.precomputed_blobs[color][key])
         return blobs
 
-    def redraw_boxes(self, blobs, selected_colors):
+    def redraw_boxes(self, blobs, included_colors, excluded_colors):
         for item in self.blob_items:
             self.graphics_view.scene().removeItem(item)
         self.blob_items.clear()
 
         for blob in blobs:
-            if blob['color'] in selected_colors:
-                pen = QPen(QColor(blob['color']), 2)
-                rect_item = self.graphics_view.scene().addRect(blob['box_x'], blob['box_y'], blob['box_size'], blob['box_size'], pen)
-                self.blob_items.append(rect_item)
+            # First filter: blob's primary color must be in included colors
+            if blob['color'] not in included_colors:
+                continue
+
+            # Get the set of all colors this blob contains (for union membership)
+            blob_key = (blob['color'], tuple(blob['center']))
+            if hasattr(self, 'blob_union_membership') and blob_key in self.blob_union_membership:
+                blob_colors = self.blob_union_membership[blob_key]
+            else:
+                blob_colors = {blob['color']}
+
+            # Second filter: when multiple colors included, blob must contain AT LEAST all of them
+            if len(included_colors) > 1:
+                if not included_colors.issubset(blob_colors):
+                    continue
+
+            # Third filter: blob must NOT overlap with any excluded colors
+            if excluded_colors and blob_colors.intersection(excluded_colors):
+                continue
+
+            pen = QPen(QColor(blob['color']), 2)
+            rect_item = self.graphics_view.scene().addRect(blob['box_x'], blob['box_y'], blob['box_size'], blob['box_size'], pen)
+            self.blob_items.append(rect_item)
 
         for item in self.union_box_items:
             self.graphics_view.scene().removeItem(item)
@@ -1404,7 +1490,23 @@ class MainWindow(QWidget):
             for idx, ub in self.graphics_view.union_dict.items():
                 cx, cy = ub['center']
                 length = ub['length']
-                pen = QPen(QColor("white"), 2, Qt.DashLine)
+
+                # Color code by category
+                category = ub.get('category', 'unknown')
+                if category == '3-element':
+                    color = QColor("#e74c3c")  # Red - exact match
+                    width = 3
+                elif category == '2-element':
+                    color = QColor("#f39c12")  # Orange - partial match
+                    width = 2
+                elif category == '1-element':
+                    color = QColor("#95a5a6")  # Gray - solo
+                    width = 2
+                else:
+                    color = QColor("white")  # Fallback
+                    width = 2
+
+                pen = QPen(color, width, Qt.DashLine)
                 rect_item = self.graphics_view.scene().addRect(cx - length / 2, cy - length / 2, length, length, pen)
                 self.union_box_items.append(rect_item)
 
@@ -1468,15 +1570,39 @@ class MainWindow(QWidget):
         )
 
     def _format_union_tooltip(self, ub, idx):
-        return (
+        # Get color to element mapping
+        color_to_element = self._get_color_to_element_map()
+
+        # Convert colors to element symbols
+        colors = ub.get('colors', [])
+        element_symbols = [color_to_element.get(c, c) for c in colors]
+        elements_display = ', '.join(element_symbols)
+
+        tooltip = (
             f"<b>Union Box #{idx}</b><br>"
+            f"Category: {ub.get('category', 'unknown')}<br>"
+            f"Elements: {elements_display}<br>"
+            f"<b>Confidence: {ub.get('confidence', 0):.1f}%</b><br><br>"
             f"Center: ({ub['center'][0]}, {ub['center'][1]})<br>"
-f"Length: {ub['length']} px<br>"
+            f"Length: {ub['length']} px<br>"
             f"Area: {ub['area']} px²<br><br>"
             f"Real Center: ({ub['real_center'][0]:.2f}, {ub['real_center'][1]:.2f}) µm<br>"
             f"Real Size: {ub['real_size'][0]:.2f} × {ub['real_size'][1]:.2f} µm<br>"
-            f"Real Area: {ub['real_area']:.2f} µm²"
+            f"Real Area: {ub['real_area']:.2f} µm²<br>"
         )
+
+        # Add intensity information if source blobs available
+        source_blobs = ub.get('source_blobs', [])
+        if source_blobs:
+            tooltip += "<br><b>Intensities:</b><br>"
+            for blob in source_blobs:
+                color = blob.get('color', 'unknown')
+                element = color_to_element.get(color, color)
+                mean_int = blob.get('mean_intensity', 0)
+                max_int = blob.get('max_intensity', 0)
+                tooltip += f"{element}: mean={mean_int:.3f}, max={max_int:.3f}<br>"
+
+        return tooltip
 
     def on_slider_change(self, value, color):
         if self.detection_method == "cellpose":
@@ -1532,6 +1658,11 @@ f"Length: {ub['length']} px<br>"
 
     def on_union_item_selected(self):
         selected_items = self.union_list_widget.selectedItems()
+        self.graphics_view.highlight_selected_boxes(selected_items)
+
+    def on_queue_item_selected(self):
+        """Handle selection in queue_server_list (second text box) - highlight on map."""
+        selected_items = self.queue_server_list.selectedItems()
         self.graphics_view.highlight_selected_boxes(selected_items)
 
     def add_box(self):
@@ -1605,17 +1736,194 @@ f"Length: {ub['length']} px<br>"
         self.graphics_view.mousePressEvent = on_press
         self.graphics_view.mouseReleaseEvent = on_release
 
+    def _get_color_to_element_map(self):
+        """Create mapping from color to element symbol."""
+        color_to_element = {}
+
+        # Common element symbols (1-2 characters, capitalized)
+        common_elements = {
+            'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
+            'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar', 'K', 'Ca',
+            'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+            'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr', 'Rb', 'Sr', 'Y', 'Zr',
+            'Nb', 'Mo', 'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn',
+            'Sb', 'Te', 'I', 'Xe', 'Cs', 'Ba', 'La', 'Ce', 'Pr', 'Nd',
+            'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb',
+            'Lu', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au', 'Hg',
+            'Tl', 'Pb', 'Bi', 'Po', 'At', 'Rn', 'Fr', 'Ra', 'Ac', 'Th',
+            'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf',
+        }
+
+        for i, color in enumerate(self.app_state.element_colors):
+            if i < len(self.app_state.file_names):
+                # Extract element symbol from filename (e.g., "detsum_Ca.tif" -> "Ca")
+                filename = self.app_state.file_names[i]
+                # Remove file extension
+                name = filename.replace('.tif', '').replace('.tiff', '').replace('.TIF', '').replace('.TIFF', '')
+
+                # Split by common delimiters and find element symbol
+                parts = name.replace('_', ' ').replace('-', ' ').split()
+                element = None
+
+                # Look for a known element symbol in the parts
+                for part in parts:
+                    if part in common_elements:
+                        element = part
+                        break
+
+                # If no known element found, try to extract capitalized 1-2 char strings
+                if element is None:
+                    for part in parts:
+                        if len(part) <= 2 and part[0].isupper():
+                            element = part
+                            break
+
+                # Final fallback: take the last non-numeric part
+                if element is None:
+                    for part in reversed(parts):
+                        if not part.isdigit() and part:
+                            element = part
+                            break
+
+                color_to_element[color] = element if element else color
+            else:
+                color_to_element[color] = color  # Fallback to color name
+        return color_to_element
+
+    def _score_unions_in_category(self, unions, category):
+        """
+        Score all unions in a category using percentile-based ranking.
+        This ensures scores are relative to other particles in the same category.
+        Modifies unions in-place to add 'confidence' field.
+        """
+        if not unions:
+            return
+
+        weights = self.scoring_weights[category]
+
+        # Extract raw feature values for all unions
+        all_brightness = []
+        all_sizes = []
+        all_compactness = []  # For 1-element
+        all_overlap = []      # For 2/3-element
+        all_balance = []      # For 2/3-element
+
+        for union in unions:
+            source_blobs = union.get('source_blobs', [])
+            intensities = [blob.get('mean_intensity', 0) for blob in source_blobs]
+
+            # Brightness: mean intensity across all blobs
+            brightness = np.mean(intensities) if intensities else 0
+            all_brightness.append(brightness)
+
+            # Size: area
+            all_sizes.append(union.get('area', 0))
+
+            # Category-specific features
+            if category == '1-element':
+                # Compactness
+                area = union.get('area', 1)
+                length = union.get('length', 1)
+                ideal_area = 0.785 * (length ** 2)
+                compactness = min(area / ideal_area, 1.0) if ideal_area > 0 else 0
+                all_compactness.append(compactness)
+
+            elif category == '2-element':
+                # Overlap quality
+                if len(source_blobs) >= 2:
+                    centers = [blob['center'] for blob in source_blobs[:2]]
+                    radii = [blob.get('radius', 10) for blob in source_blobs[:2]]
+                    dist = np.sqrt((centers[0][0] - centers[1][0])**2 + (centers[0][1] - centers[1][1])**2)
+                    max_dist = sum(radii)
+                    overlap = max(0, 1.0 - dist / max_dist) if max_dist > 0 else 0
+                else:
+                    overlap = 0.5
+                all_overlap.append(overlap)
+
+                # Balance
+                if len(intensities) >= 2:
+                    balance = min(intensities[0], intensities[1]) / max(intensities[0], intensities[1], 1e-6)
+                else:
+                    balance = 0.5
+                all_balance.append(balance)
+
+            elif category == '3-element':
+                # Overlap quality (tight co-localization)
+                if len(source_blobs) >= 3:
+                    centers = [blob['center'] for blob in source_blobs[:3]]
+                    dists = []
+                    for i in range(len(centers)):
+                        for j in range(i+1, len(centers)):
+                            d = np.sqrt((centers[i][0] - centers[j][0])**2 + (centers[i][1] - centers[j][1])**2)
+                            dists.append(d)
+                    avg_dist = np.mean(dists)
+                    union_size = union.get('length', 100)
+                    overlap = max(0, 1.0 - avg_dist / union_size) if union_size > 0 else 0
+                else:
+                    overlap = 0.5
+                all_overlap.append(overlap)
+
+                # Balance
+                if len(intensities) >= 3:
+                    min_int = min(intensities[:3])
+                    max_int = max(intensities[:3])
+                    balance = min_int / max(max_int, 1e-6)
+                else:
+                    balance = 0.5
+                all_balance.append(balance)
+
+        # Calculate percentile ranks (0-1) for each feature
+        # Higher values get higher percentiles
+        def percentile_rank(values):
+            """Return percentile rank (0-1) for each value."""
+            if len(values) == 1:
+                return [1.0]
+            # Use numpy's rankdata equivalent
+            sorted_indices = np.argsort(values)
+            ranks = np.empty_like(sorted_indices)
+            ranks[sorted_indices] = np.arange(len(values))
+            return ranks / max(len(values) - 1, 1)
+
+        brightness_scores = percentile_rank(all_brightness)
+        size_scores = percentile_rank(all_sizes)
+
+        # For size, we might want to penalize extremes - but for now keep simple ranking
+        # Could add Gaussian-style scoring centered on optimal range later
+
+        # Calculate final confidence scores
+        for i, union in enumerate(unions):
+            scores = {
+                'brightness': brightness_scores[i],
+                'size': size_scores[i],
+            }
+
+            if category == '1-element':
+                compactness_scores = percentile_rank(all_compactness)
+                scores['compactness'] = compactness_scores[i]
+
+            elif category in ['2-element', '3-element']:
+                overlap_scores = percentile_rank(all_overlap)
+                balance_scores = percentile_rank(all_balance)
+                scores['overlap'] = overlap_scores[i]
+                scores['balance'] = balance_scores[i]
+
+            # Weighted combination
+            final_score = sum(scores[feat] * weights[feat] for feat in weights)
+            union['confidence'] = final_score * 100.0  # Convert to percentage
+
     def union_function(self):
         blobs = self.get_current_blobs()
         blobs_by_color = {color: [] for color in self.app_state.element_colors}
         for blob in blobs:
             blobs_by_color[blob['color']].append(blob)
 
-        # Wrap in the {color: {key: [blobs]}} format expected by find_union_blobs
+        # Wrap in the {color: {key: [blobs]}} format expected by find_union_blobs_by_category
         blobs_for_union = {color: {'gui': blob_list} for color, blob_list in blobs_by_color.items()}
 
         overlap_thresh = getattr(self, "_setup_config", {}).get("segmentation_params", {}).get("overlap_thresh", 0.5)
-        raw = find_union_blobs(
+
+        # Get categorized unions
+        categorized_raw = find_union_blobs_by_category(
             blobs_for_union,
             self.app_state.microns_per_pixel_x,
             self.app_state.microns_per_pixel_y,
@@ -1624,35 +1932,231 @@ f"Length: {ub['length']} px<br>"
             overlap_thresh=overlap_thresh,
         )
 
-        union_objects = {}
-        for idx, u in raw.items():
-            real_cx, real_cy = u['real_center_um']
-            real_w, real_h = u['real_size_um']
-            union_objects[idx] = {
-                'center': tuple(u['center']),
-                'length': u['length'],
-                'area': u['area'],
-                'real_center': (real_cx, real_cy),
-                'real_size': (real_w, real_h),
-                'real_area': real_w * real_h,
-            }
+        # Store categorized unions with metadata AND build blob membership map
+        self.union_categories = {
+            '3-element': {},
+            '2-element': {},
+            '1-element': {},
+        }
 
-        self.graphics_view.union_dict = union_objects
+        # Map blob ID to the colors it overlaps with
+        self.blob_union_membership = {}  # blob_id -> set of colors it's in union with
+
+        # Build union categories and track blob membership using source_blobs
+        # TWO-PASS APPROACH: First collect all unions, then score them by COLOR COMBINATION
+        global_idx = 1
+        all_unions_for_display = {}
+        self.blob_union_membership = {}  # Reset blob membership
+        unions_by_color_combo = {}  # Group by specific color combination (e.g., 'Ca+Ce')
+
+        # FIRST PASS: Collect all union data grouped by color combination
+        for category in ['3-element', '2-element', '1-element']:
+            for _local_idx, u in categorized_raw[category].items():
+                real_cx, real_cy = u['real_center_um']
+                real_w, real_h = u['real_size_um']
+                source_blobs = u.get('source_blobs', [])
+
+                # Build union data structure
+                union_data = {
+                    'center': tuple(u['center']),
+                    'length': u['length'],
+                    'area': u['area'],
+                    'real_center': (real_cx, real_cy),
+                    'real_size': (real_w, real_h),
+                    'real_area': real_w * real_h,
+                    'colors': u.get('colors', []),
+                    'element_count': u.get('element_count', 1),
+                    'category': category,
+                    'source_blobs': source_blobs,
+                    'global_idx': global_idx,
+                }
+
+                # Create color combination key (sorted for consistency)
+                colors = sorted(union_data.get('colors', []))
+                colors_key = '+'.join(colors)
+                union_data['colors_key'] = colors_key
+
+                if colors_key not in unions_by_color_combo:
+                    unions_by_color_combo[colors_key] = []
+                unions_by_color_combo[colors_key].append(union_data)
+
+                # Track blob membership using source_blobs from union detection
+                union_colors = set(u.get('colors', []))
+                for source_blob in source_blobs:
+                    blob_key = (source_blob['color'], tuple(source_blob['center']))
+                    if blob_key not in self.blob_union_membership:
+                        self.blob_union_membership[blob_key] = set()
+                    self.blob_union_membership[blob_key].update(union_colors)
+
+                global_idx += 1
+
+        # SECOND PASS: Score each COLOR COMBINATION separately
+        for colors_key, combo_unions in unions_by_color_combo.items():
+            if not combo_unions:
+                continue
+
+            # Determine category (1, 2, or 3 element) from number of colors
+            num_colors = len(colors_key.split('+'))
+            category = f'{num_colors}-element'
+
+            # Score this color combination using appropriate category weights
+            self._score_unions_in_category(combo_unions, category)
+
+            # Store in display dictionaries
+            for union_data in combo_unions:
+                idx = union_data['global_idx']
+                original_category = union_data['category']
+                self.union_categories[original_category][idx] = union_data
+                all_unions_for_display[idx] = union_data
+
+        # Update union display boxes
+        self.graphics_view.union_dict = all_unions_for_display
         self.union_list_widget.clear()
-        for idx, ub in union_objects.items():
-            item = QListWidgetItem(f"Union Box #{idx}")
-            item.setToolTip(self._format_union_tooltip(ub, idx))
-            item.setData(Qt.UserRole + 1, ub)
-            self.union_list_widget.addItem(item)
+
+        # Get color to element mapping
+        color_to_element = self._get_color_to_element_map()
+
+        # Display unions grouped by category, then by color combination, sorted by confidence
+        for category in ['3-element', '2-element', '1-element']:
+            category_unions = [(idx, ub) for idx, ub in all_unions_for_display.items()
+                              if ub.get('category') == category]
+
+            if not category_unions:
+                continue
+
+            # Category header removed per user request - unions grouped only by element combination
+
+            # Group by color combination within this category
+            color_combos = {}
+            for idx, ub in category_unions:
+                colors_key = ub.get('colors_key', '+'.join(sorted(ub.get('colors', []))))
+                if colors_key not in color_combos:
+                    color_combos[colors_key] = []
+                color_combos[colors_key].append((idx, ub))
+
+            # Sort color combinations alphabetically
+            for colors_key in sorted(color_combos.keys()):
+                combo_unions = color_combos[colors_key]
+
+                # Sort by confidence within color combination (highest first)
+                combo_unions.sort(key=lambda x: x[1].get('confidence', 0), reverse=True)
+
+                # Convert color names to element symbols for display
+                color_names = colors_key.split('+')
+                element_symbols = [color_to_element.get(c, c) for c in color_names]
+                elements_display = '+'.join(element_symbols)
+
+                # Add color combination sub-header
+                subheader = QListWidgetItem(f"── {elements_display} ({len(combo_unions)}) ──")
+                subheader.setFlags(Qt.NoItemFlags)  # Make it non-selectable
+                subheader.setBackground(QColor("#34495e"))
+                subheader.setForeground(QColor("#bdc3c7"))
+                self.union_list_widget.addItem(subheader)
+
+                # Add unions in this color combination
+                for idx, ub in combo_unions:
+                    confidence = ub.get('confidence', 0)
+                    item = QListWidgetItem(f"    #{idx} - {confidence:.1f}%")
+                    item.setToolTip(self._format_union_tooltip(ub, idx))
+                    item.setData(Qt.UserRole + 1, ub)
+
+                    # Color-code by confidence level
+                    if confidence >= 75:
+                        item.setForeground(QColor("#27ae60"))  # Green - high confidence
+                    elif confidence >= 50:
+                        item.setForeground(QColor("#f39c12"))  # Orange - medium confidence
+                    else:
+                        item.setForeground(QColor("#95a5a6"))  # Gray - low confidence
+
+                    self.union_list_widget.addItem(item)
+
+        # Apply fine_scan_selection filtering and populate queue_server_list
+        fine_scan_selection = getattr(self, "_setup_config", {}).get("fine_scan_selection", [])
+        if fine_scan_selection:
+            self._apply_fine_scan_selection(fine_scan_selection, all_unions_for_display, color_to_element)
 
         if self.app_state.selected_directory:
             cache_dir = Path(self.app_state.selected_directory) / "automap_cache"
             cache_dir.mkdir(exist_ok=True)
-            serializable_dict = make_json_serializable(self.graphics_view.union_dict)
-            with open(cache_dir / "union_blobs.json", "w") as f:
+            serializable_dict = make_json_serializable(self.union_categories)
+            with open(cache_dir / "union_blobs_categorized.json", "w") as f:
                 json.dump(serializable_dict, f, indent=4)
 
         self.update_boxes()
+
+    def _apply_fine_scan_selection(self, fine_scan_selection, all_unions, color_to_element):
+        """
+        Apply fine_scan_selection filtering to select top N unions per relationship.
+        Automatically adds selected unions to queue_server_list.
+        """
+        # Build reverse map: element -> color
+        element_to_color = {elem: color for color, elem in color_to_element.items()}
+
+        # Clear queue_server_list before populating
+        self.queue_server_list.clear()
+
+        total_selected = 0
+
+        for spec in fine_scan_selection:
+            elements_str = spec.get("elements", "")
+            count = spec.get("count", 0)
+
+            if count <= 0:
+                continue
+
+            # Parse element string (e.g., "Ca-Ce-P", "Ce")
+            requested_elements = [e.strip() for e in elements_str.split("-")]
+
+            # Convert elements to colors
+            try:
+                target_colors = sorted([element_to_color[elem] for elem in requested_elements])
+            except KeyError as e:
+                print(f"[GUI] Element {e} not found in loaded files - skipping {elements_str}")
+                continue
+
+            # Create colors_key for matching
+            colors_key = '+'.join(target_colors)
+
+            # Find matching unions
+            matching_unions = []
+            for idx, union in all_unions.items():
+                union_colors = sorted(union.get('colors', []))
+                union_key = '+'.join(union_colors)
+                if union_key == colors_key:
+                    matching_unions.append((idx, union))
+
+            # Sort by confidence (highest first) and take top N
+            matching_unions.sort(key=lambda x: x[1].get('confidence', 0), reverse=True)
+            selected = matching_unions[:count]
+
+            # Add to queue_server_list
+            for idx, ub in selected:
+                confidence = ub.get('confidence', 0)
+                # Convert colors to element symbols for display
+                color_names = colors_key.split('+')
+                element_symbols = [color_to_element.get(c, c) for c in color_names]
+                elements_display = '+'.join(element_symbols)
+
+                item_text = f"#{idx} {elements_display} - {confidence:.1f}%"
+                item = QListWidgetItem(item_text)
+                item.setToolTip(self._format_union_tooltip(ub, idx))
+                item.setData(Qt.UserRole + 1, ub)
+
+                # Color-code by confidence
+                if confidence >= 75:
+                    item.setForeground(QColor("#27ae60"))
+                elif confidence >= 50:
+                    item.setForeground(QColor("#f39c12"))
+                else:
+                    item.setForeground(QColor("#95a5a6"))
+
+                self.queue_server_list.addItem(item)
+                total_selected += 1
+
+            print(f"[FINE_SCAN_SELECTION] {elements_str}: selected {len(selected)} of {len(matching_unions)} (requested {count})")
+
+        print(f"[FINE_SCAN_SELECTION] Total: {total_selected} unions added to fine scan queue")
+
 
     def send_to_list(self):
         existing_texts = {self.queue_server_list.item(i).text() for i in range(self.queue_server_list.count())}

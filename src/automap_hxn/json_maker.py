@@ -122,7 +122,9 @@ JSON_MAKER_COMMON_SECTIONS = {
         "step_size_fine": 0.1, "exp_t_fine": 0.005, "fine_scan_pad_ratio": 0.3,
     },
     "export_params": {
-        "elem_list": [["Ca", "Fe", "S"]], "export_norm": "sclr1_ch4",
+        "elem_list": [["Ca", "Fe", "S"]], 
+        "fine_scan_selection": [["Ca-Fe-S", 5], ["Fe-S", 3], ["Ca", 2]],
+        "export_norm": "sclr1_ch4",
         "data_wd": "/nsls2/data/hxn/legacy/users/2026Q1/synaps_demo_2_2026Q1",
         "tiled_reconstructions": "tst/sandbox/eugene/synaps/reconstructions",
         "tiled_segmentations": "tst/sandbox/eugene/synaps/segmentations",
@@ -527,6 +529,7 @@ class JSONMakerWidget(QWidget):
             field_widget = self._make_json_maker_field(key, default)
             self._export_form.addRow(key, field_widget)
             self.json_maker_fields["export_params"][key] = (field_widget, default)
+
         self._intensity_filter_checkbox = QCheckBox()
         self._intensity_filter_checkbox.stateChanged.connect(self._on_intensity_filter_toggled)
         self._export_form.addRow("Use Intensity Filter", self._intensity_filter_checkbox)
@@ -770,6 +773,33 @@ class JSONMakerWidget(QWidget):
             else:
                 detection_methods[method] = dict(DETECTION_METHOD_BLOCKS[method])
         config["detection_methods"] = detection_methods
+
+        # Add fine_scan_selection - parse simple format [["Ca-Ce-P", 5], ["Ce", 3]]
+        # and convert to internal format [{"elements": "Ca-Ce-P", "count": 5}, ...]
+        # Get the field from auto-generated export_params fields
+        fine_scan_widget, fine_scan_default = self.json_maker_fields["export_params"]["fine_scan_selection"]
+        fine_scan_text = fine_scan_widget.text().strip()
+        if fine_scan_text:
+            try:
+                simple_format = json.loads(fine_scan_text)
+                if not isinstance(simple_format, list):
+                    raise ValueError("fine_scan_selection must be a list")
+                # Convert from [["Ca-Ce-P", 5], ...] to [{"elements": "Ca-Ce-P", "count": 5}, ...]
+                fine_scan_selection = []
+                for item in simple_format:
+                    if not isinstance(item, list) or len(item) != 2:
+                        raise ValueError(f"Each entry must be [\"elements\", count], got: {item}")
+                    elements, count = item
+                    if not isinstance(elements, str):
+                        raise ValueError(f"Elements must be a string, got: {elements}")
+                    if not isinstance(count, int) or count < 0:
+                        raise ValueError(f"Count must be a non-negative integer, got: {count}")
+                    fine_scan_selection.append({"elements": elements, "count": count})
+                config["fine_scan_selection"] = fine_scan_selection
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in fine_scan_selection: {e}")
+        else:
+            config["fine_scan_selection"] = []
 
         if "simple" in detection_methods:
             simple_block = detection_methods["simple"]

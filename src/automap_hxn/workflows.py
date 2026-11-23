@@ -164,7 +164,22 @@ def mosaic_overlap_scan_auto_relative(beamline_params=None, initial_scan_path=No
             print(f"[ERROR] Could not load tile params from '{initial_scan_path}': {e}")
             raise
 
+    # Validate fine_scan_selection if present
+    fine_scan_selection = tile_params.get('fine_scan_selection', [])
+    elem_list_of_lists = tile_params.get('export_params', {}).get('elem_list', [])
+    if fine_scan_selection:
+        from .utils import validate_fine_scan_selection
+        is_valid, error_msg = validate_fine_scan_selection(fine_scan_selection, elem_list_of_lists)
+        if not is_valid:
+            raise ValueError(f"[ERROR] Invalid fine_scan_selection:\n{error_msg}")
+        print(f"[VALIDATION] fine_scan_selection validated: {len(fine_scan_selection)} relationships specified")
+
     proceed_with_fine_scan = tile_params.get('execution_params', {}).get('proceed_with_fine_scan', False)
+
+    # Warn if fine scans enabled but no selection specified
+    if proceed_with_fine_scan and not fine_scan_selection:
+        print("[WARNING] proceed_with_fine_scan=true but fine_scan_selection is empty - no fine scans will be submitted!")
+        print("[WARNING] Add fine_scan_selection to specify which unions to scan (e.g., [{\"elements\": \"Ca-Ce-P\", \"count\": 5}])")
     mode = str(tile_params.get('execution_params', {}).get('mode', 'simulation')).lower()
     is_real = (mode == 'real')
     is_offline = (mode == 'offline')

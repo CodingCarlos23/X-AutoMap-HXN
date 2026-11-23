@@ -6,6 +6,7 @@ import re
 import subprocess
 import shutil
 import urllib.request
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -28,6 +29,191 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
+# Common chemical element symbols (most relevant for XRF)
+ELEMENT_SYMBOLS = {
+    'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
+    'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar', 'K', 'Ca',
+    'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+    'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr', 'Rb', 'Sr', 'Y', 'Zr',
+    'Nb', 'Mo', 'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn',
+    'Sb', 'Te', 'I', 'Xe', 'Cs', 'Ba', 'La', 'Ce', 'Pr', 'Nd',
+    'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb',
+    'Lu', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au', 'Hg',
+    'Tl', 'Pb', 'Bi', 'Po', 'At', 'Rn', 'Fr', 'Ra', 'Ac', 'Th',
+    'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf'
+}
+
+
+def extract_element_from_filename(filepath: str) -> str:
+    """
+    Extract element symbol from XRF TIFF filename.
+
+    Supports patterns like:
+    - detsum_Ca_K.tiff → Ca
+    - Ca_K.tiff → Ca
+    - Fe.tiff → Fe
+    - element_Ca.tif → Ca
+    - scan_001_P_data.tif → P
+
+    Returns:
+        Element symbol (e.g., "Ca", "Fe", "P") or empty string if not found
+    """
+    filename = os.path.basename(filepath)
+    # Remove extension
+    name_no_ext = os.path.splitext(filename)[0]
+
+    # Split by common delimiters
+    parts = re.split(r'[_\-\.\s]+', name_no_ext)
+
+    # Look for element symbols in parts (case-insensitive match)
+    for part in parts:
+        # Check if this part matches a known element symbol
+        if part in ELEMENT_SYMBOLS:
+            return part
+        # Check capitalized version (e.g., "ca" → "Ca")
+        if part.capitalize() in ELEMENT_SYMBOLS:
+            return part.capitalize()
+        # Check uppercase version (e.g., "fe" → "Fe")
+        if len(part) == 2 and part.upper() in ELEMENT_SYMBOLS:
+            return part.upper()
+        if len(part) == 1 and part.upper() in ELEMENT_SYMBOLS:
+            return part.upper()
+
+    # Fallback: look for element pattern anywhere in the filename
+    for elem in ELEMENT_SYMBOLS:
+        # Match element symbol as a separate word (with word boundaries)
+        pattern = r'\b' + re.escape(elem) + r'\b'
+        if re.search(pattern, filename, re.IGNORECASE):
+            return elem
+
+    return ""
+
+
+# ============================================================================
+# H5 File Reading Functions (using xraylarch python which has h5py)
+# ============================================================================
+
+XRAYLARCH_PYTHON = "/Users/Lawrence/xraylarch/bin/python"
+
+
+def _read_h5_positions(h5_path: str):
+    """
+    Read position data from h5 file.
+
+    Returns:
+        tuple: (x_pos_2d, y_pos_2d) - 2D arrays of physical coordinates in microns
+               Both arrays have shape (height, width)
+    """
+    script = f"""
+import h5py
+import numpy as np
+import json
+
+with h5py.File('{h5_path}', 'r') as f:
+    pos_data = f['/xrfmap/positions/pos'][:]  # Shape: (2, height, width)
+    x_pos = pos_data[0]  # Shape: (height, width)
+    y_pos = pos_data[1]  # Shape: (height, width)
+
+    # Convert to lists for JSON serialization
+    result = {{
+        'x_pos': x_pos.tolist(),
+        'y_pos': y_pos.tolist(),
+        'shape': list(x_pos.shape)
+    }}
+    print(json.dumps(result))
+"""
+
+    result = subprocess.run(
+        [XRAYLARCH_PYTHON, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    data = json.loads(result.stdout)
+    x_pos = np.array(data['x_pos'])
+    y_pos = np.array(data['y_pos'])
+
+    return x_pos, y_pos
+
+
+def _read_h5_element_data(h5_path: str, element_name: str):
+    """
+    Read element intensity data from h5 file.
+
+    Args:
+        h5_path: Path to h5 file
+        element_name: Element to read (e.g., "Ca_K", "P_K", "Ce_L")
+
+    Returns:
+        np.ndarray: 2D array of element intensities, shape (height, width)
+    """
+    script = f"""
+import h5py
+import numpy as np
+import json
+
+with h5py.File('{h5_path}', 'r') as f:
+    # Get element names
+    elem_names = [name.decode('utf-8').rstrip('\\x00') for name in f['/xrfmap/detsum/xrf_fit_name'][:]]
+
+    # Find index of requested element
+    try:
+        elem_idx = elem_names.index('{element_name}')
+    except ValueError:
+        print(json.dumps({{'error': 'Element not found', 'available': elem_names}}))
+        exit(1)
+
+    # Read data for this element
+    data = f['/xrfmap/detsum/xrf_fit'][elem_idx]  # Shape: (height, width)
+
+    result = {{
+        'data': data.tolist(),
+        'shape': list(data.shape)
+    }}
+    print(json.dumps(result))
+"""
+
+    result = subprocess.run(
+        [XRAYLARCH_PYTHON, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    data = json.loads(result.stdout)
+    if 'error' in data:
+        raise ValueError(f"{data['error']}: {data.get('available', [])}")
+
+    return np.array(data['data'])
+
+
+def _get_h5_element_list(h5_path: str):
+    """
+    Get list of available elements in h5 file.
+
+    Returns:
+        list: Element names (e.g., ["Ca_K", "P_K", "Ce_L", ...])
+    """
+    script = f"""
+import h5py
+import json
+
+with h5py.File('{h5_path}', 'r') as f:
+    elem_names = [name.decode('utf-8').rstrip('\\x00') for name in f['/xrfmap/detsum/xrf_fit_name'][:]]
+    print(json.dumps(elem_names))
+"""
+
+    result = subprocess.run(
+        [XRAYLARCH_PYTHON, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    return json.loads(result.stdout)
+
+
 KNOWN_MODELS = [
     # ── Local (Ollama) ──────────────────────────────
     "qwen2.5vl:7b",
@@ -42,6 +228,7 @@ KNOWN_MODELS = [
     # ── OpenAI (via NSLS-II APIM) ───────────────────
     "gpt-4.1",
     "gpt-5.5",
+    "gpt-5.6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-sol",
 ]
@@ -256,13 +443,16 @@ LOCATE_SYSTEM_PROMPT = (
     "Identify all distinct bright features, particles, or clusters visible in the image. "
     "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
     '{"features": [{"id": 1, "label": "particle cluster", "x1": 0.10, "y1": 0.20, '
-    '"x2": 0.45, "y2": 0.60, "description": "bright region with high signal"}], "total_count": 1}\n'
+    '"x2": 0.45, "y2": 0.60, "confidence": 0.92, "description": "bright region with high signal"}], "total_count": 1}\n'
     "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
     "where (0,0) is the top-left corner and (1,1) is the bottom-right corner of the image. "
     "x1 < x2, y1 < y2. "
     "Draw each bounding box tightly around the BRIGHT CORE of each feature — "
     "do not include surrounding dark background. Be as precise as possible with the box edges. "
-    "Include every distinct feature you can identify."
+    "Include every distinct feature you can identify.\n"
+    "The 'confidence' field (0.0 to 1.0) indicates how certain you are that this is a distinct feature "
+    "based on signal brightness, clarity, and distinctness. Use the full scale: higher values for "
+    "clear/bright features, lower values for faint/ambiguous regions."
 )
 
 LOCATE_SPARSE_XRF_PROMPT = (
@@ -279,25 +469,31 @@ LOCATE_SPARSE_XRF_PROMPT = (
     "There is no limit on how many features you can return — report ALL of them. "
     "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
     '{"features": [{"id": 1, "label": "XRF particle", "x1": 0.10, "y1": 0.20, '
-    '"x2": 0.45, "y2": 0.60, "description": "bright isolated particle cluster"}], "total_count": 1}\n'
+    '"x2": 0.45, "y2": 0.60, "confidence": 0.88, "description": "bright isolated particle cluster"}], "total_count": 1}\n'
     "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
     "where (0,0) is top-left and (1,1) is bottom-right. x1 < x2, y1 < y2. "
     "Draw boxes tightly around the bright core of each feature — exclude surrounding dark background. "
-    "For very small particles, the box may only span 0.01–0.05 in each dimension — that is fine."
+    "For very small particles, the box may only span 0.01–0.05 in each dimension — that is fine.\n"
+    "The 'confidence' field (0.0 to 1.0) indicates your certainty that this is a real particle vs noise. "
+    "Use the full scale based on brightness, clarity, and signal-to-background ratio."
 )
 
 LOCATE_XRF_ROI_PROMPT = (
     "You are analyzing a composite XRF (X-ray fluorescence) scan image where three element channels "
     "are encoded as RGB: Red = element 1, Green = element 2, Blue = element 3. "
-    "Identify all regions where TWO OR MORE elements show elevated co-localized signal — "
-    "these appear as mixed colors (yellow, cyan, magenta, or white) rather than pure red, green, or blue. "
-    "These co-localized regions are the areas of interest (AOI) for follow-up high-resolution scanning. "
+    "Identify ALL distinct regions of interest (ROIs), including:\n"
+    "1. MULTI-ELEMENT overlaps (2+ elements) — mixed colors (yellow, cyan, magenta, white)\n"
+    "2. SINGLE-ELEMENT regions with significant signal — pure red, green, or blue\n"
     "Respond ONLY with valid JSON using this exact schema — no extra text outside the JSON object:\n"
     '{"features": [{"id": 1, "label": "multi-element AOI", "x1": 0.10, "y1": 0.20, '
-    '"x2": 0.45, "y2": 0.60, "description": "co-localized signal from elements 1+2"}], "total_count": 1}\n'
+    '"x2": 0.45, "y2": 0.60, "confidence": 0.91, "description": "co-localized signal from element1+element2"}, '
+    '{"id": 2, "label": "single-element AOI", "x1": 0.50, "y1": 0.30, "x2": 0.65, "y2": 0.45, '
+    '"confidence": 0.73, "description": "single-element signal from element3"}], "total_count": 2}\n'
     "IMPORTANT: All coordinates (x1, y1, x2, y2) must be FRACTIONAL values between 0.0 and 1.0, "
     "where (0,0) is top-left and (1,1) is bottom-right. x1 < x2, y1 < y2. "
-    "Draw boxes tightly around regions of multi-element overlap. Ignore single-element-only regions."
+    "For multi-element: 'co-localized signal from X+Y'. For single: 'single-element signal from X'.\n"
+    "The 'confidence' field (0.0 to 1.0) indicates your certainty that this is a distinct ROI. "
+    "Use the full scale based on signal brightness, clarity, and how well-defined the region is."
 )
 
 
@@ -366,6 +562,99 @@ def _draw_feature_boxes(base_pixmap, features):
 
     painter.end()
     return result
+
+
+def _draw_boxes_on_matplotlib_figure(fig, ax, features, draw_boxes=True):
+    """Draw colored bounding boxes on matplotlib axes.
+
+    Args:
+        fig: Matplotlib figure
+        ax: Main axes to draw on
+        features: List of feature dicts with x1, y1, x2, y2 (in axes coordinates)
+        draw_boxes: If True, draw the boxes; if False, just render the figure
+
+    Returns:
+        QPixmap with the rendered figure
+    """
+    from matplotlib.patches import Rectangle
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import io
+
+    # Color palette matching BOX_COLORS
+    box_colors_mpl = [
+        '#FF5050',  # Red
+        '#50A0FF',  # Blue
+        '#50DC50',  # Green
+        '#FFC832',  # Yellow
+        '#B450FF',  # Purple
+        '#32DCDC',  # Cyan
+        '#FF8C32',  # Orange
+    ]
+
+    # Store existing patches to remove them later if needed
+    existing_rects = [p for p in ax.patches if isinstance(p, Rectangle)]
+
+    if draw_boxes and features:
+        # Remove old boxes first
+        for rect in existing_rects:
+            rect.remove()
+
+        # Get axes limits for clamping (works for both fractional and physical coordinates)
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        # Note: y-axis is inverted (y_min > y_max typically), so we need to handle that
+        y_lower = min(y_min, y_max)
+        y_upper = max(y_min, y_max)
+
+        # Draw rectangles on the axes (coordinates match the axes data coordinates)
+        for i, feat in enumerate(features):
+            color = box_colors_mpl[i % len(box_colors_mpl)]
+            # Get coordinates and clamp to axes limits
+            x1 = max(x_min, min(x_max, float(feat.get("x1", x_min))))
+            y1 = max(y_lower, min(y_upper, float(feat.get("y1", y_lower))))
+            x2 = max(x_min, min(x_max, float(feat.get("x2", x_max))))
+            y2 = max(y_lower, min(y_upper, float(feat.get("y2", y_upper))))
+
+            width = x2 - x1
+            height = y2 - y1
+
+            rect = Rectangle((x1, y1), width, height, linewidth=2,
+                             edgecolor=color, facecolor='none', zorder=100)
+            ax.add_patch(rect)
+    else:
+        # Remove all boxes
+        for rect in existing_rects:
+            rect.remove()
+
+    # Save to buffer - use fig.savefig() directly instead of plt.savefig()
+    buf = io.BytesIO()
+    try:
+        # Draw the canvas to ensure all patches are rendered
+        fig.canvas.draw()
+        # Save the figure directly (don't use plt.savefig which might target wrong figure)
+        # Preserve dark background
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight',
+                   facecolor=fig.get_facecolor(), edgecolor='none')
+        buf.seek(0)
+
+        # Load into QPixmap
+        qimg = QImage()
+        success = qimg.loadFromData(buf.getvalue())
+        if not success or qimg.isNull():
+            raise RuntimeError("Failed to load image data into QImage")
+
+        pixmap = QPixmap.fromImage(qimg)
+        if pixmap.isNull():
+            raise RuntimeError("Failed to create QPixmap from QImage")
+
+        return pixmap
+
+    except Exception as e:
+        print(f"Error saving matplotlib figure: {e}")
+        # Return a blank pixmap as fallback
+        return QPixmap()
 
 
 # ── image display with mouse coord tracking ───────────────────────────────────
@@ -635,6 +924,26 @@ def _draw_coordinate_grid(arr: np.ndarray, steps: int = 10) -> np.ndarray:
     return arr
 
 
+def _encode_xrf_figure_for_vlm(path):
+    """Encode XRF matplotlib figure for VLM - no processing, just load and encode."""
+    arr = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR)
+    if arr is None:
+        raise ValueError(f"Could not read image: {path}")
+
+    # No CLAHE, no resizing, no processing - figure is already perfect
+    ok, buf = cv2.imencode(".png", arr)
+    if not ok:
+        raise RuntimeError("cv2.imencode failed")
+
+    # Save debug copy
+    import pathlib
+    debug_final = pathlib.Path("/tmp/_llm_input_final_processed.png")
+    cv2.imwrite(str(debug_final), arr)
+    print(f"DEBUG: Final XRF figure (sent to LLM) saved to: {debug_final}")
+
+    return base64.b64encode(buf.tobytes()).decode()
+
+
 def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, normalize: bool = True,
                           grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
     """Load image, optionally normalize and dilate, downsample to max_dim, return base64-PNG string."""
@@ -675,6 +984,18 @@ def _encode_image_for_vlm(path, max_dim=_VLM_MAX_DIM, dilate_ksize: int = 0, nor
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
         arr = cv2.resize(arr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    # Save a debug copy of the final processed image sent to LLM (for XRF mode)
+    # Save to /tmp with a fixed name so user can easily find it
+    import pathlib
+    if "/tmp" in str(path) or "/var/folders" in str(path):
+        debug_final = pathlib.Path("/tmp/_llm_input_final_processed.png")
+        try:
+            cv2.imwrite(str(debug_final), arr)
+            print(f"DEBUG: Final processed image (sent to LLM) saved to: {debug_final}")
+        except:
+            pass  # Don't fail detection if debug save fails
+
     ok, buf = cv2.imencode(".png", arr)
     if not ok:
         raise RuntimeError("cv2.imencode failed")
@@ -691,7 +1012,7 @@ class _LocateThread(QThread):
     error = Signal(str)
 
     def __init__(self, image_path, dilate_ksize: int = 0, system_prompt_override: str = None, normalize: bool = True,
-                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False):
+                 grid_overlay: bool = False, upscale: bool = False, colormap: bool = False, is_xrf_figure: bool = False):
         super().__init__()
         self.image_path = image_path
         self.dilate_ksize = dilate_ksize
@@ -699,12 +1020,18 @@ class _LocateThread(QThread):
         self.grid_overlay = grid_overlay
         self.upscale = upscale
         self.colormap = colormap
+        self.is_xrf_figure = is_xrf_figure
         self._system_prompt = system_prompt_override or LOCATE_SYSTEM_PROMPT
 
     def run(self):
         try:
-            img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize,
-                                             grid_overlay=self.grid_overlay, upscale=self.upscale, colormap=self.colormap)
+            if self.is_xrf_figure:
+                # XRF figure: already processed, just encode as-is
+                img_b64 = _encode_xrf_figure_for_vlm(self.image_path)
+            else:
+                # Single image: apply normal preprocessing
+                img_b64 = _encode_image_for_vlm(self.image_path, dilate_ksize=self.dilate_ksize, normalize=self.normalize,
+                                                 grid_overlay=self.grid_overlay, upscale=self.upscale, colormap=self.colormap)
             provider = _get_provider(_active_model)
             if provider == "anthropic":
                 parsed = self._query_anthropic(img_b64)
@@ -1179,10 +1506,18 @@ class _LocateTab(QWidget):
         self._dilated_pixmap = None
         self._annotated_pixmap = None
         self._features = []
+        self._displayed_features = []  # Features currently shown in the list (after filtering)
+        self._filtered_features_cache = []  # Cache of filtered features
         self._zoom = 1.0
         self._model_ok = True
         self._xrf_paths = [None, None, None]
         self._xrf_elem_names = ["Element 1", "Element 2", "Element 3"]
+        self._last_used_prompt = LOCATE_SYSTEM_PROMPT  # Stores the actual prompt used for detection
+        self._xrf_source_type = "TIFF"  # "TIFF" or "H5"
+        self._xrf_h5_path = None  # Path to h5 file
+        self._xrf_h5_elements = []  # Available elements in h5 file
+        self._xrf_h5_selected = [None, None, None]  # Selected element indices for RGB
+        self._xrf_positions = None  # (x_pos, y_pos) arrays from h5 file
         self._init_ui()
         self._check_model()
 
@@ -1349,40 +1684,178 @@ class _LocateTab(QWidget):
         xrf_layout.setContentsMargins(0, 0, 0, 0)
         xrf_layout.setSpacing(4)
 
+        # Source type selector
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Data source:"))
+        self._source_btn_group = QButtonGroup(self)
+        self._tiff_radio = QRadioButton("TIFF files (3 separate)")
+        self._h5_radio = QRadioButton("H5 file (with positions)")
+        self._tiff_radio.setChecked(True)
+        self._source_btn_group.addButton(self._tiff_radio)
+        self._source_btn_group.addButton(self._h5_radio)
+        self._tiff_radio.toggled.connect(self._on_source_type_changed)
+        source_row.addWidget(self._tiff_radio)
+        source_row.addWidget(self._h5_radio)
+        source_row.addStretch()
+        xrf_layout.addLayout(source_row)
+
+        # TIFF mode controls (3 separate file pickers)
+        self._tiff_controls = QWidget()
+        tiff_layout = QVBoxLayout(self._tiff_controls)
+        tiff_layout.setContentsMargins(0, 0, 0, 0)
+        tiff_layout.setSpacing(2)
+
         colors = ["Red", "Green", "Blue"]
         self._xrf_pick_btns = []
         self._xrf_name_labels = []
+        self._xrf_elem_inputs = []
         for i, color in enumerate(colors):
             row = QHBoxLayout()
-            btn = QPushButton(f"Pick {color} Channel (Element {i+1})...")
+            btn = QPushButton(f"Pick {color} Channel...")
             btn.clicked.connect(lambda _, idx=i: self._pick_xrf_image(idx))
             lbl = QLabel("No file selected")
             lbl.setStyleSheet("color: #888;")
+            elem_input = QLineEdit()
+            elem_input.setPlaceholderText(f"Element {i+1}")
+            elem_input.setText(self._xrf_elem_names[i])
+            elem_input.setMaximumWidth(100)
+            elem_input.textChanged.connect(lambda text, idx=i: self._on_elem_name_changed(idx, text))
             row.addWidget(btn)
+            row.addWidget(elem_input)
             row.addWidget(lbl, 1)
-            xrf_layout.addLayout(row)
+            tiff_layout.addLayout(row)
             self._xrf_pick_btns.append(btn)
             self._xrf_name_labels.append(lbl)
+            self._xrf_elem_inputs.append(elem_input)
+
+        xrf_layout.addWidget(self._tiff_controls)
+
+        # H5 mode controls (1 file picker + 3 element selectors)
+        self._h5_controls = QWidget()
+        self._h5_controls.setVisible(False)
+        h5_layout = QVBoxLayout(self._h5_controls)
+        h5_layout.setContentsMargins(0, 0, 0, 0)
+        h5_layout.setSpacing(2)
+
+        # H5 file picker
+        h5_file_row = QHBoxLayout()
+        self._h5_pick_btn = QPushButton("Pick H5 File...")
+        self._h5_pick_btn.clicked.connect(self._pick_h5_file)
+        self._h5_file_label = QLabel("No H5 file selected")
+        self._h5_file_label.setStyleSheet("color: #888;")
+        h5_file_row.addWidget(self._h5_pick_btn)
+        h5_file_row.addWidget(self._h5_file_label, 1)
+        h5_layout.addLayout(h5_file_row)
+
+        # Element selectors for RGB channels
+        self._h5_elem_combos = []
+        for i, color in enumerate(colors):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{color} Channel:"))
+            combo = QComboBox()
+            combo.setEnabled(False)
+            combo.currentIndexChanged.connect(lambda idx, ch=i: self._on_h5_elem_selected(ch, idx))
+            row.addWidget(combo, 1)
+            h5_layout.addLayout(row)
+            self._h5_elem_combos.append(combo)
+
+        xrf_layout.addWidget(self._h5_controls)
+
         layout.addWidget(self._xrf_widget)
 
+        # Detection buttons row
+        detect_row = QHBoxLayout()
         self.locate_btn = QPushButton("Get Location of Features")
         self.locate_btn.setMinimumHeight(40)
         self.locate_btn.setEnabled(False)
         self.locate_btn.clicked.connect(self._run_locate)
-        layout.addWidget(self.locate_btn)
+        detect_row.addWidget(self.locate_btn, 3)
+
+        self.load_json_btn = QPushButton("Load JSON")
+        self.load_json_btn.setMinimumHeight(40)
+        self.load_json_btn.setToolTip("Load previously saved detection results from JSON file")
+        self.load_json_btn.clicked.connect(self._load_json_results)
+        detect_row.addWidget(self.load_json_btn, 1)
+        layout.addLayout(detect_row)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        # Box toggle
-        box_toggle_row = QHBoxLayout()
+        # Element filter checkboxes (for XRF mode)
+        self._filter_group = QGroupBox("Filter by Elements (co-localization)")
+        self._filter_group.setVisible(False)  # Hidden until features are loaded
+        filter_layout = QHBoxLayout(self._filter_group)
+        filter_layout.setContentsMargins(8, 8, 8, 8)
+
+        filter_label = QLabel("Show features containing:")
+        filter_label.setStyleSheet("font-weight: bold;")
+        filter_layout.addWidget(filter_label)
+
+        self._elem_filter_checks = []
+        for i, elem_name in enumerate(self._xrf_elem_names):
+            check = QCheckBox(elem_name)
+            check.setChecked(True)  # All selected by default
+            check.toggled.connect(self._on_element_filter_changed)
+            filter_layout.addWidget(check)
+            self._elem_filter_checks.append(check)
+
+        # Add "Exact match" checkbox
+        self._exact_match_check = QCheckBox("Exact match only")
+        self._exact_match_check.setToolTip(
+            "When checked: show ONLY features with exactly the selected elements (e.g., Ca+P excludes Ca+P+Ce)\n"
+            "When unchecked: show features containing AT LEAST the selected elements (e.g., Ca+P includes Ca+P+Ce)"
+        )
+        self._exact_match_check.setStyleSheet("font-weight: bold; color: #e67e22;")
+        self._exact_match_check.toggled.connect(self._on_element_filter_changed)
+        filter_layout.addWidget(self._exact_match_check)
+
+        filter_layout.addStretch()
+
+        # Add "Select All" and "Clear All" buttons
+        select_all_btn = QPushButton("All")
+        select_all_btn.setMaximumWidth(60)
+        select_all_btn.clicked.connect(lambda: self._set_all_filters(True))
+        filter_layout.addWidget(select_all_btn)
+
+        clear_all_btn = QPushButton("None")
+        clear_all_btn.setMaximumWidth(60)
+        clear_all_btn.clicked.connect(lambda: self._set_all_filters(False))
+        filter_layout.addWidget(clear_all_btn)
+
+        layout.addWidget(self._filter_group)
+
+        # Confidence threshold filter
+        conf_row = QHBoxLayout()
+        conf_label = QLabel("Min confidence:")
+        conf_label.setToolTip("Only show features with confidence >= this threshold")
+        conf_row.addWidget(conf_label)
+
+        self._conf_spin = QSpinBox()
+        self._conf_spin.setRange(0, 100)
+        self._conf_spin.setValue(0)
+        self._conf_spin.setSuffix("%")
+        self._conf_spin.setMaximumWidth(80)
+        self._conf_spin.valueChanged.connect(self._on_confidence_filter_changed)
+        conf_row.addWidget(self._conf_spin)
+        conf_row.addStretch()
+        layout.addLayout(conf_row)
+
+        # Display toggles
+        display_toggle_row = QHBoxLayout()
         self._show_boxes_check = QCheckBox("Show Boxes")
         self._show_boxes_check.setChecked(True)
         self._show_boxes_check.toggled.connect(self._on_boxes_toggled)
-        box_toggle_row.addWidget(self._show_boxes_check)
-        box_toggle_row.addStretch()
-        layout.addLayout(box_toggle_row)
+        display_toggle_row.addWidget(self._show_boxes_check)
+
+        self._show_grid_check = QCheckBox("Show Grid Lines")
+        self._show_grid_check.setChecked(True)
+        self._show_grid_check.setToolTip("Toggle grid display (LLM always sees grid)")
+        self._show_grid_check.toggled.connect(self._on_grid_display_toggled)
+        display_toggle_row.addWidget(self._show_grid_check)
+
+        display_toggle_row.addStretch()
+        layout.addLayout(display_toggle_row)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
@@ -1403,12 +1876,61 @@ class _LocateTab(QWidget):
             "font-family: monospace; font-size: 11px; padding: 6px; color: #888;"
         )
 
-        self.info_panel = QTextEdit()
-        self.info_panel.setReadOnly(True)
-        self.info_panel.setMinimumWidth(200)
-        self.info_panel.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self.info_panel.setPlaceholderText("Feature details will appear here after analysis.")
-        self.info_panel.setVisible(False)
+        # Right panel with features list and selection
+        right_panel = QWidget()
+        right_panel_layout = QVBoxLayout(right_panel)
+        right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        right_panel_layout.setSpacing(4)
+
+        # Features list (all filtered features)
+        features_label = QLabel("<b>Detected Features</b> (click to highlight)")
+        features_label.setStyleSheet("padding: 4px;")
+        right_panel_layout.addWidget(features_label)
+
+        from qtpy.QtWidgets import QListWidget, QListWidgetItem
+        self.features_list = QListWidget()
+        self.features_list.setSelectionMode(QListWidget.SingleSelection)
+        self.features_list.itemClicked.connect(self._on_feature_clicked)
+        self.features_list.setStyleSheet("font-family: monospace; font-size: 11px;")
+        right_panel_layout.addWidget(self.features_list, 3)
+
+        # Selection control buttons
+        selection_btn_row = QHBoxLayout()
+        add_to_selection_btn = QPushButton("Add to Selection")
+        add_to_selection_btn.setToolTip("Add selected feature to the export list")
+        add_to_selection_btn.clicked.connect(self._add_to_selection)
+        selection_btn_row.addWidget(add_to_selection_btn)
+        right_panel_layout.addLayout(selection_btn_row)
+
+        # Selected features panel
+        selected_label = QLabel("<b>Selected for Export</b>")
+        selected_label.setStyleSheet("padding: 4px; margin-top: 8px;")
+        right_panel_layout.addWidget(selected_label)
+
+        self.selected_list = QListWidget()
+        self.selected_list.setStyleSheet("font-family: monospace; font-size: 11px; background: #000000; color: #ffffff;")
+        right_panel_layout.addWidget(self.selected_list, 2)
+
+        # Export controls
+        export_btn_row = QHBoxLayout()
+        remove_selected_btn = QPushButton("Remove")
+        remove_selected_btn.setToolTip("Remove from export list")
+        remove_selected_btn.clicked.connect(self._remove_from_selection)
+        export_btn_row.addWidget(remove_selected_btn)
+
+        clear_selection_btn = QPushButton("Clear All")
+        clear_selection_btn.clicked.connect(self._clear_all_selection)
+        export_btn_row.addWidget(clear_selection_btn)
+        right_panel_layout.addLayout(export_btn_row)
+
+        export_json_btn = QPushButton("Export to JSON")
+        export_json_btn.setStyleSheet("font-weight: bold; padding: 6px; background: #27ae60; color: white;")
+        export_json_btn.clicked.connect(self._export_selected_json)
+        right_panel_layout.addWidget(export_json_btn)
+
+        right_panel.setMinimumWidth(250)
+        right_panel.setVisible(False)
+        self.info_panel = right_panel  # Keep same name for compatibility
 
         image_col = QVBoxLayout()
         image_col.setSpacing(2)
@@ -1428,8 +1950,12 @@ class _LocateTab(QWidget):
         content_row = QHBoxLayout()
         content_row.setSpacing(6)
         content_row.addLayout(image_col, 3)
-        content_row.addWidget(self.info_panel, 1)
+        content_row.addWidget(right_panel, 1)
         layout.addLayout(content_row, 1)
+
+        # Store currently displayed features and filtered features
+        self._displayed_features = []
+        self._filtered_features_cache = []
 
     def _check_model(self):
         provider = _get_provider(_active_model)
@@ -1527,6 +2053,408 @@ class _LocateTab(QWidget):
         self.scroll_area.setVisible(False)
         self.info_panel.setVisible(False)
 
+    def _on_elem_name_changed(self, idx: int, text: str):
+        """Update element name and refresh composite if all images are loaded."""
+        self._xrf_elem_names[idx] = text or f"Element {idx+1}"
+        # Update filter checkbox label if it exists
+        if hasattr(self, '_elem_filter_checks') and idx < len(self._elem_filter_checks):
+            self._elem_filter_checks[idx].setText(self._xrf_elem_names[idx])
+        if all(self._xrf_paths):
+            self._build_xrf_composite_display()
+
+    def _on_source_type_changed(self):
+        """Switch between TIFF and H5 modes."""
+        if self._tiff_radio.isChecked():
+            self._xrf_source_type = "TIFF"
+            self._tiff_controls.setVisible(True)
+            self._h5_controls.setVisible(False)
+        else:
+            self._xrf_source_type = "H5"
+            self._tiff_controls.setVisible(False)
+            self._h5_controls.setVisible(True)
+
+        # Reset selections
+        self._xrf_paths = [None, None, None]
+        self._xrf_h5_path = None
+        self.locate_btn.setEnabled(False)
+
+    def _pick_h5_file(self):
+        """Pick an H5 file and load available elements."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select H5 XRF File", "",
+            "H5 Files (*.h5 *.hdf5);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            # Load available elements
+            elements = _get_h5_element_list(path)
+
+            if not elements:
+                QMessageBox.warning(self, "No Elements", "No elements found in H5 file")
+                return
+
+            self._xrf_h5_path = path
+            self._xrf_h5_elements = elements
+            self._h5_file_label.setText(os.path.basename(path))
+            self._h5_file_label.setStyleSheet("")
+
+            # Populate element combo boxes
+            for combo in self._h5_elem_combos:
+                combo.clear()
+                combo.addItems(elements)
+                combo.setEnabled(True)
+
+            # Auto-select first 3 elements if available
+            for i in range(min(3, len(elements))):
+                self._h5_elem_combos[i].setCurrentIndex(i)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load H5 file: {e}")
+
+    def _on_h5_elem_selected(self, channel: int, elem_idx: int):
+        """Handle element selection for a channel."""
+        if elem_idx < 0 or not self._xrf_h5_elements:
+            return
+
+        # Store selected element index
+        self._xrf_h5_selected[channel] = elem_idx
+
+        # Extract element name (e.g., "Ca_K" -> "Ca")
+        elem_full_name = self._xrf_h5_elements[elem_idx]
+        elem_name = elem_full_name.split('_')[0]  # Get just the element symbol
+        self._xrf_elem_names[channel] = elem_name
+
+        # Update filter checkbox label if it exists
+        if hasattr(self, '_elem_filter_checks') and channel < len(self._elem_filter_checks):
+            self._elem_filter_checks[channel].setText(elem_name)
+
+        # Enable locate button if all 3 elements selected
+        if all(idx is not None for idx in self._xrf_h5_selected) and self._model_ok:
+            self._build_xrf_composite_display()
+            self.locate_btn.setEnabled(True)
+
+    def _set_all_filters(self, state: bool):
+        """Select or deselect all element filters."""
+        for check in self._elem_filter_checks:
+            check.setChecked(state)
+
+    def _update_features_list(self, filtered_features):
+        """Update the features QListWidget with filtered features."""
+        from qtpy.QtWidgets import QListWidgetItem
+
+        # Store for later use
+        self._displayed_features = filtered_features
+        self._filtered_features_cache = filtered_features
+
+        # Clear and repopulate
+        self.features_list.clear()
+
+        for i, feat in enumerate(filtered_features):
+            fid = feat.get("id", i + 1)
+            label = feat.get("label", "")
+            desc = feat.get("description", "")
+            confidence = feat.get("confidence", None)
+            x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
+            x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
+
+            # Build display text
+            display_lines = [f"#{fid} {label}"]
+            display_lines.append(f"  ({x1:.3f}, {y1:.3f}) → ({x2:.3f}, {y2:.3f})")
+
+            if confidence is not None:
+                conf_pct = confidence * 100
+                display_lines.append(f"  conf: {conf_pct:.0f}%")
+
+            if desc:
+                short_desc = desc if len(desc) < 35 else desc[:32] + "..."
+                display_lines.append(f"  {short_desc}")
+
+            display_text = "\n".join(display_lines)
+
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.UserRole, i)
+            item.setToolTip(f"{desc}\nClick to highlight on map")
+            self.features_list.addItem(item)
+
+    def _select_all_features(self):
+        """Select all features in the features list."""
+        for i in range(self.features_list.count()):
+            item = self.features_list.item(i)
+            item.setSelected(True)
+
+    def _on_feature_clicked(self, item):
+        """Highlight the clicked feature on the map."""
+        # Get the feature data stored in the item
+        feature_idx = item.data(Qt.UserRole)
+        if feature_idx is None or feature_idx >= len(self._displayed_features):
+            return
+
+        feature = self._displayed_features[feature_idx]
+
+        # Redraw with only this feature highlighted
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf and hasattr(self, '_xrf_fig') and hasattr(self, '_xrf_ax_main'):
+            # XRF mode: draw with matplotlib
+            highlighted_pixmap = _draw_boxes_on_matplotlib_figure(
+                self._xrf_fig, self._xrf_ax_main, [feature], draw_boxes=True
+            )
+            self._show_pixmap(highlighted_pixmap)
+        else:
+            # Single element mode: draw on QPixmap
+            base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+            if base:
+                highlighted_pixmap = _draw_feature_boxes(base, [feature])
+                self._show_pixmap(highlighted_pixmap)
+
+    def _add_to_selection(self):
+        """Add selected features from the list to the export selection."""
+        from qtpy.QtWidgets import QListWidgetItem
+
+        selected_items = self.features_list.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            feature_idx = item.data(Qt.UserRole)
+            if feature_idx is None or feature_idx >= len(self._displayed_features):
+                continue
+
+            feature = self._displayed_features[feature_idx]
+
+            # Check if already in selection
+            already_added = False
+            for i in range(self.selected_list.count()):
+                existing_item = self.selected_list.item(i)
+                existing_feature = existing_item.data(Qt.UserRole)
+                if existing_feature.get('id') == feature.get('id'):
+                    already_added = True
+                    break
+
+            if not already_added:
+                # Add to selected list
+                display_text = item.text()
+                selected_item = QListWidgetItem(display_text)
+                selected_item.setData(Qt.UserRole, feature)
+                self.selected_list.addItem(selected_item)
+
+        # Update status
+        count = self.selected_list.count()
+        self.status_label.setText(f"{count} feature(s) selected for export")
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+    def _remove_from_selection(self):
+        """Remove selected items from the export selection."""
+        selected_items = self.selected_list.selectedItems()
+        for item in selected_items:
+            row = self.selected_list.row(item)
+            self.selected_list.takeItem(row)
+
+        # Update status
+        count = self.selected_list.count()
+        if count > 0:
+            self.status_label.setText(f"{count} feature(s) selected for export")
+        else:
+            self.status_label.setText("Selection cleared")
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+    def _clear_all_selection(self):
+        """Clear all items from the export selection."""
+        self.selected_list.clear()
+        self.status_label.setText("Selection cleared")
+        self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+    def _export_selected_json(self):
+        """Export selected features to a new JSON file."""
+        if self.selected_list.count() == 0:
+            QMessageBox.warning(
+                self, "No Selection",
+                "Please add features to the selection list before exporting."
+            )
+            return
+
+        # Collect selected features
+        selected_features = []
+        for i in range(self.selected_list.count()):
+            item = self.selected_list.item(i)
+            feature = item.data(Qt.UserRole)
+            if feature:
+                selected_features.append(feature)
+
+        # Ask for save location
+        default_name = "selected_features.json"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Selected Features", default_name,
+            "JSON Files (*.json);;All Files (*)"
+        )
+
+        if not save_path:
+            return
+
+        try:
+            # Create output data
+            output_data = {
+                "features": selected_features,
+                "total_count": len(selected_features)
+            }
+
+            # Save to file
+            with open(save_path, 'w') as f:
+                json.dump(output_data, f, indent=2)
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Exported {len(selected_features)} feature(s) to:\n{save_path}"
+            )
+
+            self.status_label.setText(f"Exported {len(selected_features)} features to {pathlib.Path(save_path).name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Failed",
+                f"Failed to export features:\n{str(e)}"
+            )
+
+    def _on_element_filter_changed(self):
+        """Called when any element filter checkbox is toggled."""
+        # Only redraw if we have features loaded
+        if not self._features:
+            return
+
+        # Get filtered features
+        filtered_features = self._get_filtered_features()
+
+        # Update the features list UI
+        self._update_features_list(filtered_features)
+
+        # Redraw with filtered features
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf and hasattr(self, '_xrf_fig') and hasattr(self, '_xrf_ax_main'):
+            # Regenerate both versions with filtered features
+            self._orig_pixmap = _draw_boxes_on_matplotlib_figure(
+                self._xrf_fig, self._xrf_ax_main, filtered_features, draw_boxes=False
+            )
+            if filtered_features:
+                self._annotated_pixmap = _draw_boxes_on_matplotlib_figure(
+                    self._xrf_fig, self._xrf_ax_main, filtered_features, draw_boxes=True
+                )
+            else:
+                self._annotated_pixmap = None
+
+            # Show the appropriate version
+            if self._show_boxes_check.isChecked() and self._annotated_pixmap:
+                self._show_pixmap(self._annotated_pixmap)
+            else:
+                self._show_pixmap(self._orig_pixmap)
+
+            # Update status
+            total = len(self._features)
+            shown = len(filtered_features)
+            if shown < total:
+                self.status_label.setText(f"Showing {shown} of {total} features (filtered)")
+                self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+    def _on_confidence_filter_changed(self):
+        """Called when confidence threshold is changed."""
+        if not self._features:
+            return
+        # Trigger the same filtering logic as element filter
+        self._on_element_filter_changed()
+
+    def _on_grid_display_toggled(self):
+        """Toggle grid lines in the UI display only (not in LLM input)."""
+        if not hasattr(self, '_xrf_fig') or not hasattr(self, '_xrf_ax_main'):
+            return
+        # Rebuild the display with or without grid
+        # Check if data is ready based on source type
+        data_ready = False
+        if self._xrf_source_type == "TIFF":
+            data_ready = all(self._xrf_paths)
+        else:  # H5 mode
+            data_ready = self._xrf_h5_path is not None and all(idx is not None for idx in self._xrf_h5_selected)
+
+        if data_ready:
+            self._build_xrf_composite_display()
+
+    def _get_filtered_features(self):
+        """Filter features based on selected elements and confidence threshold.
+
+        Returns features based on selected elements and exact match mode:
+        - Exact match OFF: features containing AT LEAST the selected elements (AND logic)
+        - Exact match ON: features containing EXACTLY the selected elements (no extras)
+        - Also filters by minimum confidence threshold
+        """
+        # Get selected element names
+        selected_elements = set()
+        for i, check in enumerate(self._elem_filter_checks):
+            if check.isChecked():
+                elem_name = self._xrf_elem_names[i].strip()
+                if elem_name:
+                    selected_elements.add(elem_name.lower())
+
+        # If no elements selected, return empty list
+        if not selected_elements:
+            return []
+
+        # Get confidence threshold
+        min_confidence = self._conf_spin.value() / 100.0  # Convert percentage to 0-1
+
+        # Check if exact match mode is enabled
+        exact_match = self._exact_match_check.isChecked()
+
+        # Filter features
+        filtered = []
+        for feat in self._features:
+            # Check confidence threshold first
+            confidence = feat.get("confidence", 0.0)
+            if confidence < min_confidence:
+                continue
+
+            desc = feat.get("description", "")
+
+            # Extract elements mentioned in the description
+            # Look for patterns like "Ca+P", "Ce+P", "Ca+Ce+P"
+            mentioned_elements = self._extract_elements_from_description(desc)
+
+            if exact_match:
+                # Exact match: sets must be equal
+                if mentioned_elements == selected_elements:
+                    filtered.append(feat)
+            else:
+                # Contains mode: selected must be subset of mentioned
+                if selected_elements.issubset(mentioned_elements):
+                    filtered.append(feat)
+
+        return filtered
+
+    def _extract_elements_from_description(self, description: str):
+        """Extract element symbols from a feature description.
+
+        Examples:
+        - "co-localized signal from Ca+P" → {'ca', 'p'}
+        - "co-localized signal from Ca+Ce+P" → {'ca', 'ce', 'p'}
+        - "single-element signal from Ce" → {'ce'}
+        """
+        import re
+        elements = set()
+
+        # Look for element symbols (1-2 letter capitalized words)
+        # This pattern finds sequences of 1-2 letter element symbols
+        pattern = r'\b([A-Z][a-z]?)\b'
+        matches = re.findall(pattern, description, re.IGNORECASE)
+
+        # Filter to only include known element names
+        all_elem_names = [name.lower() for name in self._xrf_elem_names if name.strip()]
+
+        for match in matches:
+            elem_lower = match.lower()
+            if elem_lower in all_elem_names:
+                elements.add(elem_lower)
+
+        return elements
+
     def _pick_xrf_image(self, idx: int):
         path, _ = QFileDialog.getOpenFileName(
             self, f"Select Element {idx+1} TIFF", "",
@@ -1537,35 +2465,287 @@ class _LocateTab(QWidget):
         self._xrf_paths[idx] = path
         self._xrf_name_labels[idx].setText(os.path.basename(path))
         self._xrf_name_labels[idx].setStyleSheet("")
+
+        # Auto-extract element name from filename
+        elem_name = extract_element_from_filename(path)
+        if elem_name:
+            self._xrf_elem_inputs[idx].setText(elem_name)
+            self._xrf_elem_names[idx] = elem_name
+        else:
+            # Fallback to default if no element detected
+            default_name = f"Element {idx+1}"
+            self._xrf_elem_inputs[idx].setText(default_name)
+            self._xrf_elem_names[idx] = default_name
+
         # Enable run button only when all 3 are selected
         if all(self._xrf_paths) and self._model_ok:
             self._build_xrf_composite_display()
             self.locate_btn.setEnabled(True)
 
     def _build_xrf_composite_display(self):
-        """Load 3 TIFFs, normalise each, composite as RGB, show in viewer."""
+        """Load data (TIFF or H5), create matplotlib composite with RGB + individual element panels."""
         try:
+            import matplotlib
+            matplotlib.use('Agg')  # Non-interactive backend
+            import matplotlib.pyplot as plt
+            import matplotlib.gridspec as gridspec
+            from matplotlib.patches import Patch
+
             channels = []
-            for p in self._xrf_paths:
-                arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
-                if arr is None:
-                    raise ValueError(f"Could not read {p}")
-                arr = arr.astype(np.float32)
-                mn, mx = arr.min(), arr.max()
-                if mx > mn:
-                    arr = (arr - mn) / (mx - mn)
-                channels.append((arr * 255).astype(np.uint8))
+            normalized_channels = []
+
+            if self._xrf_source_type == "TIFF":
+                # Load from 3 separate TIFF files
+                for p in self._xrf_paths:
+                    arr = cv2.imread(str(p), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+                    if arr is None:
+                        raise ValueError(f"Could not read {p}")
+                    arr = arr.astype(np.float32)
+                    mn, mx = arr.min(), arr.max()
+                    if mx > mn:
+                        normalized = (arr - mn) / (mx - mn)
+                    else:
+                        normalized = np.zeros_like(arr, dtype=np.float32)
+                    normalized_channels.append(normalized)
+                    channels.append((normalized * 255).astype(np.uint8))
+
+                # No position data from TIFFs
+                self._xrf_positions = None
+
+            else:  # H5 mode
+                # Load position data from h5 file
+                x_pos, y_pos = _read_h5_positions(self._xrf_h5_path)
+                self._xrf_positions = (x_pos, y_pos)
+
+                # Load element data for each selected element
+                for elem_idx in self._xrf_h5_selected:
+                    elem_name = self._xrf_h5_elements[elem_idx]
+                    arr = _read_h5_element_data(self._xrf_h5_path, elem_name)
+                    arr = arr.astype(np.float32)
+                    mn, mx = arr.min(), arr.max()
+                    if mx > mn:
+                        normalized = (arr - mn) / (mx - mn)
+                    else:
+                        normalized = np.zeros_like(arr, dtype=np.float32)
+                    normalized_channels.append(normalized)
+                    channels.append((normalized * 255).astype(np.uint8))
+
             # Pad to same shape
             h = max(c.shape[0] for c in channels)
             w = max(c.shape[1] for c in channels)
             padded = []
-            for c in channels:
+            padded_norm = []
+            for c, n in zip(channels, normalized_channels):
                 p = np.zeros((h, w), dtype=np.uint8)
                 p[:c.shape[0], :c.shape[1]] = c
                 padded.append(p)
+                pn = np.zeros((h, w), dtype=np.float32)
+                pn[:n.shape[0], :n.shape[1]] = n
+                padded_norm.append(pn)
+
+            # Create RGB composite
             rgb = np.stack(padded, axis=-1)
-            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888).copy()
+
+            # Store raw RGB composite for LLM analysis (without matplotlib decorations)
+            self._xrf_rgb_composite = rgb.copy()
+
+            # Create matplotlib figure with gridspec layout
+            # Larger figure size for better resolution
+            fig = plt.figure(figsize=(16, 8), facecolor='#1a1a1a')
+            gs = gridspec.GridSpec(3, 2, width_ratios=[3, 1], hspace=0.35, wspace=0.12,
+                                   left=0.08, right=0.95, top=0.92, bottom=0.08)
+
+            # Main RGB composite (left, spans all rows)
+            ax_main = fig.add_subplot(gs[:, 0])
+            ax_main.set_facecolor('#1a1a1a')
+
+            # Determine coordinate system (physical vs fractional)
+            if self._xrf_positions is not None:
+                # H5 mode with physical coordinates
+                x_pos, y_pos = self._xrf_positions
+                # Get coordinate ranges
+                x_min, x_max = x_pos.min(), x_pos.max()
+                y_min, y_max = y_pos.min(), y_pos.max()
+                extent = [x_min, x_max, y_max, y_min]  # [left, right, bottom, top] with origin='upper'
+                xlabel = 'X (μm)'
+                ylabel = 'Y (μm)'
+                use_physical = True
+            else:
+                # TIFF mode with fractional coordinates
+                extent = [0, 1, 1, 0]
+                xlabel = 'X'
+                ylabel = 'Y'
+                use_physical = False
+
+            ax_main.imshow(rgb, aspect='auto', origin='upper', interpolation='nearest',
+                          extent=extent)
+
+            # Store figure, axes, and coordinate info for later drawing of boxes
+            self._xrf_fig = fig
+            self._xrf_ax_main = ax_main
+            self._xrf_use_physical = use_physical
+            self._xrf_extent = extent
+
+            # Set axis labels
+            ax_main.set_xlabel(xlabel, fontsize=11, fontweight='bold', color='white')
+            ax_main.set_ylabel(ylabel, fontsize=11, fontweight='bold', color='white')
+
+            # Set tick marks
+            if use_physical:
+                # Physical coordinates: use smart tick spacing
+                x_range = x_max - x_min
+                y_range = y_max - y_min
+                num_ticks = 6
+                x_ticks = np.linspace(x_min, x_max, num_ticks)
+                y_ticks = np.linspace(y_min, y_max, num_ticks)
+                ax_main.set_xticks(x_ticks)
+                ax_main.set_yticks(y_ticks)
+                ax_main.set_xticklabels([f'{x:.1f}' for x in x_ticks], fontsize=9, color='white')
+                ax_main.set_yticklabels([f'{y:.1f}' for y in y_ticks], fontsize=9, color='white')
+                ax_main.set_xlim(x_min, x_max)
+                ax_main.set_ylim(y_max, y_min)  # Inverted for origin='upper'
+            else:
+                # Fractional coordinates: 0-1
+                tick_positions = np.linspace(0, 1, 6)
+                ax_main.set_xticks(tick_positions)
+                ax_main.set_yticks(tick_positions)
+                ax_main.set_xticklabels([f'{x:.1f}' for x in tick_positions], fontsize=9, color='white')
+                ax_main.set_yticklabels([f'{y:.1f}' for y in tick_positions], fontsize=9, color='white')
+                ax_main.set_xlim(0, 1)
+                ax_main.set_ylim(1, 0)  # Inverted for origin='upper'
+
+            ax_main.tick_params(axis='both', which='both', direction='out', length=4, colors='white')
+
+            # Style spines for dark background
+            for spine in ax_main.spines.values():
+                spine.set_edgecolor('white')
+                spine.set_linewidth(1.0)
+
+            # Add grid lines to main RGB if checkbox is enabled
+            if hasattr(self, '_show_grid_check') and self._show_grid_check.isChecked():
+                if use_physical:
+                    # Physical coordinates: dense grid for better precision
+                    x_range = x_max - x_min
+                    y_range = y_max - y_min
+
+                    # Major grid: aim for 0.5 μm spacing for better precision
+                    # Round to nearest 0.5
+                    x_spacing = 0.5
+                    y_spacing = 0.5
+
+                    # Create major grid ticks
+                    x_grid_ticks = np.arange(
+                        np.floor(x_min * 2) / 2,  # Round down to nearest 0.5
+                        np.ceil(x_max * 2) / 2 + x_spacing,
+                        x_spacing
+                    )
+                    y_grid_ticks = np.arange(
+                        np.floor(y_min * 2) / 2,
+                        np.ceil(y_max * 2) / 2 + y_spacing,
+                        y_spacing
+                    )
+
+                    ax_main.set_xticks(x_grid_ticks)
+                    ax_main.set_yticks(y_grid_ticks)
+                    ax_main.set_xticklabels([f'{x:.1f}' for x in x_grid_ticks], fontsize=7, color='white')
+                    ax_main.set_yticklabels([f'{y:.1f}' for y in y_grid_ticks], fontsize=7, color='white')
+                else:
+                    # Fractional coordinates: 0.05 intervals (20 grid lines instead of 10)
+                    all_ticks = np.linspace(0, 1, 21)
+                    ax_main.set_xticks(all_ticks)
+                    ax_main.set_yticks(all_ticks)
+                    # Only label every other tick (0.1 intervals) to avoid crowding
+                    labels = [f'{x:.2f}' if i % 2 == 0 else '' for i, x in enumerate(all_ticks)]
+                    ax_main.set_xticklabels(labels, fontsize=7, color='white')
+                    ax_main.set_yticklabels(labels, fontsize=7, color='white')
+                # Grid lines at all tick positions
+                ax_main.grid(which='both', color='white', linestyle='-', linewidth=0.4, alpha=0.5)
+
+            # Individual element panels (right, stacked vertically)
+            # Create custom colormaps that go from black to the target color (for dark background)
+            from matplotlib.colors import LinearSegmentedColormap
+
+            # Black to Red
+            colors_red = [(0, 0, 0), (1, 0, 0)]
+            cmap_red = LinearSegmentedColormap.from_list('black_to_red', colors_red, N=256)
+
+            # Black to Green
+            colors_green = [(0, 0, 0), (0, 1, 0)]
+            cmap_green = LinearSegmentedColormap.from_list('black_to_green', colors_green, N=256)
+
+            # Black to Blue
+            colors_blue = [(0, 0, 0), (0, 0, 1)]
+            cmap_blue = LinearSegmentedColormap.from_list('black_to_blue', colors_blue, N=256)
+
+            color_cmaps = [cmap_red, cmap_green, cmap_blue]
+
+            for i, (elem_name, img_norm) in enumerate(zip(self._xrf_elem_names, padded_norm)):
+                ax_panel = fig.add_subplot(gs[i, 1])
+
+                # Set dark background for the panel
+                ax_panel.set_facecolor('#1a1a1a')
+
+                # Use same coordinate system as main panel
+                ax_panel.imshow(img_norm, cmap=color_cmaps[i], aspect='auto', origin='upper',
+                               interpolation='nearest', extent=extent)
+
+                # Use actual element name as title at the top, with extra padding to prevent overlap
+                display_name = elem_name if elem_name.strip() else f"Element {i+1}"
+                ax_panel.set_title(display_name, fontsize=12, fontweight='bold', pad=12,
+                                  loc='center', verticalalignment='baseline', color='white')
+
+                # Add coordinate ticks matching the main panel
+                if use_physical:
+                    # Physical coordinates: same as main panel
+                    num_ticks_panel = 6
+                    x_ticks_panel = np.linspace(x_min, x_max, num_ticks_panel)
+                    y_ticks_panel = np.linspace(y_min, y_max, num_ticks_panel)
+                    ax_panel.set_xticks(x_ticks_panel)
+                    ax_panel.set_yticks(y_ticks_panel)
+                    ax_panel.set_xticklabels([f'{x:.1f}' for x in x_ticks_panel], fontsize=6, color='white')
+                    ax_panel.set_yticklabels([f'{y:.1f}' for y in y_ticks_panel], fontsize=6, color='white')
+                    ax_panel.set_xlim(x_min, x_max)
+                    ax_panel.set_ylim(y_max, y_min)
+                else:
+                    # Fractional coordinates: 0.1 intervals
+                    all_ticks = np.linspace(0, 1, 11)
+                    ax_panel.set_xticks(all_ticks)
+                    ax_panel.set_yticks(all_ticks)
+                    ax_panel.set_xticklabels([f'{x:.1f}' for x in all_ticks], fontsize=6, color='white')
+                    ax_panel.set_yticklabels([f'{y:.1f}' for y in all_ticks], fontsize=6, color='white')
+                    ax_panel.set_xlim(0, 1)
+                    ax_panel.set_ylim(1, 0)  # Inverted for origin='upper'
+
+                ax_panel.tick_params(axis='both', which='both', direction='out', length=3, labelsize=6,
+                                    colors='white')
+
+                # Add grid lines to individual panels if enabled
+                if hasattr(self, '_show_grid_check') and self._show_grid_check.isChecked():
+                    ax_panel.grid(which='both', color='white', linestyle='-', linewidth=0.3, alpha=0.3)
+
+                # Add thin border around each panel
+                for spine in ax_panel.spines.values():
+                    spine.set_edgecolor('white')
+                    spine.set_linewidth(0.8)
+
+            # Save to temporary buffer
+            import io
+
+            # Save as PNG to buffer with dark background preserved
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight',
+                       facecolor='#1a1a1a', edgecolor='none')
+            buf.seek(0)
+
+            # Load into QPixmap
+            qimg = QImage()
+            qimg.loadFromData(buf.getvalue())
             self._orig_pixmap = QPixmap.fromImage(qimg)
+
+            # DON'T close the figure - we need it to draw boxes later!
+            # The figure will be reused when loading JSON or running detection
+            # plt.close(fig)  # Commented out to keep figure alive for drawing boxes
+
             self._dilated_pixmap = None
             self._annotated_pixmap = None
             self._zoom = 1.0
@@ -1648,20 +2828,139 @@ class _LocateTab(QWidget):
             return
         is_xrf = self._mode_combo.currentIndex() == 1
         if is_xrf:
-            if not all(self._xrf_paths):
-                return
+            # Check if data is ready based on source type
+            if self._xrf_source_type == "TIFF":
+                if not all(self._xrf_paths):
+                    return
+            else:  # H5 mode
+                if not self._xrf_h5_path or not all(idx is not None for idx in self._xrf_h5_selected):
+                    return
             self.locate_btn.setEnabled(False)
-            self.status_label.setText("Analyzing XRF composite... this may take 30–60 seconds.")
-            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
-            # Save composite to a temp PNG for the thread to load
+
+            # TEMPORARY: Save full matplotlib figure (RGB + individual panels) for LLM analysis
             import tempfile
-            buf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            buf.close()
-            pm = self._orig_pixmap
-            if pm:
-                pm.save(buf.name, "PNG")
-            self._xrf_tmp_path = buf.name
-            self._locate_thread = _LocateThread(buf.name, dilate_ksize=0, system_prompt_override=LOCATE_XRF_ROI_PROMPT)
+            buf_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            buf_file.close()
+
+            # Add grid to the main RGB composite axes
+            if hasattr(self, '_xrf_fig') and hasattr(self, '_xrf_ax_main'):
+                # Use stored coordinate system information
+                if hasattr(self, '_xrf_use_physical') and self._xrf_use_physical:
+                    # Physical coordinates: dense grid at 0.5 μm intervals
+                    x_min, x_max = self._xrf_extent[0], self._xrf_extent[1]
+                    y_min, y_max = self._xrf_extent[3], self._xrf_extent[2]
+
+                    # Dense grid: 0.5 μm spacing for precision
+                    x_spacing = 0.5
+                    y_spacing = 0.5
+
+                    x_ticks = np.arange(
+                        np.floor(x_min * 2) / 2,
+                        np.ceil(x_max * 2) / 2 + x_spacing,
+                        x_spacing
+                    )
+                    y_ticks = np.arange(
+                        np.floor(y_min * 2) / 2,
+                        np.ceil(y_max * 2) / 2 + y_spacing,
+                        y_spacing
+                    )
+
+                    self._xrf_ax_main.set_xticks(x_ticks)
+                    self._xrf_ax_main.set_yticks(y_ticks)
+                    self._xrf_ax_main.set_xticklabels([f'{x:.1f}' for x in x_ticks], fontsize=7, color='white')
+                    self._xrf_ax_main.set_yticklabels([f'{y:.1f}' for y in y_ticks], fontsize=7, color='white')
+                else:
+                    # Fractional coordinates: 0.05 intervals (denser grid)
+                    all_ticks = np.linspace(0, 1, 21)
+                    self._xrf_ax_main.set_xticks(all_ticks)
+                    self._xrf_ax_main.set_yticks(all_ticks)
+                    # Label every other tick
+                    labels = [f'{x:.2f}' if i % 2 == 0 else '' for i, x in enumerate(all_ticks)]
+                    self._xrf_ax_main.set_xticklabels(labels, fontsize=7, color='white')
+                    self._xrf_ax_main.set_yticklabels(labels, fontsize=7, color='white')
+
+                self._xrf_ax_main.tick_params(axis='both', which='both', direction='out', length=4, colors='white')
+
+                # Grid lines at all tick positions - slightly more prominent for LLM
+                self._xrf_ax_main.grid(which='both', color='white', linestyle='-', linewidth=0.5, alpha=0.6)
+
+                # Save the entire matplotlib figure (with all panels)
+                # Higher DPI for better LLM precision
+                self._xrf_fig.savefig(buf_file.name, format='png', dpi=200, bbox_inches='tight',
+                                     facecolor='#1a1a1a', edgecolor='none')
+
+                print(f"DEBUG: Full matplotlib figure (RGB + panels + grid) saved to: {buf_file.name}")
+
+            self._xrf_tmp_path = buf_file.name
+            self.status_label.setText(f"Analyzing XRF composite with element panels... this may take 30–60 seconds.")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
+
+            # IMPORTANT: Disable preprocessing since figure is already processed
+            normalize = False  # Already normalized
+            grid = False  # Grid already added to figure
+            upscale = False  # Figure is already high-res (dpi=200)
+            colormap = False  # Already in color
+
+            # Create dynamic prompt with actual element names
+            elem_red = self._xrf_elem_names[0] if self._xrf_elem_names[0].strip() else "Element 1"
+            elem_green = self._xrf_elem_names[1] if self._xrf_elem_names[1].strip() else "Element 2"
+            elem_blue = self._xrf_elem_names[2] if self._xrf_elem_names[2].strip() else "Element 3"
+
+            # Determine coordinate system for prompt
+            if hasattr(self, '_xrf_use_physical') and self._xrf_use_physical:
+                # Physical coordinates mode (H5 file)
+                x_min, x_max = self._xrf_extent[0], self._xrf_extent[1]
+                y_min, y_max = self._xrf_extent[3], self._xrf_extent[2]  # Note: extent is [left, right, bottom, top]
+                coord_desc = f"physical coordinates in microns (μm)"
+                coord_range = f"X: {x_min:.1f} to {x_max:.1f} μm, Y: {y_min:.1f} to {y_max:.1f} μm"
+                grid_desc = "Grid lines show 0.5 μm intervals (dense grid for precise positioning)"
+                # Example coordinates using physical range
+                ex1_x1, ex1_y1 = x_min + (x_max - x_min) * 0.1, y_min + (y_max - y_min) * 0.2
+                ex1_x2, ex1_y2 = x_min + (x_max - x_min) * 0.4, y_min + (y_max - y_min) * 0.6
+                ex2_x1, ex2_y1 = x_min + (x_max - x_min) * 0.5, y_min + (y_max - y_min) * 0.3
+                ex2_x2, ex2_y2 = x_min + (x_max - x_min) * 0.7, y_min + (y_max - y_min) * 0.5
+            else:
+                # Fractional coordinates mode (TIFF files)
+                coord_desc = "fractional 0.0-1.0 scale"
+                coord_range = "X: 0.0 to 1.0, Y: 0.0 to 1.0"
+                grid_desc = "Grid lines show 0.05 intervals (dense grid for precise positioning)"
+                ex1_x1, ex1_y1, ex1_x2, ex1_y2 = 0.10, 0.20, 0.45, 0.60
+                ex2_x1, ex2_y1, ex2_x2, ex2_y2 = 0.50, 0.30, 0.65, 0.45
+
+            xrf_prompt = (
+                f"You are analyzing an XRF (X-ray fluorescence) display with:\n"
+                f"- LEFT (large): RGB composite image where Red={elem_red}, Green={elem_green}, Blue={elem_blue}\n"
+                f"- RIGHT (3 panels stacked): Individual element intensity maps for {elem_red} (top), {elem_green} (middle), {elem_blue} (bottom)\n"
+                f"- {grid_desc}\n\n"
+                f"Use BOTH the RGB composite AND the individual panels to identify ALL distinct regions:\n"
+                f"1. MULTI-ELEMENT overlaps (2+ elements) — mixed colors: yellow, cyan, magenta, white\n"
+                f"2. SINGLE-ELEMENT regions — pure red, green, or blue (verify with individual panels)\n\n"
+                f"Respond with JSON only:\n"
+                f'{{"features": [{{"id": 1, "label": "multi-element AOI", "x1": {ex1_x1:.2f}, "y1": {ex1_y1:.2f}, '
+                f'"x2": {ex1_x2:.2f}, "y2": {ex1_y2:.2f}, "confidence": 0.91, "description": "co-localized signal from {elem_red}+{elem_green}"}}, '
+                f'{{"id": 2, "label": "single-element AOI", "x1": {ex2_x1:.2f}, "y1": {ex2_y1:.2f}, "x2": {ex2_x2:.2f}, "y2": {ex2_y2:.2f}, '
+                f'"confidence": 0.73, "description": "single-element signal from {elem_blue}"}}], "total_count": 2}}\n\n'
+                f"CRITICAL:\n"
+                f"- Coordinates (x1,y1,x2,y2) are ONLY for the MAIN RGB IMAGE on the left, in {coord_desc}\n"
+                f"- Coordinate range: {coord_range}\n"
+                f"- Use the grid lines to accurately place coordinates\n"
+                f"- Use the individual element panels to verify which elements are present\n"
+                f"- Confidence: 0.0-1.0 based on signal strength and boundary clarity\n"
+                f"- Description format: 'co-localized signal from X+Y' or 'single-element signal from X'"
+            )
+
+            # Store the prompt that's actually being used for display in results
+            self._last_used_prompt = xrf_prompt
+
+            # Update the header to show the actual prompt being used
+            self._header_prompt_lbl.setText(f"Prompt: {xrf_prompt[:120].rstrip()}…")
+            self._header_prompt_lbl.setToolTip(xrf_prompt)
+
+            self._locate_thread = _LocateThread(buf_file.name, dilate_ksize=0,
+                                                system_prompt_override=xrf_prompt,
+                                                normalize=normalize, grid_overlay=grid,
+                                                upscale=upscale, colormap=colormap,
+                                                is_xrf_figure=True)
         else:
             if not self._image_path:
                 return
@@ -1672,6 +2971,10 @@ class _LocateTab(QWidget):
             upscale = self._upscale_check.isChecked()
             colormap = self._colormap_check.isChecked()
             use_tile = self._tile_check.isChecked()
+
+            # Store the prompt that's actually being used for display in results
+            self._last_used_prompt = self._active_prompt
+
             if use_tile:
                 self.status_label.setText("Tile mode — querying 4 quadrants... (~2–4 min)")
                 self._locate_thread = _LocateTileThread(self._image_path, dilate_ksize=ksize,
@@ -1690,29 +2993,266 @@ class _LocateTab(QWidget):
         self._locate_thread.error.connect(self._on_error)
         self._locate_thread.start()
 
+    def _load_json_results(self):
+        """Load previously saved detection results from a JSON file."""
+        # Open file dialog
+        json_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Detection Results JSON", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not json_path:
+            return
+
+        try:
+            # Read JSON file
+            with open(json_path, 'r') as f:
+                content = f.read()
+
+            # Clean up the content - find the first '{' or '[' to handle malformed files
+            content = content.strip()
+
+            # Try to find where JSON actually starts
+            json_start = -1
+            for i, char in enumerate(content):
+                if char in ('{', '['):
+                    json_start = i
+                    break
+
+            if json_start > 0:
+                # Found leading garbage, skip it
+                content = content[json_start:]
+
+            # Parse cleaned JSON
+            data = json.loads(content)
+
+            # Validate JSON structure
+            if "features" not in data:
+                QMessageBox.warning(
+                    self, "Invalid JSON",
+                    "The selected JSON file does not contain a 'features' field.\n"
+                    "Please select a valid detection results file."
+                )
+                return
+
+            # Extract features
+            features = data.get("features", [])
+            n = len(features)
+
+            if n == 0:
+                QMessageBox.information(
+                    self, "No Features",
+                    "The JSON file contains no features."
+                )
+                return
+
+            # Store features and JSON path
+            self._features = features
+            json_file = pathlib.Path(json_path)
+
+            # Determine mode from current UI state
+            is_xrf = self._mode_combo.currentIndex() == 1
+
+            # Draw boxes on the appropriate image type
+            if is_xrf:
+                # For XRF mode: ensure images are loaded and composite is built
+                if not all(self._xrf_paths):
+                    QMessageBox.warning(
+                        self, "No XRF Images Loaded",
+                        "Please load the 3 XRF element images first.\n"
+                        "The JSON file contains coordinates but there's no image to display them on."
+                    )
+                    return
+
+                # Check if composite was built
+                if not hasattr(self, '_xrf_fig') or not hasattr(self, '_xrf_ax_main'):
+                    # Try to rebuild composite
+                    self._build_xrf_composite_display()
+
+                # Verify figure is valid
+                if not hasattr(self, '_xrf_fig') or self._xrf_fig is None:
+                    QMessageBox.warning(
+                        self, "Display Error",
+                        "Failed to build XRF composite display.\n"
+                        "Please try reloading the XRF images."
+                    )
+                    return
+
+                # Draw boxes on matplotlib figure (uses fractional 0-1 coordinates)
+                try:
+                    # Regenerate both versions: with and without boxes
+                    self._orig_pixmap = _draw_boxes_on_matplotlib_figure(
+                        self._xrf_fig, self._xrf_ax_main, features, draw_boxes=False
+                    )
+                    if features:
+                        self._annotated_pixmap = _draw_boxes_on_matplotlib_figure(
+                            self._xrf_fig, self._xrf_ax_main, features, draw_boxes=True
+                        )
+                    else:
+                        self._annotated_pixmap = None
+
+                    # Show the appropriate version based on checkbox state
+                    if self._show_boxes_check.isChecked() and self._annotated_pixmap:
+                        self._show_pixmap(self._annotated_pixmap)
+                    else:
+                        self._show_pixmap(self._orig_pixmap)
+
+                    # Make sure scroll area is visible
+                    self.scroll_area.setVisible(True)
+                    self.info_panel.setVisible(True)
+
+                except Exception as e:
+                    QMessageBox.critical(
+                        self, "Drawing Error",
+                        f"Failed to draw boxes on composite:\n{str(e)}"
+                    )
+                    return
+            else:
+                # For single element mode: draw on QPixmap (converts fractional to pixels)
+                base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+                if base and features:
+                    self._annotated_pixmap = _draw_feature_boxes(base, features)
+                    self._show_pixmap(self._annotated_pixmap)
+                else:
+                    QMessageBox.warning(
+                        self, "No Image Loaded",
+                        "Please load an image first before loading JSON results."
+                    )
+                    return
+
+            # Update info panel
+            self._populate_info(features, json_file)
+
+            # Show element filter panel if in XRF mode
+            if is_xrf:
+                self._filter_group.setVisible(True)
+                # Reset all filters to checked
+                for check in self._elem_filter_checks:
+                    check.setChecked(True)
+                # Default to "contains" mode (exact match OFF)
+                self._exact_match_check.setChecked(False)
+
+            # Update status
+            self.status_label.setText(f"Loaded {n} feature(s) from: {json_file.name}")
+            self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
+
+            QMessageBox.information(
+                self,
+                "JSON Loaded",
+                f"Successfully loaded {n} feature(s) from:\n{json_file.name}"
+            )
+
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(
+                self, "JSON Parse Error",
+                f"Failed to parse JSON file:\n{str(e)}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error Loading JSON",
+                f"Failed to load JSON file:\n{str(e)}"
+            )
+
     def _on_result(self, data):
         features = data.get("features", [])
         n = len(features)
         self._features = features
 
         is_xrf = self._mode_combo.currentIndex() == 1
-        if is_xrf and self._xrf_paths[0]:
-            ref = pathlib.Path(self._xrf_paths[0])
-            json_path = ref.with_name(ref.stem + "_xrf_roi_features.json")
+        if is_xrf:
+            # Determine reference path based on source type
+            if self._xrf_source_type == "TIFF" and self._xrf_paths[0]:
+                ref = pathlib.Path(self._xrf_paths[0])
+            elif self._xrf_source_type == "H5" and self._xrf_h5_path:
+                ref = pathlib.Path(self._xrf_h5_path)
+            else:
+                # Fallback to current directory
+                ref = pathlib.Path.cwd() / "xrf_features"
+
+            # Build filename with all three element names and timestamp
+            elem_names = []
+            for elem in self._xrf_elem_names:
+                # Sanitize element name: strip whitespace and remove special chars
+                clean_name = elem.strip() if elem.strip() else "Element"
+                # Remove/replace characters that are problematic in filenames
+                clean_name = re.sub(r'[^\w\-]', '', clean_name)
+                elem_names.append(clean_name)
+
+            # Create timestamp string (YYYYMMDD_HHMMSS)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Combine: ElementA_ElementB_ElementC_xrf_roi_features_YYYYMMDD_HHMMSS.json
+            filename = f"{'_'.join(elem_names)}_xrf_roi_features_{timestamp}.json"
+            json_path = ref.with_name(filename)
         else:
             stem = pathlib.Path(self._image_path).stem
             json_path = pathlib.Path(self._image_path).with_name(stem + "_features.json")
+
+        # Add metadata to JSON (model used, timestamp, coordinate system)
+        data["metadata"] = {
+            "model": _active_model,
+            "timestamp": datetime.now().isoformat(),
+            "mode": "XRF" if is_xrf else "Single Image",
+        }
+
+        # Add coordinate system info for XRF mode
+        if is_xrf and hasattr(self, '_xrf_use_physical') and self._xrf_use_physical:
+            data["metadata"]["coordinate_system"] = "physical"
+            data["metadata"]["units"] = "micrometers"
+            data["metadata"]["extent"] = {
+                "x_min": self._xrf_extent[0],
+                "x_max": self._xrf_extent[1],
+                "y_min": self._xrf_extent[3],
+                "y_max": self._xrf_extent[2]
+            }
+        elif is_xrf:
+            data["metadata"]["coordinate_system"] = "fractional"
+            data["metadata"]["units"] = "0-1 scale"
+
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
 
-        base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
-        if base and features:
-            self._annotated_pixmap = _draw_feature_boxes(base, features)
-            self._show_pixmap(self._annotated_pixmap)
+        # Draw boxes on the appropriate image type
+        if is_xrf:
+            # For XRF mode: draw on matplotlib figure (uses fractional 0-1 coordinates)
+            if hasattr(self, '_xrf_fig') and hasattr(self, '_xrf_ax_main'):
+                # Regenerate both versions: with and without boxes
+                self._orig_pixmap = _draw_boxes_on_matplotlib_figure(
+                    self._xrf_fig, self._xrf_ax_main, features, draw_boxes=False
+                )
+                if features:
+                    self._annotated_pixmap = _draw_boxes_on_matplotlib_figure(
+                        self._xrf_fig, self._xrf_ax_main, features, draw_boxes=True
+                    )
+                else:
+                    self._annotated_pixmap = None
+
+                # Show the appropriate version based on checkbox state
+                if self._show_boxes_check.isChecked() and self._annotated_pixmap:
+                    self._show_pixmap(self._annotated_pixmap)
+                else:
+                    self._show_pixmap(self._orig_pixmap)
+            else:
+                self._annotated_pixmap = None
         else:
-            self._annotated_pixmap = None
+            # For single element mode: draw on QPixmap (converts fractional to pixels)
+            base = self._dilated_pixmap if self._dilated_pixmap else self._orig_pixmap
+            if base and features:
+                self._annotated_pixmap = _draw_feature_boxes(base, features)
+                self._show_pixmap(self._annotated_pixmap)
+            else:
+                self._annotated_pixmap = None
 
         self._populate_info(features, json_path)
+
+        # Show element filter panel if in XRF mode
+        if is_xrf:
+            self._filter_group.setVisible(True)
+            # Reset all filters to checked
+            for check in self._elem_filter_checks:
+                check.setChecked(True)
+            # Default to "contains" mode (exact match OFF)
+            self._exact_match_check.setChecked(False)
+
         self.locate_btn.setEnabled(True)
         self.status_label.setText(f"Done. Saved: {json_path.name}")
         self.status_label.setStyleSheet("color: #27ae60; padding: 4px;")
@@ -1724,29 +3264,61 @@ class _LocateTab(QWidget):
         )
 
     def _populate_info(self, features, json_path):
-        color_names = ["red", "blue", "green", "yellow", "purple", "cyan", "orange"]
-        prompt_preview = LOCATE_SYSTEM_PROMPT[:200].rstrip() + "…"
-        lines = [
-            f"Model: {_active_model}",
-            f"Prompt: {prompt_preview}",
-            "",
-            f"Found {len(features)} feature(s)  —  {json_path.name}",
-            "",
-        ]
-        for i, feat in enumerate(features):
-            color = color_names[i % len(color_names)]
+        """Populate the features list with clickable, selectable items."""
+        from qtpy.QtWidgets import QListWidgetItem
+
+        # Get filtered features (respects element filter checkboxes)
+        is_xrf = self._mode_combo.currentIndex() == 1
+        if is_xrf and hasattr(self, '_elem_filter_checks'):
+            filtered_features = self._get_filtered_features()
+        else:
+            filtered_features = features
+
+        # Store for later use
+        self._displayed_features = filtered_features
+        self._filtered_features_cache = filtered_features
+
+        # Clear existing list
+        self.features_list.clear()
+
+        # Populate with filtered features
+        for i, feat in enumerate(filtered_features):
             fid = feat.get("id", i + 1)
             label = feat.get("label", "")
             desc = feat.get("description", "")
+            confidence = feat.get("confidence", None)
             x1, y1 = feat.get("x1", 0), feat.get("y1", 0)
             x2, y2 = feat.get("x2", 0), feat.get("y2", 0)
-            lines.append(f"[{color}] #{fid}  {label}")
-            lines.append(f"       bbox: ({x1:.3f}, {y1:.3f}) → ({x2:.3f}, {y2:.3f})")
+
+            # Build display text
+            display_lines = [f"#{fid} {label}"]
+            display_lines.append(f"  ({x1:.3f}, {y1:.3f}) → ({x2:.3f}, {y2:.3f})")
+
+            if confidence is not None:
+                conf_pct = confidence * 100
+                display_lines.append(f"  conf: {conf_pct:.0f}%")
+
             if desc:
-                lines.append(f"       {desc}")
-            lines.append("")
-        self.info_panel.setPlainText("\n".join(lines).strip())
+                # Truncate long descriptions
+                short_desc = desc if len(desc) < 35 else desc[:32] + "..."
+                display_lines.append(f"  {short_desc}")
+
+            display_text = "\n".join(display_lines)
+
+            # Create list item
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.UserRole, i)  # Store feature index
+            item.setToolTip(f"{desc}\nClick to highlight on map")
+            self.features_list.addItem(item)
+
         self.info_panel.setVisible(True)
+
+        # Update status if filtering
+        total = len(features)
+        shown = len(filtered_features)
+        if shown < total:
+            self.status_label.setText(f"Showing {shown} of {total} features (filtered)")
+            self.status_label.setStyleSheet("color: #2980b9; padding: 4px;")
 
     def _get_dilate_ksize(self) -> int:
         return self._kernel_spin.value() if self._dilate_check.isChecked() else 0

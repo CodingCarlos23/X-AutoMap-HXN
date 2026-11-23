@@ -9,7 +9,7 @@ import time
 import cv2
 import pandas as pd
 from .blobs.detection import detect_blobs
-from .blobs.processing import find_union_blobs
+from .blobs.processing import find_union_blobs, find_union_blobs_by_category
 from .plotting import plot_analysis_results
 from .utils import make_json_serializable, wait_for_element_tiffs, formatted_unions_to_table, normalize_and_dilate, merge_overlapping_boxes_dict, resize_if_needed
 from .export import create_rgb_tiff, create_all_elements_tiff, create_merged_boxes_tiff
@@ -150,7 +150,189 @@ def _merge_cross_element_blobs(formatted_unions, overlap_thresh):
     return formatted_unions
 
 
-def analyze_data_local(scan_id=None, 
+def _add_confidence_scores(categorized_unions):
+    """
+    Add confidence scores to categorized unions in-place.
+    Uses percentile-based ranking within each category.
+
+    Args:
+        categorized_unions: dict with keys '3-element', '2-element', '1-element'
+    """
+    # Default weights for each category
+    weights = {
+        '1-element': {'brightness': 0.4, 'size': 0.3, 'compactness': 0.3},
+        '2-element': {'brightness': 0.3, 'size': 0.2, 'overlap': 0.3, 'balance': 0.2},
+        '3-element': {'brightness': 0.3, 'size': 0.2, 'overlap': 0.3, 'balance': 0.2},
+    }
+
+    def percentile_rank(values):
+        """Return percentile rank (0-1) for each value."""
+        if len(values) == 1:
+            return [1.0]
+        sorted_indices = np.argsort(values)
+        ranks = np.empty_like(sorted_indices)
+        ranks[sorted_indices] = np.arange(len(values))
+        return ranks / max(len(values) - 1, 1)
+
+    for category in ['3-element', '2-element', '1-element']:
+        unions_list = list(categorized_unions[category].values())
+        if not unions_list:
+            continue
+
+        cat_weights = weights[category]
+
+        # Extract features
+        all_brightness = []
+        all_sizes = []
+        all_compactness = []
+        all_overlap = []
+        all_balance = []
+
+        for union in unions_list:
+            source_blobs = union.get('source_blobs', [])
+            intensities = [blob.get('mean_intensity', 0) for blob in source_blobs]
+
+            brightness = np.mean(intensities) if intensities else 0
+            all_brightness.append(brightness)
+            all_sizes.append(union.get('area', 0))
+
+            if category == '1-element':
+                area = union.get('area', 1)
+                length = union.get('length', 1)
+                ideal_area = 0.785 * (length ** 2)
+                compactness = min(area / ideal_area, 1.0) if ideal_area > 0 else 0
+                all_compactness.append(compactness)
+
+            elif category == '2-element':
+                if len(source_blobs) >= 2:
+                    centers = [blob['center'] for blob in source_blobs[:2]]
+                    radii = [blob.get('radius', 10) for blob in source_blobs[:2]]
+                    dist = np.sqrt((centers[0][0] - centers[1][0])**2 + (centers[0][1] - centers[1][1])**2)
+                    max_dist = sum(radii)
+                    overlap = max(0, 1.0 - dist / max_dist) if max_dist > 0 else 0
+                else:
+                    overlap = 0.5
+                all_overlap.append(overlap)
+
+                if len(intensities) >= 2:
+                    balance = min(intensities[0], intensities[1]) / max(intensities[0], intensities[1], 1e-6)
+                else:
+                    balance = 0.5
+                all_balance.append(balance)
+
+            elif category == '3-element':
+                if len(source_blobs) >= 3:
+                    centers = [blob['center'] for blob in source_blobs[:3]]
+                    dists = []
+                    for i in range(len(centers)):
+                        for j in range(i+1, len(centers)):
+                            d = np.sqrt((centers[i][0] - centers[j][0])**2 + (centers[i][1] - centers[j][1])**2)
+                            dists.append(d)
+                    avg_dist = np.mean(dists)
+                    union_size = union.get('length', 100)
+                    overlap = max(0, 1.0 - avg_dist / union_size) if union_size > 0 else 0
+                else:
+                    overlap = 0.5
+                all_overlap.append(overlap)
+
+                if len(intensities) >= 3:
+                    min_int = min(intensities[:3])
+                    max_int = max(intensities[:3])
+                    balance = min_int / max(max_int, 1e-6)
+                else:
+                    balance = 0.5
+                all_balance.append(balance)
+
+        # Calculate percentile ranks
+        brightness_scores = percentile_rank(all_brightness)
+        size_scores = percentile_rank(all_sizes)
+
+        # Assign confidence scores
+        for i, union in enumerate(unions_list):
+            scores = {
+                'brightness': brightness_scores[i],
+                'size': size_scores[i],
+            }
+
+            if category == '1-element':
+                compactness_scores = percentile_rank(all_compactness)
+                scores['compactness'] = compactness_scores[i]
+
+            elif category in ['2-element', '3-element']:
+                overlap_scores = percentile_rank(all_overlap)
+                balance_scores = percentile_rank(all_balance)
+                scores['overlap'] = overlap_scores[i]
+                scores['balance'] = balance_scores[i]
+
+            final_score = sum(scores[feat] * cat_weights[feat] for feat in cat_weights)
+            union['confidence'] = final_score * 100.0
+
+
+def _filter_unions_by_selection(categorized_unions, fine_scan_selection, elem_list, color_to_elem):
+    """
+    Filter categorized unions based on fine_scan_selection specification.
+
+    Args:
+        categorized_unions: dict with '3-element', '2-element', '1-element' keys
+        fine_scan_selection: list of {"elements": str, "count": int} dicts
+        elem_list: list of element names for this group (e.g., ["Ca", "Ce", "P"])
+        color_to_elem: dict mapping color to element (e.g., {'red': 'Ca', ...})
+
+    Returns:
+        Filtered categorized_unions dict with top N unions per relationship
+    """
+    elem_to_color = {e: c for c, e in color_to_elem.items()}
+    filtered = {'3-element': {}, '2-element': {}, '1-element': {}}
+
+    # Parse fine_scan_selection for this group
+    for spec in fine_scan_selection:
+        elements_str = spec.get("elements", "")
+        count = spec.get("count", 0)
+
+        if count <= 0:
+            continue
+
+        # Check if this spec applies to current group
+        requested_elements = [e.strip() for e in elements_str.split("-")]
+        if not all(elem in elem_list for elem in requested_elements):
+            continue  # This spec is for a different group
+
+        # Determine category and color filter
+        if len(requested_elements) == 3:
+            category = '3-element'
+            target_colors = sorted([elem_to_color[e] for e in requested_elements])
+        elif len(requested_elements) == 2:
+            category = '2-element'
+            target_colors = sorted([elem_to_color[e] for e in requested_elements])
+        elif len(requested_elements) == 1:
+            category = '1-element'
+            target_colors = [elem_to_color[requested_elements[0]]]
+        else:
+            print(f"[FILTER] Invalid relationship: {elements_str}")
+            continue
+
+        # Get matching unions from the category
+        matching_unions = []
+        for idx, union in categorized_unions[category].items():
+            union_colors = sorted(union.get('colors', []))
+            if union_colors == target_colors:
+                matching_unions.append((idx, union))
+
+        # Sort by confidence (highest first) and take top N
+        matching_unions.sort(key=lambda x: x[1].get('confidence', 0), reverse=True)
+        selected = matching_unions[:count]
+
+        print(f"[FILTER] {elements_str}: selected {len(selected)} of {len(matching_unions)} unions (requested {count})")
+
+        # Add to filtered results
+        for idx, union in selected:
+            if idx not in filtered[category]:
+                filtered[category][idx] = union
+
+    return filtered
+
+
+def analyze_data_local(scan_id=None,
                        return_results=False, 
                        params=None):
     """
@@ -444,30 +626,53 @@ def analyze_data_local(scan_id=None,
             print(f"[SKIP] No valid blobs found for group {group_name}")
             continue
         elif len(group_blobs_for_union) >= 2 and unions_only:
-            # Strict: all elements in the group must have blobs — no 2-element fallback for 3-element groups
-            if len(group_blobs_for_union) < len(elem_list):
-                color_keys = ['red', 'green', 'blue']
-                missing = [elem_list[i] for i, c in enumerate(color_keys[:len(elem_list)]) if c not in group_blobs_for_union]
-                print(f"[SKIP] {group_name}: only {len(group_blobs_for_union)}/{len(elem_list)} elements have blobs — skipping unions (missing: {missing})")
-                continue
-            # Multiple elements with unions_only=True: create union boxes (intersections only)
-            print(f"[UNION MODE] Creating union boxes for {group_name}")
+            # Multiple elements with unions_only=True: create categorized union boxes
+            print(f"[UNION MODE] Creating categorized union boxes for {group_name}")
             overlap_thresh = params.get("segmentation_params", {}).get("overlap_thresh", 0.5)
-            unions = find_union_blobs(group_blobs_for_union, step_size, step_size, x_start, y_start, overlap_thresh=overlap_thresh)
 
-            for idx, union in unions.items():
-                box_name = f"Union Box {group_name} #{idx}"
-                formatted_unions[box_name] = {
-                    "text": box_name,
-                    "cx": union["real_center_um"][0],
-                    "cy": union["real_center_um"][1],
-                    "num_x": union["real_size_um"][0],
-                    "num_y": union["real_size_um"][1],
-                    "image_center": union["center"],
-                    "image_length": union["length"],
-                    "real_center_um": union["real_center_um"],
-                    "real_size_um": union["real_size_um"],
-                }
+            # Use find_union_blobs_by_category to get 3/2/1-element unions
+            categorized_unions = find_union_blobs_by_category(
+                group_blobs_for_union, step_size, step_size, x_start, y_start,
+                overlap_thresh=overlap_thresh
+            )
+
+            # Add confidence scoring to each category
+            _add_confidence_scores(categorized_unions)
+
+            # Apply fine_scan_selection filtering if specified
+            fine_scan_selection = params.get("fine_scan_selection", [])
+            if fine_scan_selection:
+                categorized_unions = _filter_unions_by_selection(
+                    categorized_unions, fine_scan_selection, elem_list, _color_to_elem
+                )
+
+            # Format selected unions
+            union_counter = 1
+            for category in ['3-element', '2-element', '1-element']:
+                for idx, union in categorized_unions[category].items():
+                    # Create element label from colors
+                    elem_symbols = [_color_to_elem.get(c, c) for c in union.get('colors', [])]
+                    elem_label = "-".join(elem_symbols) if len(elem_symbols) > 1 else (elem_symbols[0] if elem_symbols else group_name)
+
+                    box_name = f"Union Box {elem_label} #{union_counter}"
+                    formatted_unions[box_name] = {
+                        "text": box_name,
+                        "cx": union["real_center_um"][0],
+                        "cy": union["real_center_um"][1],
+                        "num_x": union["real_size_um"][0],
+                        "num_y": union["real_size_um"][1],
+                        "image_center": union["center"],
+                        "image_length": union["length"],
+                        "real_center_um": union["real_center_um"],
+                        "real_size_um": union["real_size_um"],
+                        "confidence": union.get("confidence", 0),
+                        "category": category,
+                        "element_label": elem_label,
+                    }
+                    union_counter += 1
+
+            # Store categorized unions for later use
+            unions = {i: u for cat in categorized_unions.values() for i, u in cat.items()}
         else:
             # Single element OR unions_only=False: queue every blob from every element individually
             mode_label = "SINGLE ELEMENT" if len(group_blobs_for_union) == 1 else "INDIVIDUAL MODE (unions_only=False)"

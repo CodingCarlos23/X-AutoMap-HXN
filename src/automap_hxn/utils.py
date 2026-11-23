@@ -380,3 +380,62 @@ def write_array_slowly(container, array, *, key=None, metadata=None, dims=None, 
 
     return client
 
+
+def validate_fine_scan_selection(fine_scan_selection, elem_list_of_lists):
+    """
+    Validate fine_scan_selection against elem_list.
+
+    Args:
+        fine_scan_selection: list of {"elements": str, "count": int} dicts
+        elem_list_of_lists: list of element lists (e.g., [["Ca", "Ce", "P"], ["Al", "Si"]])
+
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None)
+    """
+    if not fine_scan_selection:
+        return True, None
+
+    if not isinstance(fine_scan_selection, list):
+        return False, "fine_scan_selection must be a list"
+
+    # Flatten elem_list to get all valid elements across all groups
+    all_elements = set()
+    element_to_group = {}
+    for group_idx, elem_list in enumerate(elem_list_of_lists):
+        for elem in elem_list:
+            all_elements.add(elem)
+            element_to_group[elem] = group_idx
+
+    for idx, spec in enumerate(fine_scan_selection):
+        if not isinstance(spec, dict):
+            return False, f"Entry #{idx+1}: must be a dict with 'elements' and 'count' keys"
+
+        if "elements" not in spec or "count" not in spec:
+            return False, f"Entry #{idx+1}: missing 'elements' or 'count' field"
+
+        elements_str = spec["elements"]
+        count = spec["count"]
+
+        # Validate count
+        if not isinstance(count, int) or count < 0:
+            return False, f"Entry #{idx+1} ({elements_str}): 'count' must be a non-negative integer"
+
+        # Parse elements
+        requested_elements = [e.strip() for e in elements_str.split("-")]
+
+        # Check all elements exist
+        for elem in requested_elements:
+            if elem not in all_elements:
+                return False, f"Entry #{idx+1} ({elements_str}): element '{elem}' not in elem_list"
+
+        # Check all elements are from the same group
+        groups = set(element_to_group[elem] for elem in requested_elements)
+        if len(groups) > 1:
+            group_labels = [f"Group {g+1}: {elem_list_of_lists[g]}" for g in sorted(groups)]
+            return False, (
+                f"Entry #{idx+1} ({elements_str}): elements span multiple groups:\n"
+                + "\n".join(group_labels)
+            )
+
+    return True, None
+
