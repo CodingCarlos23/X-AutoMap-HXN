@@ -1,0 +1,38 @@
+{
+  "run_name": "car_vs_opencv_llm",
+  "sample_dir": "benchmarks/test_samples/10 Samples",
+  "elements": [],
+  "automap_config": "benchmarks/configs/live_scan_demo_2by2_3groups_intensity_filter.json",
+  "automap_raw": false,
+  "stardist": {
+    "enabled": false,
+    "model_name": "2D_versatile_fluo",
+    "prob_thresh": 0.5,
+    "nms_thresh": 0.4,
+    "min_size": 10
+  },
+  "vlm": {
+    "model": "claude-sonnet-4-6",
+    "variants": [
+      "car_standalone"
+    ],
+    "normalize": true,
+    "upscale": true,
+    "car_cell_px": 5,
+    "car_stretch_pct": 95,
+    "max_workers": 8,
+    "llm_colocate": true,
+    "opencv_llm": true,
+    "sample_context": "urban aerosol PM",
+    "prompt_suffix": {
+      "car_standalone": "In this image the scan has been redrawn as a grid of small car emoji on a white background. Each car is one small patch of the scan: the more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car."
+    }
+  },
+  "match_iou": 0.25,
+  "phase_match_overlap": 0.5,
+  "level3": {
+    "enabled": true,
+    "model": null,
+    "max_tokens": 8192
+  }
+}

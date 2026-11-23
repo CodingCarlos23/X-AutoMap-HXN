@@ -49,8 +49,7 @@ table.heat td.diag { color: var(--text-muted); text-align: center; }
 table.heat th.col { writing-mode: vertical-rl; transform: rotate(180deg); text-align: left; padding: .5rem .3rem; }
 .legend { display: flex; align-items: center; gap: .5rem; font-size: .8rem; color: var(--text-secondary); margin-top: .6rem; }
 .legend .ramp { display: flex; } .legend .ramp span { width: 22px; height: 12px; }
-#tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
-       border-radius: 4px; padding: .4rem .6rem; font-size: .8rem; box-shadow: 0 2px 8px rgba(0,0,0,.18); display: none; z-index: 10; }
+%TIP_CSS%
 /* gallery */
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .9rem; }
 figure { margin: 0; }
@@ -91,8 +90,6 @@ td.score { text-align: center; }
 .mgrid figure img { image-rendering: pixelated; }
 .mgrid figcaption { font-size: .9rem; margin-top: .35rem; }
 @media (max-width: 900px) { .mgrid { grid-template-columns: repeat(2, 1fr); } }
-#tip { max-width: 380px; }
-#tip .sub { display: block; }
 .pane .cap { font-size: .85rem; color: var(--text-secondary); margin-top: .35rem; }
 .pane .cap b { color: var(--text-primary); }
 .pane .cap .err { color: var(--error); }
@@ -101,6 +98,144 @@ td.score { text-align: center; }
 ul.mlist { margin: 0; padding-left: 1rem; font-size: .85rem; }
 pre { white-space: pre-wrap; font-size: .8rem; background: var(--surface-0); padding: .75rem; border-radius: 4px; margin-top: .5rem; }
 """
+
+# ── Box tooltips (shared with car_vs_opencv_report.py) ────────────────────────
+# Always a dark panel with light text (same in light and dark page themes).
+#   .t-head  title + id (one size)      .t-loc / .t-meta  location, center, image (one size smaller, same colour)
+#   .t-warn  LLM disclaimer (bold amber)  .t-row  one fact per line, label in .t-lbl (bold white)
+TIP_CSS = """
+#tip { position: fixed; pointer-events: none; display: none; z-index: 10; max-width: 420px;
+       background: #1c1f24; color: #f2f2f0; border: 1px solid #454a52; border-radius: 6px;
+       padding: .55rem .7rem; font-size: .8rem; line-height: 1.45; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+#tip .t-head { font-size: .9rem; font-weight: 700; color: #ffffff; }
+#tip .t-loc, #tip .t-meta { font-size: .8rem; color: #ffffff; }
+#tip .t-warn { margin: .35rem 0 .3rem; font-size: .78rem; font-weight: 700; color: #ffcc33; }
+#tip .t-row { display: block; margin-top: .2rem; color: #dcdcd8; }
+#tip .t-lbl { font-weight: 700; color: #ffffff; }
+#tip .t-sec { margin-top: .45rem; padding-top: .35rem; border-top: 1px solid #454a52; font-weight: 700; color: #ffffff; }
+#tip .t-dim { color: #b9b9b3; }
+#tip .t-ok { color: #7ddc8a; font-weight: 700; } #tip .t-no { color: #ff9b8f; font-weight: 700; }
+#tip .el { font-weight: 700; }
+"""
+
+TIP_WARN = "⚠ LLM results may be inaccurate — they need manual review and correction."
+TIP_WARN_LIB = "⚠ Library matches are not guaranteed — they need manual review and correction."
+
+# One colour per element, readable on the dark tooltip; unknown elements fall back to ELEMENT_FALLBACK by hash.
+ELEMENT_COLORS = {
+    "Al": "#64b5f6", "Ar": "#b0bec5", "Ba": "#ffcc80", "Ca": "#81c784", "Cl": "#4dd0e1",
+    "Cr": "#9fa8da", "Fe": "#ff7043", "K": "#ce93d8", "Mg": "#c5e1a5", "Mn": "#f48fb1",
+    "Ni": "#80cbc4", "P": "#fff59d", "S": "#ffd740", "Si": "#d7b899", "Ti": "#ef9a9a",
+    "Cu": "#ffab40", "Zn": "#b39ddb", "Pb": "#90a4ae", "Na": "#80deea", "Co": "#f06292",
+}
+ELEMENT_FALLBACK = ["#a5d6a7", "#ffe082", "#90caf9", "#f8bbd0", "#bcaaa4", "#e6ee9c"]
+
+
+# ── Grouped tables (shared with car_vs_opencv_report.py) ─────────────────────────
+# Column groups get a coloured top bar + light tint, a divider line between groups, and a ruled totals row.
+GRP_CSS = """
+table.grp { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.grp th, table.grp td { padding: .4rem .45rem; text-align: center; border-bottom: 1px solid rgba(128,128,128,.25); }
+table.grp th:first-child, table.grp td:first-child { text-align: left; white-space: nowrap; }
+table.grp tr.gh th { text-align: center; font-weight: 700; border-top: 4px solid var(--g); white-space: nowrap;
+                     background: color-mix(in srgb, var(--g) 16%, transparent); }
+table.grp tr.ch th { font-weight: 600; font-size: .76rem; vertical-align: middle; white-space: nowrap;
+                     background: color-mix(in srgb, var(--g) 8%, transparent); }
+table.grp td.gc { background: color-mix(in srgb, var(--g) 5%, transparent); }
+table.grp .gs { border-left: 2px solid color-mix(in srgb, var(--g) 70%, transparent); }
+table.grp tr.tot td { border-top: 2px solid rgba(128,128,128,.7); font-weight: 700; }
+table.grp tbody tr:hover td { background: color-mix(in srgb, #2a78d6 10%, transparent); }
+.g-reg { --g: #8a8984; } .g-loc { --g: #2a78d6; } .g-only { --g: #6250d6; } .g-match { --g: #1baf7a; }
+.g-info { --g: #8a8984; } .g-who { --g: #eda100; }
+details.l2s { border: 1px solid rgba(128,128,128,.35); border-radius: 6px; padding: .5rem .8rem; margin: .5rem 0; }
+details.l2s > summary { font-size: 1rem; font-weight: 700; color: inherit; }
+details.l2s > summary .sub { font-weight: 400; font-size: .82rem; }
+details.l2s[open] > summary { margin-bottom: .5rem; }
+.msw { display: inline-block; width: .6rem; height: .6rem; border-radius: 2px; margin-right: .25rem; vertical-align: 0; }
+"""
+# One colour per material method (same as the Car vs OpenCV report)
+METHOD_COLORS = {"L": "#2a78d6", "O": "#1baf7a", "C": "#eb6834"}
+
+
+METHOD_SHORT = {"L": "Library", "O": "OpenCV LLM", "C": "Car"}
+METHOD_FULL = {"L": "OpenCV + Library", "O": "OpenCV + LLM", "C": "Car VLM + LLM"}
+
+
+def method_key() -> str:
+    """Key for the short column names used in the grouped tables."""
+    return ('<p class="note" style="margin:.4rem 0">Column key: ' + " · ".join(
+        f'{method_swatch(c)}<b>{METHOD_SHORT[c]}</b> = {METHOD_FULL[c]}' for c in "LOC") + "</p>")
+
+
+def method_swatch(code: str) -> str:
+    return f'<span class="msw" style="background:{METHOD_COLORS[code]}"></span>'
+
+
+def grouped_table(first: str, groups: list, rows: list, total=None) -> str:
+    """groups = [(title, css_key, [column header html, ...])]; rows / total = (first cell html, [[group values]...]).
+    Renders a two-row header (group titles over column names) with per-group colour, tint and dividers."""
+    gh = f'<tr class="gh"><th rowspan="2" style="border-top:0">{first}</th>' + "".join(
+        f'<th class="g-{k} gs" colspan="{len(cols)}">{t}</th>' for t, k, cols in groups) + "</tr>"
+    ch = '<tr class="ch">' + "".join(
+        f'<th class="g-{k}{" gs" if i == 0 else ""}">{c}</th>' for _, k, cols in groups for i, c in enumerate(cols)) + "</tr>"
+
+    def _tr(r, cls=""):
+        first_cell, vals = r
+        return f'<tr{f" class={cls}" if cls else ""}><td>{first_cell}</td>' + "".join(
+            f'<td class="g-{k} gc{" gs" if i == 0 else ""}">{v}</td>'
+            for (_, k, _), gv in zip(groups, vals) for i, v in enumerate(gv)) + "</tr>"
+    return (f'<table class="grp"><thead>{gh}{ch}</thead><tbody>' + "".join(_tr(r) for r in rows)
+            + (_tr(total, "tot") if total else "") + "</tbody></table>")
+
+
+def l3_heatmap(per_sample: dict, uid: str) -> str:
+    """Location heatmap: rows = samples, colour = number of spots.
+    per_sample = {sample label: level3 dict}. "All 3" = spots all three found; each pair column = spots BOTH of
+    those methods found, whether or not the third also did (so it includes the All-3 spots)."""
+    cols = ["all3", "L|O", "L|C", "O|C"]
+
+    def head(k):
+        return "All 3" if k == "all3" else " &amp; ".join(method_swatch(c) + METHOD_SHORT[c] for c in k.split("|"))
+
+    def plain(k):
+        return "all 3 methods" if k == "all3" else " and ".join(METHOD_SHORT[c] for c in k.split("|"))
+    vals = {}
+    for lab, l3 in per_sample.items():
+        sets = l3["sets"]
+        vals[lab] = {k: (sum(st["kind"] == "all3" for st in sets) if k == "all3" else
+                         sum(all(c in st["members"] for c in k.split("|")) for st in sets)) for k in cols}
+    top = max([v for row in vals.values() for v in row.values()] + [1])
+    rows = []
+    for lab, row in vals.items():
+        cells = []
+        for k in cols:
+            v = row[k]
+            i = min(len(_RAMP) - 1, int(v / top * (len(_RAMP) - 1) + .5)) if v else None
+            bg, ink = (_RAMP[i], "#ffffff" if i >= 7 else "#1b1b1b") if i is not None else ("transparent", "inherit")
+            cells.append(f'<td title="{html.escape(lab)}: {v} spot(s) found by {plain(k)}" '
+                         f'style="background:{bg};color:{ink};text-align:center;min-width:8.5rem;padding:.45rem .6rem;'
+                         f'font-weight:600">{v}</td>')
+        rows.append(f'<tr><th style="text-align:left;white-space:nowrap;padding-right:.8rem;font-weight:500">'
+                    f'{lab}</th>{"".join(cells)}</tr>')
+    tot = {k: sum(r[k] for r in vals.values()) for k in cols}
+    rows.append('<tr><th style="text-align:left;padding-right:.8rem;border-top:2px solid rgba(128,128,128,.7)">'
+                'All samples</th>' + "".join(
+                    f'<td style="text-align:center;font-weight:700;border-top:2px solid rgba(128,128,128,.7);'
+                    f'padding:.45rem .6rem">{tot[k]}</td>' for k in cols) + "</tr>")
+    hdr = ('<tr><th></th>' + "".join(f'<th style="white-space:nowrap;padding:.3rem .6rem">{head(k)}</th>' for k in cols)
+           + "</tr>")
+    legend = "".join(f'<span style="display:inline-block;width:20px;height:11px;background:{c}"></span>' for c in _RAMP)
+    return (f'<div id="hm-{uid}" style="margin:.6rem 0 1rem;overflow-x:auto">'
+            f'<table style="border-collapse:separate;border-spacing:3px">{hdr}{"".join(rows)}</table>'
+            f'<div style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;margin-top:.35rem;opacity:.85">'
+            f'0 <span style="display:inline-flex">{legend}</span> {top} spots</div></div>')
+
+
+def element_color(el: str) -> str:
+    return ELEMENT_COLORS.get(el) or ELEMENT_FALLBACK[sum(map(ord, el)) % len(ELEMENT_FALLBACK)]
+
+
+_CSS = _CSS.replace("%TIP_CSS%", TIP_CSS + GRP_CSS)
 
 # Sequential blue ramp (100 → 700), light → dark
 _RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
@@ -113,6 +248,26 @@ const tip = document.getElementById('tip');
 function label(m) { return m.replace('opencv:', 'OpenCV ').replace('vlm:', 'VLM ').replace('stardist', 'StarDist').replace(/:/g, ' · ').replace(/_/g, ' '); }
 function rampColor(v) { return RAMP[Math.min(RAMP.length - 1, Math.floor(v * RAMP.length))]; }
 function inkFor(v) { return Math.floor(v * RAMP.length) >= 7 ? '#ffffff' : '#1b1b1b'; }
+
+/* ---------- tooltip building blocks (styles: TIP_CSS in report.py) ---------- */
+const ELC = %ELC%, ELF = %ELF%, TIP_WARN = %TIP_WARN%, TIP_WARN_LIB = %TIP_WARN_LIB%;
+const elColor = el => ELC[el] || ELF[[...el].reduce((s, c) => s + c.charCodeAt(0), 0) % ELF.length];
+const elSpan = el => `<span class="el" style="color:${elColor(el)}">${el}</span>`;
+const elList = els => (els || []).map(elSpan).join(', ');
+const isLLM = m => m.startsWith('vlm:') || m.endsWith(':llm');
+const tHead = h => `<div class="t-head">${h}</div>`;
+const tRow = (lbl, h) => `<div class="t-row"><span class="t-lbl">${lbl}</span> ${h}</div>`;
+const tWarn = () => `<div class="t-warn">${TIP_WARN}</div>`;
+const tWarnLib = () => `<div class="t-warn">${TIP_WARN_LIB}</div>`;
+function tLoc(b, shape) {
+  const p = px(b, shape), f = v => v.toFixed(0);
+  return `<div class="t-loc">x ${f(p.x1)}–${f(p.x2)}, y ${f(p.y1)}–${f(p.y2)} px</div>` +
+    `<div class="t-meta">center (${f((p.x1 + p.x2) / 2)}, ${f((p.y1 + p.y2) / 2)}) · ${f(p.x2 - p.x1)}×${f(p.y2 - p.y1)} px` +
+    ` · image ${shape[1]}×${shape[0]}</div>`;
+}
+const tLocText = (b, shape) => { const p = px(b, shape), f = v => v.toFixed(0);
+  return `x ${f(p.x1)}–${f(p.x2)}, y ${f(p.y1)}–${f(p.y2)} px`; };
+const tMatch = (s, thr) => s >= thr ? '<span class="t-ok">matched</span>' : '<span class="t-no">not matched</span>';
 
 function agreementFor(key) {
   if (key === '__all__') return DATA.overall_agreement;
@@ -138,7 +293,8 @@ function renderHeat(key) {
 document.getElementById('heat').addEventListener('mousemove', ev => {
   const c = ev.target.closest('td.cell');
   if (!c) { tip.style.display = 'none'; return; }
-  tip.innerHTML = `<b>${c.dataset.a}</b> vs <b>${c.dataset.b}</b><br>F1 ${c.dataset.f1} · ${c.dataset.m} matched boxes<br>mean IoU of matches ${c.dataset.iou}`;
+  tip.innerHTML = tHead(`${c.dataset.a} vs ${c.dataset.b}`) + tRow('F1:', c.dataset.f1) +
+    tRow('Matched boxes:', c.dataset.m) + tRow('Mean IoU of matches:', c.dataset.iou);
   tip.style.display = 'block';
   tip.style.left = (ev.clientX + 14) + 'px'; tip.style.top = (ev.clientY + 14) + 'px';
 });
@@ -227,9 +383,10 @@ function makeGrid(g) {
         const el = g.el.querySelector(`svg[data-m="${CSS.escape(o)}"] rect[data-k="${best.k}"]`);
         if (el) el.classList.add(best.s >= g.thresh ? 'hl' : 'hl-weak');
       }
-      return `<span class="sub">${!best ? '—' : best.s >= g.thresh ? '✓' : '~'} ${label(o)}: ${best ? g.line(m, i, o, best) : 'nothing here'}</span>`;
+      return tRow(`${!best ? '—' : best.s >= g.thresh ? '✓' : '~'} ${label(o)}:`,
+                  best ? g.line(m, i, o, best) : '<span class="t-dim">nothing here</span>');
     });
-    showTip(ev, g.head(m, i) + `<br><b>Same spot in other methods</b> (✓ matched · ~ overlaps · — none)` + lines.join(''));
+    showTip(ev, g.head(m, i) + `<div class="t-sec">Same spot in other methods <span class="t-dim">(✓ matched · ~ overlaps · — none)</span></div>` + lines.join(''));
   });
   g.el.addEventListener('mouseleave', () => { tip.style.display = 'none'; clearHL(); });
   if (g.click) g.el.addEventListener('click', ev => { const f = ev.target.closest('figure'); if (f) g.click(f.dataset.m); });
@@ -294,6 +451,12 @@ function paneHTML(m, item) {
                + ` · ${what}${st.boxes ? ', with boxes' : ', no boxes'}`];
 }
 const vItem = () => V.items[st.idx];
+/* detection box tooltip head: title + id, location, LLM disclaimer for VLM boxes, element */
+function detHead(m, i) {
+  const item = vItem(), [s, el] = item.key.split('/');
+  return tHead(`${label(m)} · box #${i + 1} of ${vBoxes(m).length}`) + tLoc(vBoxes(m)[i], V.shape[item.key]) +
+    (isLLM(m) ? tWarn() : '') + tRow('Element:', `${elSpan(el)} <span class="t-dim">· ${s}</span>`);
+}
 const vBoxes = m => (V.boxes[vItem().key] || {})[m] || [];
 const vGrid = makeGrid({
   el: $('v-grid'), order: [...M], color: DET_COLOR, score: iou, thresh: DATA.match_iou,
@@ -303,7 +466,7 @@ const vGrid = makeGrid({
     return { src, caption: err ? '<span class="err">error</span>' : `<span>${vBoxes(m).length} boxes</span>` };
   },
   boxes: vBoxes,
-  head: (m, i) => `<b>${label(m)}</b> · box #${i + 1} of ${vBoxes(m).length} · ${vItem().label}<br>${locHTML(vBoxes(m)[i], V.shape[vItem().key])}`,
+  head: (m, i) => detHead(m, i),
   line: (m, i, o, best) => `box #${best.k + 1}, IoU ${best.s.toFixed(2)}`,
   click: m => { st.a = m; $('v-sel-a').value = m; renderViewer(); },
 });
@@ -341,11 +504,11 @@ hookOverlay('v', (k, o, i) => {
   const other = `<b>${label(st[o])}</b>`;
   return {
     match: m && m.k,
-    html: `<b>${label(st[k])}</b> · box #${i + 1} of ${vBoxes(st[k]).length} · ${item.label}<br>${locHTML(b, shape)}` +
-      (m ? `<span class="sub">Best overlap in ${other}: box #${m.k + 1}, IoU ${m.s.toFixed(2)}` +
-           `${m.s >= DATA.match_iou ? ' (counts as matched)' : ` (below ${DATA.match_iou}, not matched)`}</span>` +
-           `<span class="sub">${other} box: ${locHTML(vBoxes(st[o])[m.k], shape).replace(/<[^>]+>/g, ' ')}</span>`
-         : `<span class="sub">No overlapping box in ${other}</span>`)
+    html: detHead(st[k], i) +
+      (m ? tRow(`Best overlap in ${label(st[o])}:`, `box #${m.k + 1}, IoU ${m.s.toFixed(2)} — ${tMatch(m.s, DATA.match_iou)}` +
+                (m.s >= DATA.match_iou ? '' : ` <span class="t-dim">(needs ≥ ${DATA.match_iou})</span>`)) +
+           tRow(`${label(st[o])} box:`, tLocText(vBoxes(st[o])[m.k], shape))
+         : tRow(`Best overlap in ${label(st[o])}:`, '<span class="t-dim">no overlapping box</span>'))
   };
 });
 
@@ -373,6 +536,27 @@ function matText(m, r) {
 function ratiosText(r) {
   return Object.entries(r).sort((p, q) => q[1] - p[1]).map(([el, v]) => `${el} ${v}%`).join(', ');
 }
+/* material region tooltip: title + id, location, LLM disclaimer, then one labelled fact per line */
+/* material name line: LLM Best Guess (LLM methods) or the library result */
+function matName(m, r) {
+  return isLLM(m) ? tRow('LLM Best Guess:', `${r.material} <span class="t-dim">(self-rated ${r.confidence})</span>`)
+       : r.material === 'no library match' ? tRow('Library:', '<span class="t-dim">no library match</span>')
+       : tRow('Library match:', `${r.material} <span class="t-dim">(${r.confidence})</span>`);
+}
+function matTip(m, r, shape) {
+  const ratios = Object.entries(r.ratios || {}).sort((p, q) => q[1] - p[1]).map(([el, v]) => `${elSpan(el)} ${v}%`).join(', ');
+  return tHead(`${label(m)} · region ${r.id}`) + tLoc(r.box, shape) + (isLLM(m) ? tWarn() : tWarnLib()) +
+    tRow('Elements:', elList(r.elements)) + matName(m, r) +
+    (ratios ? tRow('Ratios:', ratios) : '') +
+    (r.reasoning ? tRow('Reasoning:', r.reasoning) : '') +
+    (r.alts ? tRow('Alternatives:', r.alts) : '');
+}
+/* best-overlap block: same structure as the region's own title — title + id, elements, best guess, overlap */
+function overlapTip(o, mr, s) {
+  return `<div class="t-sec t-dim">Best overlap</div>` + tHead(`${label(o)} · region ${mr.id}`) +
+    tRow('Elements:', elList(mr.elements)) + matName(o, mr) +
+    tRow('Overlap:', `${s.toFixed(2)} — ${tMatch(s, DATA.phase_match_overlap)}`);
+}
 const mGrid = MS.length && makeGrid({
   el: $('m-grid'), order: [...MP], color: MAT_COLOR, score: ovl, thresh: DATA.phase_match_overlap,
   rerender: () => renderMat(),
@@ -382,15 +566,9 @@ const mGrid = MS.length && makeGrid({
              caption: err ? '<span class="err">error</span>' : `<span>${mRegs(m).length} regions</span>` };
   },
   boxes: m => mRegs(m).map(r => r.box),
-  head: (m, i) => {
-    const r = mRegs(m)[i];
-    return `<b>${label(m)}</b> · region ${r.id}<br>${locHTML(r.box, MAT[mt.s].shape)}` +
-      `<span class="sub"><b>${r.elements.join(', ')}</b> → ${matText(m, r)}</span>` +
-      (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
-      (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
-      (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '');
-  },
-  line: (m, i, o, best) => { const mr = mRegs(o)[best.k]; return `${mr.elements.join(', ')} → ${mr.material} (overlap ${best.s.toFixed(2)})`; },
+  head: (m, i) => matTip(m, mRegs(m)[i], MAT[mt.s].shape),
+  line: (m, i, o, best) => { const mr = mRegs(o)[best.k];
+    return `region ${mr.id}: ${elList(mr.elements)} → ${mr.material} <span class="t-dim">(overlap ${best.s.toFixed(2)})</span>`; },
 });
 function renderMat() {
   if (!MS.length) return;
@@ -417,14 +595,9 @@ if (MS.length) {
     const other = `<b>${label(mt[o])}</b>`, mr = m && mRegs(mt[o])[m.k];
     return {
       match: m && m.k,
-      html: `<b>${label(mt[k])}</b> · region ${r.id}<br>${locHTML(r.box, d.shape)}` +
-        `<span class="sub"><b>${r.elements.join(', ')}</b> → ${matText(mt[k], r)}</span>` +
-        (Object.keys(r.ratios).length ? `<span class="sub">Ratios: ${ratiosText(r.ratios)}</span>` : '') +
-        (r.reasoning ? `<span class="sub">LLM: ${r.reasoning}</span>` : '') +
-        (r.alts ? `<span class="sub">Alternatives: ${r.alts}</span>` : '') +
-        (m ? `<span class="sub">Best overlap in ${other}: region ${mr.id} (${mr.elements.join(', ')} → ${mr.material}), ` +
-             `overlap ${m.s.toFixed(2)}${m.s >= DATA.phase_match_overlap ? ' (counts as matched)' : ' (not matched)'}</span>`
-           : `<span class="sub">No overlapping region in ${other}</span>`)
+      html: matTip(mt[k], r, d.shape) +
+        (m ? overlapTip(mt[o], mr, m.s)
+           : `<div class="t-sec t-dim">Best overlap</div><div class="t-row t-dim">No overlapping region in ${label(mt[o])}</div>`)
     };
   });
 }
@@ -500,7 +673,7 @@ def _phase_section(results: dict) -> str:
     for s, sd in results["samples"].items():
         ph = sd["phase"]
         shape = _sample_shape(sd)
-        out.append(f"<h3>{e(s)}</h3>")
+        start = len(out)  # everything for this sample goes into one collapsible block
         out.append(_library_vs_llm(results, ph))
         # summary grid: AutoMap method (and OpenCV + LLM) × VLM variant
         if am and vv and ph["comparisons"]:
@@ -564,6 +737,9 @@ def _phase_section(results: dict) -> str:
                    "<p class='note'>No regions matched.</p>"
             out.append(f"<details><summary>{e(_label(a))} vs {e(_label(v))} — {c['matched']} matched regions, "
                        f"side by side</summary>{body}</details>")
+        counts = " · ".join(f"{_label(m)}: {len(ph['regions'].get(m, []))}" for m in _phase_methods(results))
+        out[start:] = [f'<details class="l2s"><summary>{e(s)} <span class="sub">— material regions: {e(counts)}</span>'
+                       f'</summary>' + "".join(out[start:]) + "</details>"]
     return "".join(out)
 
 
@@ -679,7 +855,7 @@ def write_report(results: dict, out: pathlib.Path):
 <div class="meta">Run {e(results['run'])} · {e(results['created'])} · VLM/LLM model: {e(model)} ·
 AutoMap config: {e(pathlib.Path(results.get('automap_config', '')).name)}</div></header>
 <nav><a href="#counts">Detections</a><a href="#agreement">Box agreement</a><a href="#images">Detection viewer</a>
-<a href="#phase">Phase / material</a><a href="#reconcile">Material agreement (LLM)</a><a href="#calls">API calls &amp; cost</a><a href="#prompts">Prompts</a><a href="#timing">Timing</a></nav>
+<a href="#phase">Phase / material</a><a href="#reconcile">Level 3 agreement</a><a href="#calls">API calls &amp; cost</a><a href="#prompts">Prompts</a><a href="#timing">Timing</a></nav>
 <main>
 <section id="counts"><h2>Level 1 · Detections per element</h2>
 <p class="note">AutoMap counts come from <code>MASTER_raw_detections.json</code>; VLM counts from each variant's
@@ -759,13 +935,7 @@ There is no model-input view here: these are all-element composites, not a per-m
 <h3>AutoMap vs VLM summary</h3>
 {_phase_section(results)}</section>
 
-<section id="reconcile"><h2>Level 3 · Material agreement (LLM review)</h2>
-<p class="note">One LLM pass reads every method's material regions (location, elements, name) and groups the ones that
-describe the same particle or phase — even when methods use different names or did not name it at all. Which methods
-found or missed each group is then counted from those groups. Use it to see where deterministic and VLM methods agree,
-disagree, or find things the other missed. The group names are also LLM best guesses — agreement between methods
-means they found the same spot and elements, not that the material is confirmed.</p>
-{_reconcile_section(results)}</section>
+<section id="reconcile">{_level3_section(results) if _has_level3(results) else _old_level3(results)}</section>
 
 
 
@@ -782,7 +952,9 @@ see the Phase section for its total time.</p>
 </main>
 <div id="tip" role="tooltip"></div>
 <script type="application/json" id="data">{data_json.replace('</', '<\\/')}</script>
-<script>{_JS.replace('%RAMP%', json.dumps(_RAMP))}</script>
+<script>{_JS.replace('%RAMP%', json.dumps(_RAMP)).replace('%ELC%', json.dumps(ELEMENT_COLORS))
+          .replace('%ELF%', json.dumps(ELEMENT_FALLBACK)).replace('%TIP_WARN%', json.dumps(TIP_WARN))
+          .replace('%TIP_WARN_LIB%', json.dumps(TIP_WARN_LIB))}</script>
 </body></html>"""
     out.write_text(page, encoding="utf-8")
 
@@ -846,6 +1018,16 @@ def _calls_section(results: dict) -> str:
             '<details><summary>Every call</summary><div class="scroll"><table class="phase" style="margin-top:.5rem">'
             '<tr><th>Kind</th><th>Method</th><th>Element</th><th>Stop reason</th><th>Parse</th><th>In</th>'
             '<th>Out</th><th>Cost</th><th>s</th><th>Raw reply</th></tr>' + detail + "</table></div></details>")
+
+
+def _old_level3(results: dict) -> str:
+    """Level 3 as built before the location + material-match rewrite (older runs only)."""
+    return ("""<h2>Level 3 · Material agreement (LLM review)</h2>
+<p class="note">One LLM pass reads every method's material regions (location, elements, name) and groups the ones that
+describe the same particle or phase — even when methods use different names or did not name it at all. Which methods
+found or missed each group is then counted from those groups. Use it to see where deterministic and VLM methods agree,
+disagree, or find things the other missed. The group names are also LLM best guesses — agreement between methods
+means they found the same spot and elements, not that the material is confirmed.</p>""" + _reconcile_section(results))
 
 
 # ── Level 3: LLM material reconciliation ─────────────────────────────────────
@@ -927,6 +1109,153 @@ def _reconcile_section(results: dict) -> str:
     return "".join(out)
 
 
+# ── Level 3 (new): location agreement + material agreement between L / O / C ─────
+
+L3_CODES = ("L", "O", "C")
+L3_NAMES = {"L": "OpenCV + Library", "O": "OpenCV + LLM", "C": "Car VLM + LLM"}
+L3_KINDS = (("all3", "All 3"), ("L|O", "Library + OpenCV LLM"), ("L|C", "Library + Car"), ("O|C", "OpenCV LLM + Car"))
+L3_MATCH = (("name_and_reasoning", "Name + reasoning"), ("name_only", "Name only"),
+            ("reasoning_only", "Reasoning only"), ("none", "No material match"))
+
+
+def _has_level3(results: dict) -> bool:
+    return any("level3" in sd for sd in results.get("samples", {}).values())
+
+
+def _l3_who(codes) -> str:
+    return "All 3" if len(codes) == 3 else " + ".join(L3_NAMES[c] for c in codes) if codes else "—"
+
+
+def _level3_section(results: dict) -> str:
+    e = html.escape
+    S = results["samples"]
+    thr = results.get("phase_match_overlap", 0.5)
+    ids = results.get("level3_methods") or {}
+    # ── 3A table ──
+    tot = {"reg": {c: 0 for c in L3_CODES}, "kinds": {k: 0 for k, _ in L3_KINDS}, "only": {c: 0 for c in L3_CODES}}
+    rows_a = []
+    for s, sd in S.items():
+        l3 = sd.get("level3")
+        if not l3:
+            continue
+        c = l3["counts"]
+        k = {"all3": c["all3"], **c["pairs"]}
+        for x in L3_CODES:
+            tot["reg"][x] += c["regions"][x]; tot["only"][x] += c["only"][x]
+        for kk, _ in L3_KINDS:
+            tot["kinds"][kk] += k[kk]
+        rows_a.append((e(s), [[c["regions"][x] for x in L3_CODES], [k[kk] for kk, _ in L3_KINDS],
+                              [c["only"][x] for x in L3_CODES]]))
+    mname = lambda x: f"{method_swatch(x)}{METHOD_SHORT[x]}"
+    short = METHOD_SHORT
+    kname = lambda kk: "All 3" if kk == "all3" else " + ".join(method_swatch(x) + short[x] for x in kk.split("|")) + " only"
+    groups_a = [("Material regions (Level 2)", "reg", [mname(x) for x in L3_CODES]),
+                ("Same location found by (each spot counted once)", "loc", [kname(kk) for kk, _ in L3_KINDS]),
+                ("Found by this method only", "only", [mname(x) for x in L3_CODES])]
+    table_a = grouped_table("Sample", groups_a, rows_a,
+                            ("All samples", [[tot["reg"][x] for x in L3_CODES], [tot["kinds"][kk] for kk, _ in L3_KINDS],
+                                             [tot["only"][x] for x in L3_CODES]]))
+
+    # ── 3B tables ──
+    mt_tot = {m: 0 for m, _ in L3_MATCH}
+    who_tot = {m: {k: 0 for k, _ in L3_KINDS} for m, _ in L3_MATCH}
+    rows_b, details = [], []
+    for s, sd in S.items():
+        l3 = sd.get("level3")
+        if not l3:
+            continue
+        mc = l3.get("material_counts") or {}
+        per = {m: sum((mc.get(m) or {}).values()) for m, _ in L3_MATCH}
+        for m, _ in L3_MATCH:
+            mt_tot[m] += per[m]
+            for k, _ in L3_KINDS:
+                who_tot[m][k] += (mc.get(m) or {}).get(k, 0)
+        err = (l3.get("judge") or {}).get("error")
+        rows_b.append((e(s), [[f"{l3.get('n_judged', 0)} / {len(l3['sets'])}",
+                               f"<span class='err'>{e(err)}</span>" if err else "—"],
+                              [per[m] for m, _ in L3_MATCH]]))
+        # per-sample set table
+        shape = _sample_shape(sd)
+        srows = []
+        for st in l3["sets"]:
+            mem = st["members"]
+            b0 = next(iter(mem.values()))[0]["box"]
+            cells = []
+            for x in L3_CODES:
+                mbs = mem.get(x) or []
+                if not mbs:
+                    cells.append('<td class="sub">—</td>')
+                    continue
+                parts = []
+                for mb in mbs:
+                    nm = mb["material"]
+                    nm_h = "<i>unnamed</i>" if (x == "L" and (not nm or nm.lower().startswith("no library match"))) else e(nm)
+                    parts.append(f'{nm_h}<div class="sub">{e(str(mb.get("id")))} · {e(", ".join(mb["elements"]))}</div>')
+                cells.append("<td>" + '<hr style="border:0;border-top:1px dashed rgba(128,128,128,.4);margin:.3rem 0">'.join(parts) + "</td>")
+            ov = ", ".join(f"{e(p.replace('|', '–'))} {v:.2f}" for p, v in st["overlaps"].items())
+            match = st.get("match")
+            srows.append(f'<tr data-a="{e(match or "unjudged")}"><td class="num">{e(st["id"])}</td>'
+                         f'<td>{e(dict(L3_KINDS)[st["kind"]])}{" <span class=sub>(chained)</span>" if st.get("chained") else ""}'
+                         f'<div class="sub">overlap {ov}</div></td>'
+                         f'<td>{_loc(b0, shape)}</td>{"".join(cells)}'
+                         f'<td><b>{e(dict(L3_MATCH).get(match, "not judged"))}</b>'
+                         f'<div class="sub">{e(_l3_who(st.get("agree") or []))}</div></td>'
+                         f'<td class="sub">{e(st.get("note") or "")}</td></tr>')
+        opts = '<option value="">All sets</option>' + "".join(f'<option value="{m}">{e(n)}</option>' for m, n in L3_MATCH)
+        details.append(
+            f'<details><summary>{e(s)} — {len(l3["sets"])} sets · {l3["counts"]["all3"]} found by all 3</summary>'
+            f'<div class="controls" style="margin-top:.5rem"><label>Show</label>'
+            f'<select class="grp-filter" data-target="l3-{e(s)}">{opts}</select></div>'
+            f'<div class="scroll"><table class="phase" id="l3-{e(s)}"><tr><th>Set</th><th>Found by</th><th>Location</th>'
+            + "".join(f"<th>{e(L3_NAMES[x])}</th>" for x in L3_CODES)
+            + '<th>Material match</th><th>Note</th></tr>' + "".join(srows) + "</table></div>"
+            f'<p class="note">Files: <code>{e(s)}/level3.json</code>, <code>level3_prompt.txt</code>, '
+            f'<code>level3_reply.txt</code>.</p></details>')
+    n_sets = sum(len(sd["level3"]["sets"]) for sd in S.values() if sd.get("level3"))
+    n_judged = sum(sd["level3"].get("n_judged", 0) for sd in S.values() if sd.get("level3"))
+    table_b = grouped_table("Sample", [("Judge", "info", ["Sets judged", "Error"]),
+                                       ("Material match", "match", [e(n) for _, n in L3_MATCH])],
+                            rows_b, ("All samples", [[f"{n_judged} / {n_sets}", ""], [mt_tot[m] for m, _ in L3_MATCH]]))
+    table_who = grouped_table("Material match", [("Methods that agreed", "who", [kname(kk) for kk, _ in L3_KINDS]),
+                                                 ("", "info", ["Total"])],
+                              [(e(n), [[who_tot[m][k] for k, _ in L3_KINDS], [f"<b>{mt_tot[m]}</b>"]]) for m, n in L3_MATCH])
+    model = next((sd["level3"].get("judge", {}).get("model") for sd in S.values() if sd.get("level3")), "")
+    methods_note = " · ".join(f"<b>{e(L3_NAMES[c])}</b> = <code>{e(ids.get(c, '?'))}</code>" for c in L3_CODES)
+
+    return f"""<h2>Level 3 · Agreement between the three material methods</h2>
+<p class="note">Built only from the Level 2 material regions of {methods_note}.</p>
+
+<h3>3A · Location agreement — same spot found by which methods</h3>
+<p class="note">Code, no LLM. Two regions match when their boxes overlap by at least {thr:.0%} of the smaller box
+(the Level 2 rule), one-to-one, best overlap first. Matches are chained: regions connected through matches form one
+<b>set</b> (one spot), so a Library box overlapping both an OpenCV LLM box and a Car box makes an <b>All 3</b> set even if
+those two do not overlap each other (marked <i>chained</i> in the set list). A set can hold two regions of one method
+(e.g. the library split a particle in two). <b>Same location found by</b> counts sets (spots);
+<b>Found by this method only</b> counts single regions nobody else found. A location match says nothing about the
+material yet — see 3B.</p>
+{method_key()}<div class="scroll">{table_a}</div>
+<h3>Location agreement heatmap</h3>
+<p class="note">Each cell = number of spots in that sample that <b>both</b> methods found — including spots the third
+method also found (those are also counted under <b>All 3</b>). So a pair column is always ≥ All 3. Darker = more spots.
+The table above counts each spot once instead (pair columns there exclude the All 3 spots).</p>
+{l3_heatmap({s: sd["level3"] for s, sd in S.items() if sd.get("level3")}, "l3")}
+
+<h3>3B · Material agreement — did the matched methods name the same material?</h3>
+<p class="caveat">⚠ Judged by an LLM ({e(model or '?')}, one call per sample) — may be inaccurate; check the notes.
+The library has no written reasoning, so for it the element list and ratios stand in for reasoning; a library region
+with no library match only ever counts as a location match.</p>
+<p class="note">Only the sets from 3A are judged. <b>Name + reasoning</b> = same material and same explanation;
+<b>Name only</b> = same material (wording may differ, e.g. hematite vs iron oxide), different explanation;
+<b>Reasoning only</b> = different names but the same chemistry / source; <b>No material match</b> = same spot,
+different material.</p>
+<div class="scroll">{table_b}</div>
+<h3>Which methods agreed (all samples)</h3>
+<div class="scroll">{table_who}</div>
+<p class="note">For <i>No material match</i> nobody agreed, so the column shows where the regions were found (3A).</p>
+<h3>Sets per sample</h3>
+{''.join(details)}"""
+
+
 # ── runs index ───────────────────────────────────────────────────────────────
 
 def write_runs_index(runs_dir: pathlib.Path):
@@ -945,12 +1274,18 @@ def write_runs_index(runs_dir: pathlib.Path):
         boxes = {m: 0 for m in r["methods"]}
         mats = {m: 0 for m in _phase_methods(r)}
         groups, shared = 0, 0
+        has_l3 = any("level3" in sd for sd in r["samples"].values())
         for sd in r["samples"].values():
             for d in sd["elements"].values():
                 for m in boxes:
                     boxes[m] += len(d["boxes"].get(m, []))
             for m in mats:
                 mats[m] += len(sd["phase"]["regions"].get(m, []))
+            if sd.get("level3"):  # new Level 3: sets found by all 3 / material matches
+                groups += sd["level3"]["counts"]["all3"]
+                shared += sum(sum(v.values()) for k, v in (sd["level3"].get("material_counts") or {}).items()
+                              if k != "none")
+                continue
             rc = sd.get("reconcile") or {}
             groups += len(rc.get("groups", []))
             shared += sum(g["agreement"] in ("all", "det+vlm") for g in rc.get("groups", []))
@@ -961,8 +1296,9 @@ def write_runs_index(runs_dir: pathlib.Path):
             f'<td>{e(str(r.get("vlm_model") or "—"))}</td><td>{e(", ".join(r["samples"]))}</td>'
             f'<td>{len(calls)}</td><td>${cost:.2f}</td>'
             f'<td{" class=err" if cut or bad else ""}>{cut} cut off · {bad} failed</td>'
-            f'<td>{groups} groups · {shared} found by det + VLM</td>'
-            f'<td><details><summary>{len(r["methods"])} methods</summary><ul class="mlist">{per}</ul></details></td></tr>')
+            + (f'<td>{groups} found by all 3 · {shared} material matches</td>' if has_l3
+               else f'<td>{groups} groups · {shared} found by det + VLM</td>')
+            + f'<td><details><summary>{len(r["methods"])} methods</summary><ul class="mlist">{per}</ul></details></td></tr>')
     page = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Benchmark runs</title>
 <style>{_CSS}</style></head><body>

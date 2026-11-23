@@ -18,3 +18,20 @@ Run from the repo root (~/Documents/github/X-AutoMap-HXN).
 
 Settings live in benchmarks/configs/compare_default.json
 (VLM model, variants, prompt suffixes, StarDist params, OpenCV config path, match IoU).
+
+Car Standalone vs OpenCV (+ LLM, + materials library) — 10-sample benchmark
+---------------------------------------------------------------------------
+Config: benchmarks/configs/car_vs_opencv_llm.json (StarDist off, OpenCV standard only,
+VLM variant car_standalone only, OpenCV + LLM on, reconciliation on).
+     pixi run python benchmarks/run_comparison.py benchmarks/configs/car_vs_opencv_llm.json
+
+Focused report (reads results.json only — no API calls, rerun any time after editing the script):
+     pixi run python benchmarks/car_vs_opencv_report.py benchmarks/runs/<timestamp>_car_vs_opencv_llm
+     xdg-open benchmarks/runs/<timestamp>_car_vs_opencv_llm/car_vs_opencv.html
+
+Rebuild every existing run's index.html after editing report.py (reads results.json only, no API calls):
+     cd benchmarks && pixi run python -c "import json,pathlib,report; [report.write_report(json.loads((d/'results.json').read_text()), d/'index.html') for d in sorted(pathlib.Path('runs').iterdir()) if (d/'results.json').exists()]; report.write_runs_index(pathlib.Path('runs'))"
+
+Level 3 (location agreement + LLM material judge, one call per sample) — runs automatically in new runs.
+To add / redo it on an existing run (backs up results.json to results.before_level3.json, rebuilds its pages):
+     pixi run python benchmarks/level3.py benchmarks/runs/<run>

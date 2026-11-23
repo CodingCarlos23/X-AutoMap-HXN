@@ -39,9 +39,9 @@
   },
   "match_iou": 0.25,
   "phase_match_overlap": 0.5,
-  "reconcile": {
+  "level3": {
     "enabled": true,
     "model": null,
-    "max_tokens": 16384
+    "max_tokens": 8192
   }
 }

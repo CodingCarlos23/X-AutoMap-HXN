@@ -57,7 +57,7 @@ from automap_hxn.feature_locator_headless import (  # noqa: E402
     _build_composite, _draw_element_boxes, _draw_zone_boxes, _save_rgb,
 )
 from report import write_report, write_runs_index  # noqa: E402
-import reconcile  # noqa: E402
+import level3  # noqa: E402
 
 VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car", "car_standalone")
 
@@ -423,7 +423,7 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         sys.exit(f"[ERROR] No scan_<id>_<element>.tiff files found under {sample_dir}")
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = (runs_root or REPO_ROOT / "benchmarks" / "runs") / f"{stamp}_{sample_dir.name}"
+    run_dir = (runs_root or REPO_ROOT / "benchmarks" / "runs") / f"{stamp}_{config.get('run_name') or sample_dir.name}"
     run_dir.mkdir(parents=True, exist_ok=True)
     match_iou = float(config.get("match_iou", 0.25))
     phase_thresh = float(config.get("phase_match_overlap", 0.5))
@@ -760,41 +760,7 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
                     phase["comparisons"][f"{mid}|{vm}"] = compare_phase(
                         phase["regions"][mid], phase["regions"][vm], phase_thresh)
 
-        # ── Level 3: one LLM pass reconciling every method's material regions ──
-        recon = None
-        rcfg = config.get("reconcile", {})
-        if (variants or llm_methods) and rcfg.get("enabled", True) and phase["regions"]:
-            r_model = rcfg.get("model") or model
-            r_provider = vlm_pipeline.get_provider(r_model)
-            r_key, r_a, r_o = (key, a_url, o_url) if r_provider == provider else vlm_pipeline.resolve_key(r_provider)
-            regs = {m: phase["regions"][m] for m in phase_methods if m in phase["regions"]}
-            prompt, id_map = reconcile.build_prompt(regs, model_input_desc, sample_context)
-            print(f"\n[{sname}] LLM material reconciliation: {len(id_map)} regions from {len(regs)} methods …")
-            (s_dir / "material_reconciliation_prompt.txt").write_text(prompt)
-            meta, t0 = {}, time.time()
-            try:
-                text = vlm_pipeline.query_llm_text(reconcile.SYSTEM, prompt, r_model, r_provider, r_key or "",
-                                                   anthropic_url=r_a, openai_url=r_o,
-                                                   max_tokens=int(rcfg.get("max_tokens", 16384)), meta=meta)
-                (s_dir / "material_reconciliation_reply.txt").write_text(text)
-                reply = reconcile.parse_reply(text)
-                meta["parse_status"] = "ok" if reply.get("groups") else "failed"
-                recon = reconcile.postprocess(reply, id_map, regs)
-                recon.update(model=r_model, prompt_file="material_reconciliation_prompt.txt",
-                             reply_file="material_reconciliation_reply.txt")
-                (s_dir / "material_reconciliation.json").write_text(json.dumps(recon, indent=2))
-                calls.append(call_record("reconcile", "reconcile", None, meta, time.time() - t0, pricing, r_model,
-                                         raw_path=str((s_dir / "material_reconciliation_reply.txt").relative_to(run_dir))))
-                print(f"  {len(recon['groups'])} material groups ({recon['n_unassigned']} not assigned by the LLM)")
-            except Exception as err:
-                msg = f"{type(err).__name__}: {err}"
-                print(f"  [ERROR] {msg}")
-                recon = {"error": msg}
-                calls.append(call_record("reconcile", "reconcile", None, meta, time.time() - t0, pricing, r_model,
-                                         error=msg))
-
-        results["samples"][sname] = {"scan_id": sample["scan_id"], "elements": elements, "phase": phase,
-                                     "reconcile": recon}
+        results["samples"][sname] = {"scan_id": sample["scan_id"], "elements": elements, "phase": phase}
 
     # overall Level-1 agreement pooled over every element
     overall = {}
@@ -831,6 +797,15 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         "calls": calls,
         "pricing_per_mtok": pricing.get(model) if (variants or llm_methods) else None,
     })
+    # ── Level 3: location agreement (code) + material agreement (one LLM judge call per sample) ──
+    l3cfg = config.get("level3", {})
+    if (variants or llm_methods) and l3cfg.get("enabled", True):
+        if level3.method_ids(phase_methods):
+            print(f"\nLevel 3: location + material agreement for {len(results['samples'])} sample(s) …")
+            calls += level3.run_level3(results, run_dir, l3cfg, model, sample_context,
+                                       pricing, workers=int(vcfg.get("max_workers", 8)))
+        else:
+            print("\nLevel 3 skipped: needs OpenCV + Library, OpenCV + LLM and Car VLM + LLM material regions")
     (run_dir / "results.json").write_text(json.dumps(results, indent=2))
     write_report(results, run_dir / "index.html")
     write_runs_index(run_dir.parent)
