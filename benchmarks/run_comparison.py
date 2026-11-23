@@ -59,7 +59,7 @@ from automap_hxn.feature_locator_headless import (  # noqa: E402
 from report import write_report, write_runs_index  # noqa: E402
 import level3  # noqa: E402
 
-VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car", "car_standalone")
+VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car", "car_standalone", "car_standalone_1px")
 
 # USD per 1M tokens (input, output) — Anthropic first-party list prices; override via config "pricing".
 DEFAULT_PRICING = {
@@ -228,9 +228,9 @@ def encode_variant(path: pathlib.Path, variant: str, elem_idx: int, vcfg: dict) 
         kw.update(red_circles=True, circle_color=cc)
     elif variant in ("flower", "car"):
         kw.update(emoji_marker=variant)
-    elif variant == "car_standalone":  # car mosaic: no OpenCV detection, native size, no upscale
-        return vlm_pipeline.encode_image_for_vlm(str(path), normalize=True, upscale=False,
-                                                 car_mosaic=int(vcfg.get("car_cell_px", 5)),
+    elif variant in ("car_standalone", "car_standalone_1px"):  # car mosaic: no OpenCV detection, no upscale
+        cell = 1 if variant == "car_standalone_1px" else int(vcfg.get("car_cell_px", 5))
+        return vlm_pipeline.encode_image_for_vlm(str(path), normalize=True, upscale=False, car_mosaic=cell,
                                                  car_stretch_pct=float(vcfg.get("car_stretch_pct", 95)))
     return vlm_pipeline.encode_image_for_vlm(str(path), **kw)
 
@@ -479,6 +479,8 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
         "car_standalone": (f"min-max, native size → one car per {vcfg.get('car_cell_px', 5)}×"
                            f"{vcfg.get('car_cell_px', 5)} px cell, opacity = cell brightness "
                            f"(stretched to p{vcfg.get('car_stretch_pct', 95)}); no OpenCV detection"),
+        "car_standalone_1px": (f"min-max, native size → one car per pixel, opacity = pixel brightness "
+                               f"(stretched to p{vcfg.get('car_stretch_pct', 95)}); no OpenCV detection"),
     }
     for v in variants:
         model_input_desc[f"vlm:{v}"] = vlm_desc[v]
