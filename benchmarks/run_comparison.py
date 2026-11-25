@@ -60,6 +60,17 @@ from report import write_report, write_runs_index  # noqa: E402
 import level3  # noqa: E402
 
 VLM_VARIANTS = ("raw", "standard", "circle", "flower", "car", "car_standalone", "car_standalone_1px")
+_CAR_N_RE = re.compile(r"^car_standalone_(\d+)px$")  # car_standalone_<N>px: car mosaic with N×N px cells
+
+
+def is_variant(v: str) -> bool:
+    return v in VLM_VARIANTS or bool(_CAR_N_RE.match(v))
+
+
+def car_cell(v: str, vcfg: dict) -> "int | None":
+    """Cell size of a car-mosaic variant (car_standalone → config car_cell_px), else None."""
+    m = _CAR_N_RE.match(v)
+    return int(m.group(1)) if m else int(vcfg.get("car_cell_px", 5)) if v == "car_standalone" else None
 
 # USD per 1M tokens (input, output) — Anthropic first-party list prices; override via config "pricing".
 DEFAULT_PRICING = {
@@ -228,8 +239,8 @@ def encode_variant(path: pathlib.Path, variant: str, elem_idx: int, vcfg: dict) 
         kw.update(red_circles=True, circle_color=cc)
     elif variant in ("flower", "car"):
         kw.update(emoji_marker=variant)
-    elif variant in ("car_standalone", "car_standalone_1px"):  # car mosaic: no OpenCV detection, no upscale
-        cell = 1 if variant == "car_standalone_1px" else int(vcfg.get("car_cell_px", 5))
+    elif car_cell(variant, vcfg):  # car mosaic: no OpenCV detection, no upscale
+        cell = car_cell(variant, vcfg)
         return vlm_pipeline.encode_image_for_vlm(str(path), normalize=True, upscale=False, car_mosaic=cell,
                                                  car_stretch_pct=float(vcfg.get("car_stretch_pct", 95)))
     return vlm_pipeline.encode_image_for_vlm(str(path), **kw)
@@ -452,7 +463,7 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
 
     # VLM
     vcfg = config.get("vlm", {})
-    variants = [] if no_vlm else [v for v in vcfg.get("variants", VLM_VARIANTS) if v in VLM_VARIANTS]
+    variants = [] if no_vlm else [v for v in vcfg.get("variants", VLM_VARIANTS) if is_variant(v)]
     model = vcfg.get("model", "claude-sonnet-4-6")
     colocate = bool(vcfg.get("llm_colocate", True))
     sample_context = vcfg.get("sample_context", "").strip()
@@ -483,7 +494,10 @@ def run(config: dict, config_path: pathlib.Path, no_vlm: bool = False,
                                f"(stretched to p{vcfg.get('car_stretch_pct', 95)}); no OpenCV detection"),
     }
     for v in variants:
-        model_input_desc[f"vlm:{v}"] = vlm_desc[v]
+        n = car_cell(v, vcfg)
+        model_input_desc[f"vlm:{v}"] = vlm_desc.get(v) or (
+            f"min-max, native size → one car per {n}×{n} px cell, opacity = cell brightness "
+            f"(stretched to p{vcfg.get('car_stretch_pct', 95)}); no OpenCV detection")
     for lm in llm_methods:
         model_input_desc[lm] = (f"no image: every per-element blob of {lm[:-4]} with its mean / max raw intensity, "
                                 "sent to the LLM co-location step")

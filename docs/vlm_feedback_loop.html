@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HXN AutoMap — VLM Feedback Loop</title>
+  <style>
+    :root {
+      --blue-70: #1a4480;
+      --blue-60: #005ea2;
+      --blue-5:  #eff6fb;
+      --gray-5:  #f0f0f0;
+      --gray-10: #e6e6e6;
+      --gray-60: #565c65;
+      --gray-90: #1b1b1b;
+      --white:   #ffffff;
+      --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+      --font-mono: "Roboto Mono", "Courier New", monospace;
+      --max-width: 1100px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      font-size: 1rem;
+      line-height: 1.6;
+      color: var(--gray-90);
+      background: var(--gray-5);
+    }
+    .site-header { background: var(--blue-70); color: white; padding: 2rem 1.5rem 1.75rem; }
+    .site-header .inner { max-width: var(--max-width); margin: 0 auto; }
+    .site-header .agency { font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; margin-bottom: 0.4rem; }
+    .site-header h1 { font-size: 1.9rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .site-header .subtitle { font-size: 0.95rem; opacity: 0.8; }
+
+    .site-nav { background: var(--blue-60); padding: 0 1.5rem; }
+    .site-nav .inner { max-width: var(--max-width); margin: 0 auto; display: flex; }
+    .site-nav a {
+      display: inline-block; padding: 0.65rem 1.1rem;
+      color: rgba(255,255,255,0.75); text-decoration: none;
+      font-size: 0.875rem; font-weight: 600;
+      border-bottom: 3px solid transparent;
+    }
+    .site-nav a.active, .site-nav a:hover { color: white; border-bottom-color: white; }
+
+    main { max-width: var(--max-width); margin: 2rem auto; padding: 0 1.5rem; }
+
+    .intro {
+      background: var(--blue-5); border-left: 4px solid var(--blue-60);
+      border-radius: 0 4px 4px 0; padding: 1rem 1.4rem; margin-bottom: 2rem;
+      font-size: 0.95rem; color: var(--gray-60);
+    }
+    .intro strong { color: var(--blue-70); }
+
+    .card {
+      background: var(--white); border-radius: 4px; border-left: 4px solid var(--blue-60);
+      padding: 1.75rem 2rem; margin-bottom: 2rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+    .card h2 { font-size: 1.25rem; font-weight: 700; color: var(--blue-70); margin-bottom: 0.6rem; }
+    .card > p { color: var(--gray-60); margin-bottom: 1rem; font-size: 0.95rem; }
+
+    .diagram-wrap {
+      background-color: #fbfcfd;
+      background-image: radial-gradient(#d5dbe3 1px, transparent 1px);
+      background-size: 18px 18px;
+      border: 1px solid var(--gray-10); border-radius: 8px;
+      padding: 2rem 1rem 1.25rem; margin: 1.25rem 0; overflow-x: auto; text-align: center;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.04);
+    }
+    /* Mermaid polish */
+    .mermaid { visibility: hidden; }
+    .mermaid[data-processed="true"] { visibility: visible; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    .mermaid .node rect, .mermaid .node polygon, .mermaid .node path,
+    .mermaid .node circle, .mermaid .node ellipse {
+      filter: drop-shadow(0 2px 3px rgba(16, 37, 66, 0.14));
+    }
+    .mermaid .cluster rect { filter: none; }
+    .mermaid .cluster-label, .mermaid .cluster-label span {
+      font-weight: 700; font-size: 11.5px; letter-spacing: 0.09em;
+    }
+    .mermaid .nodeLabel b { font-size: 14px; }
+    .mermaid .nodeLabel small { display: inline-block; margin-top: 2px; font-size: 11.5px; opacity: 0.78; font-family: var(--font-mono); }
+    .mermaid .edgeLabel, .mermaid .edgeLabel p { font-size: 12px; font-weight: 600; }
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; justify-content: center;
+      margin-top: 1rem; font-size: 0.78rem; color: var(--gray-60);
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .legend svg { width: 22px; height: 16px; }
+
+    .step-list { list-style: none; counter-reset: steps; }
+    .step-list li {
+      counter-increment: steps; display: flex; gap: 1rem;
+      margin-bottom: 1.2rem; padding-bottom: 1.2rem; border-bottom: 1px solid var(--gray-10);
+    }
+    .step-list li:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .step-list li::before {
+      content: counter(steps);
+      background: var(--blue-5); color: var(--blue-60); border: 2px solid var(--blue-60);
+      border-radius: 50%; width: 2rem; height: 2rem; min-width: 2rem;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.85rem;
+    }
+    .step-content h3 { font-size: 1rem; font-weight: 700; margin-bottom: 0.2rem; }
+    .step-content p  { font-size: 0.9rem; color: var(--gray-60); margin: 0; }
+    .step-content code {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      background: var(--gray-5); padding: 0.1em 0.4em;
+      border-radius: 3px; color: var(--blue-70);
+    }
+
+    .provider-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+    .provider-badge {
+      display: flex; align-items: flex-start; gap: 0.65rem;
+      background: var(--gray-5); border: 1px solid var(--gray-10);
+      border-radius: 4px; padding: 0.75rem 1rem; flex: 1; min-width: 190px;
+    }
+    .dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+    .dot-anthropic { background: #d35400; }
+    .dot-openai    { background: #10a37f; }
+    .dot-ollama    { background: #7b2d8b; }
+    .provider-badge strong { display: block; font-size: 0.9rem; }
+    .provider-badge span   { font-size: 0.78rem; color: var(--gray-60); font-family: var(--font-mono); }
+
+    .output-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem; margin-top: 1rem;
+    }
+    .output-card {
+      background: var(--blue-5); border: 1px solid #c9daea;
+      border-radius: 4px; padding: 0.9rem 1.1rem;
+    }
+    .output-card .fname {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      color: var(--blue-70); font-weight: 700; margin-bottom: 0.35rem;
+    }
+    .output-card p { font-size: 0.84rem; color: var(--gray-60); margin: 0; }
+
+    .file-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .file-table th {
+      text-align: left; padding: 0.65rem 1rem;
+      background: var(--blue-70); color: white; font-weight: 600;
+    }
+    .file-table td { padding: 0.65rem 1rem; border-bottom: 1px solid var(--gray-10); vertical-align: top; }
+    .file-table tr:last-child td { border-bottom: none; }
+    .file-table tr:nth-child(even) td { background: var(--blue-5); }
+    .file-table code { font-family: var(--font-mono); font-size: 0.78rem; color: var(--blue-70); }
+
+    footer {
+      background: var(--blue-70); color: rgba(255,255,255,0.65);
+      text-align: center; padding: 1.4rem; font-size: 0.84rem; margin-top: 3rem;
+    }
+    .note-banner {
+      background: #e8f4fd; border: 1px solid #b7d3f6; border-left: 6px solid var(--blue-60);
+      border-radius: 4px; padding: 1rem 1.3rem; margin-bottom: 1.5rem;
+    }
+    .note-banner p { margin: 0; font-size: 0.92rem; color: var(--gray-90); }
+    .card > p code, .intro code { font-family: var(--font-mono); font-size: 0.8rem; }
+    pre.cmd {
+      background: #1b1b1b; color: #e6e6e6; font-family: var(--font-mono); font-size: 0.8rem;
+      padding: 1rem 1.2rem; border-radius: 4px; overflow-x: auto; line-height: 1.6;
+    }
+    .todo-list { padding-left: 1.2rem; }
+    .todo-list li { font-size: 0.9rem; color: var(--gray-60); margin-bottom: 0.6rem; }
+    .todo-list strong { color: var(--gray-90); }
+  
+    .card > p code, .intro code, .file-table td code, .rule-list code { font-family: var(--font-mono); font-size: 0.8rem; }
+    .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.25rem; }
+    .rule-list { padding-left: 1.2rem; }
+    .rule-list li { font-size: 0.9rem; color: var(--gray-60); margin-bottom: 0.55rem; }
+    .rule-list strong { color: var(--gray-90); }
+    pre.snip { background: #1b1b1b; color: #e6e6e6; font-family: var(--font-mono); font-size: 0.78rem;
+      padding: 1rem 1.2rem; border-radius: 4px; overflow-x: auto; line-height: 1.55; white-space: pre-wrap; }
+    figure.example { margin: 1rem 0 0; text-align: center; }
+    figure.example img { max-width: 100%; border: 1px solid var(--gray-10); border-radius: 4px; }
+    figure.example figcaption { font-size: 0.85rem; color: var(--gray-60); margin-top: 0.4rem; }
+    .summary { background: var(--blue-5); border-left: 4px solid var(--blue-60); border-radius: 0 4px 4px 0;
+      padding: 1.25rem 1.6rem; margin-bottom: 2rem; }
+    .summary h2 { font-size: 1.2rem; color: var(--blue-70); margin-bottom: .6rem; }
+    .summary p { font-size: 0.95rem; color: var(--gray-90); margin-bottom: .7rem; }
+    .summary p:last-child { margin-bottom: 0; }
+  </style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <div class="agency">Brookhaven National Laboratory — HXN Beamline</div>
+    <h1>HXN AutoMap</h1>
+    <div class="subtitle">VLM Feedback Loop — human feedback on one sample becomes prompt memory for the next</div>
+  </div>
+</header>
+
+<nav class="site-nav">
+  <div class="inner">
+    <a href="index.html">Home</a>
+    <a href="vlm_workflow.html">VLM/LLM Workflow</a>
+    <a href="automap.html">AutoMap Pipeline</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="opencv_llm.html">OpenCV + LLM</a>
+    <a href="car_standalone.html">Car Standalone</a>
+    <a href="opencv_vlm_cleanup.html">VLM Cleanup</a>
+    <a href="vlm_feedback_loop.html" class="active">Feedback Loop</a>
+    <a href="tuner.html">Tuner</a>
+    <a href="../benchmarks/runs/index.html" target="_blank" rel="noopener" title="All benchmark run reports (local only — benchmarks/runs/ is gitignored)">Benchmark Results</a>
+  </div>
+</nav>
+
+<main>
+
+  <div class="intro">
+    <strong>What this is:</strong> a design for a human-in-the-loop feedback memory for the VLM methods (Car Standalone,
+    raw and the other variants). The VLM boxes particles on sample 0; in a local web app the user marks which boxes are
+    good or bad and circles the particles it missed, with a short explanation. That feedback is saved with the composite
+    image and distilled into short written lessons, which are added to the prompt when the VLM runs on sample 1. It is a
+    form of prompt engineering, not training: the model does not change, it reads its own past mistakes. <b>Design only:
+    not built yet.</b>
+  </div>
+
+  <div class="card">
+    <h2>Workflow: Input to Output</h2>
+    <p>One loop per sample: run → review → save → distill → run the next sample with memory, and measure whether it helped.</p>
+    <div class="diagram-wrap">
+      <pre class="mermaid">
+flowchart TB
+    subgraph IN["① SAMPLE 0 — first run, no memory"]
+        direction LR
+        TIF@{ shape: docs, label: "<b>Element TIFFs</b><br/><small>sample 0 · 14 elements</small>" }
+        RUN{{"<b>VLM detection</b><br/><small>Car Standalone · raw · …<br/>one call per element</small>"}}
+        COMP("<b>Composite + boxes</b><br/><small>all-element RGB composite<br/>VLM boxes colour-coded by element</small>")
+        TIF e1@==> RUN e2@==> COMP
+    end
+
+    subgraph GUI["② REVIEW — local web app (HTML + small Python server)"]
+        direction LR
+        G1("<b>Good</b><br/><small>click a box ✓<br/>+ optional comment</small>")
+        G2("<b>Bad</b><br/><small>click a box ✗<br/>+ reason: noise · merged · too big</small>")
+        G3("<b>Missed</b><br/><small>draw a circle<br/>+ explanation</small>")
+        G1 ~~~ G2 ~~~ G3
+    end
+
+    subgraph SAVE["③ SAVE — feedback/sessions/{session}/automap&#95;0/"]
+        direction LR
+        S1@{ shape: doc, label: "<b>vlm&#95;run.json</b><br/><small>what the VLM found</small>" }
+        S2@{ shape: doc, label: "<b>annotations.json</b><br/><small>good · bad · missed<br/>boxes, circles, text</small>" }
+        S3@{ shape: doc, label: "<b>composite&#95;annotated.png</b><br/><small>VLM boxes + user marks</small>" }
+        S1 ~~~ S2 ~~~ S3
+    end
+
+    subgraph MEM["④ MEMORY — feedback/memory/ (prompt engineering, no training)"]
+        direction LR
+        M1[("<b>feedback&#95;log.jsonl</b><br/><small>every item ever · append-only</small>")]
+        M2{{"<b>LLM distills lessons</b><br/><small>one call: feedback → short rules</small>"}}
+        M3@{ shape: doc, label: "<b>lessons.md</b><br/><small>e.g. 'faint halos next to bright Fe<br/>are real particles' · versioned</small>" }
+        M4@{ shape: docs, label: "<b>examples/</b><br/><small>small composite crops<br/>good · bad · missed</small>" }
+        M1 e6@==> M2 e7@==> M3
+        M1 -.-> M4
+    end
+
+    subgraph NEXT["⑤ SAMPLE 1 — run again, two ways"]
+        direction LR
+        N1{{"<b>VLM + memory</b><br/><small>prompt + lessons.md<br/>+ a few example crops</small>"}}
+        N2{{"<b>VLM without memory</b><br/><small>same prompt as sample 0<br/>(control)</small>"}}
+        N1 ~~~ N2
+    end
+
+    subgraph EVAL["⑥ MEASURE — did memory help?"]
+        direction LR
+        E1("<b>Annotate sample 1</b><br/><small>same review GUI<br/>= ground truth</small>")
+        E2("<b>Score both runs</b><br/><small>precision · recall · F1<br/>vs the annotations</small>")
+        E3@{ shape: doc, label: "<b>evaluations/…json</b><br/><small>with vs without memory</small>" }
+        E1 e10@==> E2 e11@==> E3
+    end
+
+    COMP e3@==> GUI
+    GUI e4@==> SAVE
+    SAVE e5@==> M1
+    M3 e8@==> N1
+    M4 -.-> N1
+    N1 e9@==> E2
+    N2 -.-> E2
+    E3 -. "new feedback → next loop" .-> M1
+
+    e1@{ animate: true }
+    e2@{ animate: true }
+    e3@{ animate: true }
+    e4@{ animate: true }
+    e5@{ animate: true }
+    e6@{ animate: true }
+    e7@{ animate: true }
+    e8@{ animate: true }
+    e9@{ animate: true }
+    e10@{ animate: true }
+    e11@{ animate: true }
+
+    classDef input  fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px,color:#1b5e20
+    classDef proc   fill:#ffffff,stroke:#005ea2,stroke-width:1.5px,color:#1a4480
+    classDef store  fill:#e8f4fd,stroke:#005ea2,stroke-width:2px,color:#1a4480
+    classDef out    fill:#fce4ec,stroke:#880e4f,stroke-width:1.5px,color:#5c0a33
+    classDef ai     fill:#1a4480,stroke:#0b2a55,stroke-width:1.5px,color:#ffffff
+    classDef good   fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef bad    fill:#fdecea,stroke:#b71c1c,stroke-width:2px,color:#7f0000
+    classDef miss   fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#7a2e00
+    classDef ctrl   fill:#ffffff,stroke:#8a929c,stroke-width:1.5px,stroke-dasharray:5 4,color:#565c65
+    class TIF input
+    class COMP,E1,E2 proc
+    class RUN,M2,N1 ai
+    class N2 ctrl
+    class G1 good
+    class G2 bad
+    class G3 miss
+    class S1,S2,S3,M3,M4,E3 out
+    class M1 store
+    style IN fill:#f4faf4,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:6 4,color:#2e7d32
+    style GUI fill:#fffaf3,stroke:#e65100,stroke-width:1px,stroke-dasharray:6 4,color:#e65100
+    style SAVE fill:#fdf5f8,stroke:#880e4f,stroke-width:1px,stroke-dasharray:6 4,color:#880e4f
+    style MEM fill:#f5f7fd,stroke:#005ea2,stroke-width:1px,stroke-dasharray:6 4,color:#005ea2
+    style NEXT fill:#f5f7fd,stroke:#3f51b5,stroke-width:1px,stroke-dasharray:6 4,color:#3f51b5
+    style EVAL fill:#f4faf4,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:6 4,color:#2e7d32
+      </pre>
+    </div>
+    <div class="legend">
+      <span><svg viewBox="0 0 22 16"><path d="M2 2h18v10q-4.5 4-9 0t-9 0z" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>File / artifact</span>
+      <span><svg viewBox="0 0 22 16"><ellipse cx="11" cy="3.5" rx="8" ry="2.5" fill="#fff" stroke="#565c65" stroke-width="1.4"/><path d="M3 3.5v9q8 5 16 0v-9" fill="none" stroke="#565c65" stroke-width="1.4"/></svg>Data store</span>
+      <span><svg viewBox="0 0 22 16"><rect x="2" y="2" width="18" height="12" rx="3" fill="#fff" stroke="#565c65" stroke-width="1.4"/></svg>Process / GUI action</span>
+      <span><svg viewBox="0 0 22 16"><path d="M6 2h10l4 6-4 6H6L2 8z" fill="#1a4480" stroke="#0b2a55" stroke-width="1.4"/></svg>VLM / LLM call</span>
+      <span><svg viewBox="0 0 22 16"><rect x="2" y="2" width="18" height="12" rx="3" fill="#fff" stroke="#8a929c" stroke-width="1.4" stroke-dasharray="3 2"/></svg>Control run</span>
+      <span><svg viewBox="0 0 22 16"><path d="M1 8h20" stroke="#005ea2" stroke-width="2" stroke-dasharray="4 3"/></svg>Main path (animated)</span>
+      <span><svg viewBox="0 0 22 16"><path d="M1 8h20" stroke="#8a929c" stroke-width="1.6" stroke-dasharray="2 3"/></svg>Side input / next loop</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>How It Works, Step by Step</h2>
+    <ol class="step-list">
+      <li><div class="step-content"><h3>First run on sample 0</h3><p>The chosen VLM method (Car Standalone, raw, …) boxes every element as in the benchmarks. All elements' boxes are drawn on the all-element RGB composite, colour-coded by element, so one image holds the whole result.</p></div></li>
+      <li><div class="step-content"><h3>Review in a local web app</h3><p>A browser page served by a small Python server (FastAPI or Flask) on your own machine. Click a box to mark it <b>good</b> (optional comment) or <b>bad</b> (reason: noise, two particles merged, too big, …); draw a <b>circle</b> around a particle the VLM missed and type why it is real. A PyQt tab in the LLM JSON Maker can use the same files later for the beamline.</p></div></li>
+      <li><div class="step-content"><h3>Save the feedback</h3><p><code>annotations.json</code> holds every mark in fractional coordinates (circles also stored as a box, so they can be scored like VLM boxes), next to <code>vlm_run.json</code> and <code>composite_annotated.png</code>: the composite with the VLM's boxes and your marks.</p></div></li>
+      <li><div class="step-content"><h3>Distill lessons (memory)</h3><p>Every feedback item is appended to <code>feedback_log.jsonl</code>. One LLM call turns it into a few short rules in <code>lessons.md</code>, the prompt engineering part: rules are small, while raw feedback grows forever. Each version is kept, so any run can say which memory it used. A few small composite crops (good, bad, missed) are saved as examples.</p></div></li>
+      <li><div class="step-content"><h3>Run sample 1 with and without memory</h3><p>The memory run adds <code>lessons.md</code> and a few example crops to the prompt; the control run uses the original prompt. Same model, same images, so the only difference is the memory.</p></div></li>
+      <li><div class="step-content"><h3>Measure</h3><p>Sample 1 is annotated in the same GUI and becomes ground truth. Both runs are scored against it (precision, recall, F1). Only this comparison shows whether memory helped; the new feedback then feeds the next loop.</p></div></li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Files</h2>
+    <table class="file-table">
+      <tr><th>File</th><th>What it holds</th></tr>
+      <tr><td><code>feedback/sessions/&lt;session&gt;/session.json</code></td><td>Model, VLM method, prompt, sample, memory version used</td></tr>
+      <tr><td><code>…/automap_0/vlm_run.json</code></td><td>The VLM's boxes per element (what it found)</td></tr>
+      <tr><td><code>…/automap_0/annotations.json</code></td><td>Good / bad / missed marks with comments and coordinates</td></tr>
+      <tr><td><code>…/automap_0/composite_annotated.png</code></td><td>Composite with the VLM boxes and the user's marks</td></tr>
+      <tr><td><code>feedback/memory/feedback_log.jsonl</code></td><td>Every feedback item ever, append-only</td></tr>
+      <tr><td><code>feedback/memory/lessons.md</code> (+ <code>lessons_history/</code>)</td><td>Distilled rules added to prompts; every version kept</td></tr>
+      <tr><td><code>feedback/memory/examples/</code></td><td>Small composite crops used as few-shot examples</td></tr>
+      <tr><td><code>feedback/evaluations/…json</code></td><td>With-memory vs without-memory scores on the next sample</td></tr>
+    </table>
+  </div>
+
+  <div class="summary">
+    <h2>Summary</h2>
+    <p><b>The feedback loop turns one round of human review into prompt memory for the next sample.</b> The user marks what the VLM got right, got wrong and missed on the composite; an LLM distills that into short lessons; the next run reads them. The model never changes, so the gain is limited to what fits in a prompt, and image examples cost tokens, so they stay few and small.</p>
+    <p>Improvement is a hypothesis until measured: every memory run is paired with a no-memory control on the same sample and scored against that sample's own annotations. This is also the first concrete form of the project's planned LLM <code>memory.md</code> (TODO #3).</p>
+  </div>
+
+</main>
+
+<footer>HXN AutoMap &mdash; Brookhaven National Laboratory</footer>
+
+<script src="mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '"Public Sans", system-ui, -apple-system, sans-serif',
+      fontSize: '14px',
+      primaryColor: '#ffffff', primaryBorderColor: '#005ea2', primaryTextColor: '#1a4480',
+      lineColor: '#6b7684', secondaryColor: '#f0f0f0', tertiaryColor: '#f7f9fb',
+      clusterBkg: '#f7f9fb', clusterBorder: '#c9d3df',
+      edgeLabelBackground: '#ffffff',
+    },
+    flowchart: { curve: 'basis', padding: 14, nodeSpacing: 34, rankSpacing: 46, htmlLabels: true }
+  });
+</script>
+<script src="export.js"></script>
+</body>
+</html>

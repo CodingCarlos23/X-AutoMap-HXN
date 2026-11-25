@@ -1,0 +1,48 @@
+{
+  "run_name": "car_cell_sweep",
+  "sample_dir": "benchmarks/test_samples/10 Samples/automap_0",
+  "elements": [],
+  "automap_config": "benchmarks/configs/live_scan_demo_2by2_3groups_intensity_filter_noAr.json",
+  "automap_raw": false,
+  "stardist": {
+    "enabled": false,
+    "model_name": "2D_versatile_fluo",
+    "prob_thresh": 0.5,
+    "nms_thresh": 0.4,
+    "min_size": 10
+  },
+  "vlm": {
+    "model": "claude-sonnet-4-6",
+    "variants": [
+      "raw",
+      "car_standalone_1px",
+      "car_standalone_2px",
+      "car_standalone_3px",
+      "car_standalone_4px",
+      "car_standalone_5px",
+      "car_standalone_10px"
+    ],
+    "normalize": true,
+    "upscale": true,
+    "car_cell_px": 5,
+    "car_stretch_pct": 95,
+    "max_workers": 8,
+    "llm_colocate": true,
+    "opencv_llm": false,
+    "sample_context": "urban aerosol PM",
+    "prompt_suffix": {
+      "raw": "",
+      "car_standalone_1px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per pixel of the scan. The more opaque (darker red) a car, the stronger the element signal at that pixel; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car.",
+      "car_standalone_2px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per 2×2-pixel patch of the scan. The more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car.",
+      "car_standalone_3px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per 3×3-pixel patch of the scan. The more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car.",
+      "car_standalone_4px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per 4×4-pixel patch of the scan. The more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car.",
+      "car_standalone_5px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per 5×5-pixel patch of the scan. The more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car.",
+      "car_standalone_10px": "In this image the scan has been redrawn as a grid of car emoji on a white background, one car per 10×10-pixel patch of the scan. The more opaque (darker red) a car, the stronger the element signal in that patch; faint or invisible cars are background. A particle is a cluster of neighbouring opaque cars: draw ONE box around each cluster, not around each car."
+    }
+  },
+  "match_iou": 0.25,
+  "phase_match_overlap": 0.5,
+  "level3": {
+    "enabled": false
+  }
+}

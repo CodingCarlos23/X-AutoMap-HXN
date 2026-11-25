@@ -664,6 +664,55 @@ def query_vlm_features(img_b64: str, system_prompt: str, model: str, provider: s
     return parsed.get("features", [])
 
 
+def query_vlm_text(img_b64: str, system: str, prompt: str, model: str, provider: str, key: str = "",
+                   anthropic_url: str = ANTHROPIC_API_URL, openai_url: str = OPENAI_API_URL,
+                   max_tokens: int = 16384, meta: "dict | None" = None) -> str:
+    """One image + a custom text prompt → reply text (unlike query_vlm_features, which uses a fixed prompt
+    and parses features). Fills `meta` like query_vlm_features."""
+    if provider == "anthropic":
+        data = _post(anthropic_url, {
+            "model": model, "max_tokens": max_tokens, "system": system,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                {"type": "text", "text": prompt},
+            ]}],
+        }, {"Content-Type": "application/json", "x-api-key": key,
+            "anthropic-version": ANTHROPIC_API_VERSION})
+        text = _anthropic_text(data) or "{}"
+    elif provider == "openai":
+        is_responses_api = openai_url.rstrip("/").endswith("/responses")
+        auth_header = {"x-api-key": key} if is_responses_api else {"Authorization": f"Bearer {key}"}
+        headers = {"Content-Type": "application/json", **auth_header}
+        if is_responses_api:
+            data = _post(openai_url, {
+                "model": model, "instructions": system, "max_output_tokens": max_tokens,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"},
+                    {"type": "input_text", "text": prompt},
+                ]}],
+            }, headers)
+            text = parse_responses_text(data)
+        else:
+            data = _post(openai_url, {
+                "model": model, "max_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {"type": "text", "text": prompt},
+                ]}],
+            }, headers)
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+    else:  # Ollama
+        data = _post(OLLAMA_URL, {
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": prompt, "images": [img_b64]}],
+            "stream": False, "format": "json",
+        }, {"Content-Type": "application/json"})
+        text = data.get("message", {}).get("content", "{}")
+    _fill_meta(meta, provider, data, text)
+    return text
+
+
 def query_llm_text(system: str, prompt: str, model: str, provider: str, key: str = "",
                    anthropic_url: str = ANTHROPIC_API_URL, openai_url: str = OPENAI_API_URL,
                    max_tokens: int = 16384, meta: "dict | None" = None) -> str:
@@ -678,11 +727,18 @@ def query_llm_text(system: str, prompt: str, model: str, provider: str, key: str
     elif provider == "openai":
         is_responses_api = openai_url.rstrip("/").endswith("/responses")
         auth_header = {"x-api-key": key} if is_responses_api else {"Authorization": f"Bearer {key}"}
-        data = _post(openai_url, {
-            "model": model, "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        }, {"Content-Type": "application/json", **auth_header})
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        if is_responses_api:  # NSLS-II gateway: GPT models only speak the Responses API
+            data = _post(openai_url, {
+                "model": model, "instructions": system, "max_output_tokens": max_tokens,
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            }, {"Content-Type": "application/json", **auth_header})
+            text = parse_responses_text(data) or "{}"
+        else:
+            data = _post(openai_url, {
+                "model": model, "max_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            }, {"Content-Type": "application/json", **auth_header})
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
     else:  # Ollama
         data = _post(OLLAMA_URL, {
             "model": model,

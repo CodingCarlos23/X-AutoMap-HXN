@@ -857,6 +857,7 @@ AutoMap config: {e(pathlib.Path(results.get('automap_config', '')).name)}</div><
 <nav><a href="#counts">Detections</a><a href="#agreement">Box agreement</a><a href="#images">Detection viewer</a>
 <a href="#phase">Phase / material</a><a href="#reconcile">Level 3 agreement</a><a href="#calls">API calls &amp; cost</a><a href="#prompts">Prompts</a><a href="#timing">Timing</a></nav>
 <main>
+{_cleanup_banner(results)}
 <section id="counts"><h2>Level 1 · Detections per element</h2>
 <p class="note">AutoMap counts come from <code>MASTER_raw_detections.json</code>; VLM counts from each variant's
 <code>_multi_features.json</code>. Hover an <i>error</i> cell for the message.
@@ -960,6 +961,17 @@ see the Phase section for its total time.</p>
 
 
 # ── API calls & cost ─────────────────────────────────────────────────────────
+
+def _cleanup_banner(results: dict) -> str:
+    """Runs made by opencv_vlm_cleanup.py: point to their own 3-panel page (this page has no VLM boxes)."""
+    if not any(sd.get("vlm_cleanup") for sd in results.get("samples", {}).values()):
+        return ""
+    return ('<section style="border-left:5px solid #1baf7a"><h2>This run is the OpenCV + Library + VLM cleanup workflow</h2>'
+            '<p class="note">This page is the standard OpenCV / material-library detail report. The workflow result '
+            '— initial OpenCV boxes, material-library boxes and the VLM-cleaned boxes side by side — is on its own '
+            'page:</p><p style="font-size:1.05rem"><a href="opencv_vlm_cleanup.html"><b>Open the 3-panel VLM cleanup '
+            'page →</b></a></p></section>')
+
 
 def _reply_link(c: dict) -> str:
     if c.get("raw_reply"):
@@ -1291,14 +1303,41 @@ def write_runs_index(runs_dir: pathlib.Path):
             shared += sum(g["agreement"] in ("all", "det+vlm") for g in rc.get("groups", []))
         per = "".join(f"<li>{e(_label(m))}: {boxes.get(m, '—')} boxes · {mats[m]} materials</li>"
                       for m in _phase_methods(r))
+        cl = [sd["vlm_cleanup"]["stats"] for sd in r["samples"].values() if sd.get("vlm_cleanup")]
+        link = (f'<a href="{e(rd.name)}/opencv_vlm_cleanup.html">{e(rd.name)}</a>'
+                f'<div class="sub">VLM cleanup workflow · <a href="{e(rd.name)}/index.html">OpenCV details</a></div>'
+                if cl else f'<a href="{e(rd.name)}/index.html">{e(rd.name)}</a>')
         rows.append(
-            f'<tr><td><a href="{e(rd.name)}/index.html">{e(rd.name)}</a></td><td>{e(r.get("created", ""))}</td>'
+            f'<tr><td>{link}</td><td>{e(r.get("created", ""))}</td>'
             f'<td>{e(str(r.get("vlm_model") or "—"))}</td><td>{e(", ".join(r["samples"]))}</td>'
             f'<td>{len(calls)}</td><td>${cost:.2f}</td>'
             f'<td{" class=err" if cut or bad else ""}>{cut} cut off · {bad} failed</td>'
-            + (f'<td>{groups} found by all 3 · {shared} material matches</td>' if has_l3
+            + (f'<td>VLM cleanup: {sum(x["library_regions"] for x in cl)} library regions → '
+               f'{sum(x["vlm_boxes"] for x in cl)} boxes · overlaps {sum(x["overlap_pairs_library"] for x in cl)} → '
+               f'{sum(x["overlap_pairs_vlm"] for x in cl)} · {sum(x["undetected"] for x in cl)} undetected</td>' if cl
+               else f'<td>{groups} found by all 3 · {shared} material matches</td>' if has_l3
                else f'<td>{groups} groups · {shared} found by det + VLM</td>')
             + f'<td><details><summary>{len(r["methods"])} methods</summary><ul class="mlist">{per}</ul></details></td></tr>')
+    # model sweeps: one sub-run per model, so no results.json at the top — listed from sweep.json
+    for sd_ in sorted((d for d in runs_dir.iterdir() if (d / "sweep.json").exists()), reverse=True):
+        try:
+            sw = json.loads((sd_ / "sweep.json").read_text())
+        except Exception:
+            continue
+        ms = [m for m in sw.get("models", []) if not m.get("excluded")]
+        calls_n = cost_s = 0.0
+        for m in ms:
+            rp = sd_ / str(m.get("folder")) / "results.json"
+            if m.get("folder") and rp.exists():
+                rr = json.loads(rp.read_text())
+                calls_n += len(rr.get("calls", []))
+                cost_s += sum(c.get("cost_usd") or 0 for c in rr.get("calls", []))
+        rows.append(
+            f'<tr><td><a href="{e(sd_.name)}/model_sweep.html">{e(sd_.name)}</a><div class="sub">model sweep · '
+            f'{len(ms)} models</div></td><td>{e(sw.get("created", ""))}</td><td>{e(", ".join(m["model"] for m in ms))}</td>'
+            f'<td>—</td><td>{calls_n:.0f}</td><td>${cost_s:.2f} <span class="sub">(priced models only)</span></td>'
+            f'<td>—</td><td>baseline: {e(str(sw.get("baseline")))}</td><td>—</td></tr>')
+    rows.sort(key=lambda h: h.split('href="', 1)[1][:15], reverse=True)  # newest first, by run timestamp
     page = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Benchmark runs</title>
 <style>{_CSS}</style></head><body>

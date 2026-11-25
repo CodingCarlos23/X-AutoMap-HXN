@@ -2,7 +2,7 @@
   "run_name": "raw_vs_car1px",
   "sample_dir": "benchmarks/test_samples/10 Samples/automap_0",
   "elements": [],
-  "automap_config": "benchmarks/configs/live_scan_demo_2by2_3groups_intensity_filter.json",
+  "automap_config": "benchmarks/configs/live_scan_demo_2by2_3groups_intensity_filter_noAr.json",
   "automap_raw": false,
   "stardist": {
     "enabled": false,

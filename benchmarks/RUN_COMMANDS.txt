@@ -35,3 +35,14 @@ Rebuild every existing run's index.html after editing report.py (reads results.j
 Level 3 (location agreement + LLM material judge, one call per sample) — runs automatically in new runs.
 To add / redo it on an existing run (backs up results.json to results.before_level3.json, rebuilds its pages):
      pixi run python benchmarks/level3.py benchmarks/runs/<run>
+
+OpenCV + Library + VLM cleanup (sample 1) — docs/opencv_vlm_cleanup.html
+------------------------------------------------------------------------
+Steps 1–2 (OpenCV + library) are free; step 3 is one VLM call per sample.
+     pixi run python benchmarks/opencv_vlm_cleanup.py benchmarks/configs/opencv_vlm_cleanup.json
+Free check first (no API call): add --dry-run (and --out-dir /tmp/ovc_dry to keep it out of runs/)
+Redo only the VLM step on an existing run:
+     pixi run python benchmarks/opencv_vlm_cleanup.py --cleanup-only benchmarks/runs/<run>
+Rebuild the report (free):
+     pixi run python benchmarks/opencv_vlm_cleanup_report.py benchmarks/runs/<run>
+     xdg-open benchmarks/runs/<run>/opencv_vlm_cleanup.html
